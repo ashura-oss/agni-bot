@@ -15,7 +15,12 @@ import { CATALOG, manifestFor } from "../src/plugins/catalog";
 import { mailCredentialsFromPlugins, pluginMailResolver } from "../src/plugins/credentials";
 import { resolveMailConfig } from "../src/tools/mail";
 import type { Config } from "../src/config";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+/** A private scratch directory per run, never a fixed path under the shared temp root. */
+const pluginsDir = mkdtempSync(join(tmpdir(), "agni-plugins-test-"));
 
 function fakeConfig(overrides: Partial<Config> = {}): Config {
   return {
@@ -50,7 +55,7 @@ function harness(
   const states: ServerFrameBody[] = [];
   const calls: { url: string; init?: RequestInit }[] = [];
   let step = 0;
-  const pluginsPath = "/tmp/agni-plugins-test.json";
+  const pluginsPath = join(pluginsDir, "agni-plugins-test.json");
   writeFileSync(pluginsPath, JSON.stringify({
     version: 1,
     oauthClients: { google: { clientID: "test-client-id", clientSecret: "test-client-secret" } },
@@ -120,7 +125,7 @@ describe("plugin connect flow", () => {
 
   test("configuring an app-password plugin stores the credentials and connects it", () => {
     const db = openDatabase(":memory:");
-    const pluginsPath = "/tmp/agni-plugins-configure-test.json";
+    const pluginsPath = join(pluginsDir, "agni-plugins-configure-test.json");
     writeFileSync(pluginsPath, JSON.stringify({ version: 1, plugins: {} }));
     const service = new PluginService({ config: fakeConfig(), db, emit: () => {}, pluginsPath });
 
@@ -142,7 +147,7 @@ describe("plugin connect flow", () => {
 
   test("configuring without the required fields is refused, and nothing is stored", () => {
     const db = openDatabase(":memory:");
-    const pluginsPath = "/tmp/agni-plugins-configure-empty-test.json";
+    const pluginsPath = join(pluginsDir, "agni-plugins-configure-empty-test.json");
     writeFileSync(pluginsPath, JSON.stringify({ version: 1, plugins: {} }));
     const service = new PluginService({ config: fakeConfig(), db, emit: () => {}, pluginsPath });
 
@@ -156,7 +161,7 @@ describe("plugin connect flow", () => {
 
   test("configuring an OAuth plugin stores the Google client and starts the grant", () => {
     const db = openDatabase(":memory:");
-    const pluginsPath = "/tmp/agni-plugins-configure-oauth-test.json";
+    const pluginsPath = join(pluginsDir, "agni-plugins-configure-oauth-test.json");
     writeFileSync(pluginsPath, JSON.stringify({ version: 1, plugins: {} }));
     const service = new PluginService({ config: fakeConfig(), db, emit: () => {}, pluginsPath });
 
@@ -274,7 +279,7 @@ describe("oauth callback", () => {
   test("state survives a fresh service over the same database", async () => {
     const db = openDatabase(":memory:");
     const states: ServerFrameBody[] = [];
-    const pluginsPath = "/tmp/agni-plugins-test.json";
+    const pluginsPath = join(pluginsDir, "agni-plugins-test.json");
     writeFileSync(pluginsPath, JSON.stringify({
       version: 1,
       oauthClients: { google: { clientID: "test-client-id", clientSecret: "test-client-secret" } },
@@ -430,7 +435,7 @@ describe("plugin connection store", () => {
 });
 
 describe("plugin credentials reach the tools", () => {
-  const pluginsPath = "/tmp/agni-plugins-credentials-test.json";
+  const pluginsPath = join(pluginsDir, "agni-plugins-credentials-test.json");
 
   function writePlugins(entry: unknown): void {
     writeFileSync(pluginsPath, JSON.stringify({ version: 1, plugins: entry ? { gmail: entry } : {} }));

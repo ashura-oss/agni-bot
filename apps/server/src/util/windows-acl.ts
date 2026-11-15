@@ -43,9 +43,11 @@ export async function currentUserSidAsync(): Promise<string> {
 }
 
 /** Drop inherited access and grant full control to the current user only. */
-function icaclsArgs(path: string, sid: string, isDirectory: boolean): string[] {
+export function icaclsArgs(path: string, sid: string, isDirectory: boolean): string[] {
+  // icacls reads a leading "/" as a switch ("/tmp" is not a path to it), so
+  // the target is always a drive-absolute path.
   // (OI)(CI) makes files created later in a directory inherit owner-only access.
-  return [path, "/inheritance:r", "/grant:r", `*${sid}:${isDirectory ? "(OI)(CI)" : ""}F`];
+  return [win32.resolve(path),"/inheritance:r", "/grant:r", `*${sid}:${isDirectory ? "(OI)(CI)" : ""}F`];
 }
 
 /** Windows: owner-only ACL on `path`. Elsewhere: nothing (callers keep their chmod). */

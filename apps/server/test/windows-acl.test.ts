@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
-import { parseSid, windowsSystemTool } from "../src/util/windows-acl";
+import { icaclsArgs, parseSid, windowsSystemTool } from "../src/util/windows-acl";
 
 describe("windowsSystemTool", () => {
   test("resolves under SystemRoot\\System32 from the environment", () => {
@@ -13,6 +13,16 @@ describe("windowsSystemTool", () => {
     for (const env of [{}, { SystemRoot: "" }, { SystemRoot: "Windows" }, { SystemRoot: "..\\evil" }, { SystemRoot: "\\\\host\\share" }]) {
       expect(windowsSystemTool("whoami", env)).toBe("C:\\Windows\\System32\\whoami.exe");
     }
+  });
+});
+
+describe("icaclsArgs", () => {
+  test.skipIf(process.platform !== "win32")("never hands icacls a leading-slash path it would read as a switch", () => {
+    for (const path of ["/tmp/x", "\\tmp\\x", "relative\\dir"]) {
+      expect(icaclsArgs(path, "S-1-5-21-1-2-3-1001", true)[0]).toMatch(/^[A-Za-z]:\\/);
+    }
+    expect(icaclsArgs("C:\\a\\b", "S-1-5-21-1-2-3-1001", true)).toEqual(["C:\\a\\b", "/inheritance:r", "/grant:r", "*S-1-5-21-1-2-3-1001:(OI)(CI)F"]);
+    expect(icaclsArgs("C:\\a\\f.txt", "S-1-5-21-1-2-3-1001", false).at(-1)).toBe("*S-1-5-21-1-2-3-1001:F");
   });
 });
 
