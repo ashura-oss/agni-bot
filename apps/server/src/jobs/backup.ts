@@ -6,6 +6,7 @@ import type { Database } from "bun:sqlite";
 import { chmodSync, existsSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { enqueueJob } from "../stores/jobs";
+import { restrictToOwnerOnWindows } from "../util/windows-acl";
 import type { JobRunner } from "./runner";
 import { nextDailyRun } from "./schedule";
 
@@ -20,6 +21,8 @@ export function runBackup(db: Database, opts: BackupOptions = {}, now: Date = ne
   const keep = opts.keep ?? (Number.parseInt(Bun.env.AGNI_BACKUP_KEEP ?? "", 10) || 7);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
+  // Windows has no mode bits: owner-only ACL on the directory, inherited by each copy.
+  restrictToOwnerOnWindows(dir, true);
   const file = join(dir, `agni-${now.toISOString().slice(0, 10).replaceAll("-", "")}.db`);
   if (!existsSync(file)) {
     db.run(`VACUUM INTO '${file.replaceAll("'", "''")}'`);

@@ -28,6 +28,21 @@
 import { chmodSync, closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
 import { log } from "../log";
+import { restrictToOwnerOnWindows } from "../util/windows-acl";
+
+/** Directories already given the Windows owner-only ACL by this process. */
+const securedDirs = new Set<string>();
+
+/**
+ * Windows has no mode bits, so the 0700/0600 below do nothing there. Give the
+ * directory an owner-only ACL once per process: the config, its temp file and
+ * the `.corrupt` copy all live in it and inherit it.
+ */
+function secureDirOnWindows(dir: string): void {
+  if (process.platform !== "win32" || securedDirs.has(dir)) return;
+  restrictToOwnerOnWindows(dir, true);
+  securedDirs.add(dir);
+}
 
 /** Configs loaded from an unreadable file: saving one would wipe the stored credentials. */
 const unreadable = new WeakSet<PluginsFile>();
@@ -81,7 +96,11 @@ export function loadPluginsFile(path: string): PluginsFile {
     // fall through: treat as unreadable below
   }
   // Run with no plugins, but never save over the file: it may hold the only copy of the tokens.
-  try { copyFileSync(path, `${path}.corrupt`); chmodSync(`${path}.corrupt`, 0o600); } catch { /* best effort */ }
+  try {
+    secureDirOnWindows(dirname(path));
+    copyFileSync(path, `${path}.corrupt`);
+    chmodSync(`${path}.corrupt`, 0o600);
+  } catch { /* best effort */ }
   log.error(`plugins file ${path} is unreadable; kept a copy at ${path}.corrupt and will not overwrite it`);
   const empty = emptyPluginsFile();
   unreadable.add(empty);
@@ -94,6 +113,7 @@ export function savePluginsFile(path: string, config: PluginsFile): void {
   }
   const dir = dirname(path);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true, mode: 0o700 });
+  secureDirOnWindows(dir);
   // Write a private temp file, flush it, then rename: a crash leaves the old file or the new one, never half.
   const tmp = `${path}.${process.pid}.tmp`;
   const fd = openSync(tmp, "w", 0o600);
