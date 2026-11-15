@@ -2,7 +2,7 @@
   "name": "agni-bot",
   "version": "0.1.1",
   "description": "Agni Bot: message your own named AI bots from the browser. Self-hosted, runs on Bun.",
-  "license": "UNLICENSED",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "type": "module",
   "bin": {
     "agni": "apps/server/src/index.ts"

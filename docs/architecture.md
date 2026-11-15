@@ -10,7 +10,7 @@ behaviour.
 **Agni Bot** is a messaging app for bots. The owner talks to named, specialised
 bots, each with its own role and memory, in one continuous conversation per
 bot. The app values performance over UI polish. The project is
-source-available, not open source.
+source-available and free for non-commercial use (`LICENSE.md`).
 
 ## Shape
 

@@ -8,8 +8,9 @@ and a Gmail mailbox for the agent. Full plan:
 [`docs/blueprint-v3.html`](docs/blueprint-v3.html). Doc index:
 [`docs/README.md`](docs/README.md).
 
-**Source-available, not open source.** License terms are being finalised and
-are not yet in this repo.
+**Source-available, free for non-commercial use.** Anyone may use, fork, and
+modify it; selling it or using it commercially is not allowed. See
+[`LICENSE.md`](LICENSE.md) (PolyForm Noncommercial 1.0.0).
 
 ## Layout
 
