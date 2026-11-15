@@ -22,7 +22,9 @@ afterEach(() => {
   db = undefined;
 });
 
-const skew = (ms: number): void => setSystemTime(new Date(Date.now() + ms));
+const skew = (ms: number): void => {
+  setSystemTime(new Date(Date.now() + ms));
+};
 const live = (database: Database) => listAgentMemories(database, { scope: "global_user", callerAgentID: "ea" });
 
 describe("closing a memory row and the live check agree on the time", () => {
