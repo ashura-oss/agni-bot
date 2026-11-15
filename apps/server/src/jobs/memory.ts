@@ -17,6 +17,7 @@ import type { Router } from "../models/router";
 import { log } from "../log";
 import { embedderConfig, embedText } from "../agent/embeddings";
 import {
+  CLOSE_AT_SQL,
   listMemoriesNeedingEmbedding,
   setMemoryEmbedding,
   type AgentMemoryRow,
@@ -117,7 +118,7 @@ export function consolidateMemories(
     )
     .all();
   for (const row of stale) {
-    db.run("UPDATE agent_memories SET valid_to = ? WHERE id = ? AND valid_to IS NULL", [now.toISOString(), row.id]);
+    db.run(`UPDATE agent_memories SET valid_to = ${CLOSE_AT_SQL} WHERE id = ? AND valid_to IS NULL`, [now.toISOString(), row.id]);
     result.closed += 1;
   }
 
@@ -142,7 +143,7 @@ export function consolidateMemories(
       )
       .all(duplicate.scope, duplicate.agent_id, duplicate.content);
     for (const older of rows.slice(1)) {
-      db.run("UPDATE agent_memories SET valid_to = ? WHERE id = ? AND valid_to IS NULL", [now.toISOString(), older.id]);
+      db.run(`UPDATE agent_memories SET valid_to = ${CLOSE_AT_SQL} WHERE id = ? AND valid_to IS NULL`, [now.toISOString(), older.id]);
       result.merged += 1;
     }
   }
