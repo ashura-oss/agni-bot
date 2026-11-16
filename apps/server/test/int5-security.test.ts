@@ -84,3 +84,27 @@ describe("what the owner sees on a password prompt and a form is cleaned like an
     expect(getForm(db, row.id)!.email!.subject).not.toContain("\n");
   });
 });
+
+describe("a rule whose target is no longer inside scratch never matches", () => {
+  const saved = process.env.AGNI_SCRATCH_DIR;
+  afterEach(() => { if (saved === undefined) delete process.env.AGNI_SCRATCH_DIR; else process.env.AGNI_SCRATCH_DIR = saved; });
+
+  test("moving the scratch folder away from a remembered write does not leave the rule matching", async () => {
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { findApprovalRule } = await import("../src/stores/approval-rules");
+    const root = mkdtempSync(join(tmpdir(), "agni-int7a-rules-"));
+    process.env.AGNI_SCRATCH_DIR = join(root, "scratch");
+    db = openDatabase(":memory:");
+    const target = join(root, "scratch", "notes.md");
+    db.run("INSERT INTO approval_rules (id, agent_id, tool_name, target, created_at) VALUES ('rul_in', 'ea', 'write_file', ?, ?)", [target, new Date().toISOString()]);
+    expect(findApprovalRule(db, "ea", "write_file", target)?.id).toBe("rul_in");
+
+    process.env.AGNI_SCRATCH_DIR = join(root, "somewhere-else");
+    expect(findApprovalRule(db, "ea", "write_file", target)).toBeNull();
+    // Back where it was, the rule is alive: finding it did not revoke it.
+    process.env.AGNI_SCRATCH_DIR = join(root, "scratch");
+    expect(findApprovalRule(db, "ea", "write_file", target)?.id).toBe("rul_in");
+  });
+});
