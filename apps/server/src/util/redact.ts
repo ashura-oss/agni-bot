@@ -113,6 +113,7 @@ function rebuild(): readonly string[] {
 /** Return `text` with registered secrets masked. */
 export function redact(text: string): string {
   if (typeof text !== "string" || text.length < MIN_SECRET_LENGTH) return text;
+  releaseDue();
   const list = needles ?? rebuild();
   let out = text;
   for (const needle of list) {
@@ -167,29 +168,69 @@ export function clearSecretsForTests(): void {
   registry.clear();
   holders.clear();
   slots.clear();
+  nextExpiry = Infinity;
   needles = null;
 }
 
 /** How many secrets are registered. */
 export function secretCount(): number {
+  releaseDue();
   return registry.size;
 }
 
 // --- secrets a store replaces ----------------------------------------------------------
 //
-// A token that is refreshed replaces an earlier one. A store registers a refreshable secret
-// under a named slot; setting the slot again lets the slot go of the values it no longer
-// holds. The slot is one holder: a value another holder also holds stays masked.
+// A token that is refreshed replaces an earlier one, and one that is disconnected goes away.
+// A store registers such a secret under a named slot. A slot is one holder, and it is
+// conservative about letting go: a value the slot replaces or drops is not unmasked at once,
+// because it may still be valid until it expires or until the provider confirms a revoke.
+// Masking a dead value costs nothing; unmasking a live one leaks it. So the slot queues what
+// it let go of, and a value leaves the queue when
+//   - its known expiry has passed (`releaseExpiredSecrets`, which `redact` runs by itself),
+//   - the provider confirmed a revoke (`releaseRetiredSecrets`), or
+//   - more than `RETIRED_PER_SLOT` values have piled up in the slot: then the oldest goes.
+// The last one is the only way a value that might still be valid is unmasked, and it is the
+// price of a registry that cannot grow without bound (a hundred refreshes without a restart
+// would otherwise leave a hundred dead tokens, each with about fifty masked forms).
+// A value is only ever released by the slot's own hold: one another holder also holds stays masked.
 
-/** What each slot holds. */
-const slots = new Map<string, readonly string[]>();
+/**
+ * How many values one slot keeps masked after letting go of them. Eight is about three or four
+ * refreshes of a token set (an access and a refresh token each, sometimes an identity token),
+ * far more than a refresh that is still being used somewhere can lag behind.
+ */
+export const RETIRED_PER_SLOT = 8;
+
+/** A value to hold for a slot, with the time (epoch ms) after which it is known to be dead, when known. */
+export type SlotSecret = string | undefined | null | { value: string | undefined | null; expiresAt?: number };
+
+interface Slot {
+  /** What the slot holds now, with each value's known expiry. */
+  live: Map<string, number | undefined>;
+  /** What it let go of (or staged and has not settled), oldest first. */
+  queue: Array<{ value: string; until?: number }>;
+}
+
+const slots = new Map<string, Slot>();
+
+/** The earliest expiry of any queued value, so `redact` looks at the clock only when something is due. */
+let nextExpiry = Infinity;
 
 const slotHolder = (slot: string): string => `slot:${slot}`;
 
-type SlotValue = string | undefined | null;
+function normalize(secrets: readonly SlotSecret[]): Map<string, number | undefined> {
+  const out = new Map<string, number | undefined>();
+  for (const secret of secrets) {
+    const value = typeof secret === "object" && secret !== null ? secret.value : secret;
+    if (typeof value !== "string" || value === "") continue;
+    const expiresAt = typeof secret === "object" && secret !== null ? secret.expiresAt : undefined;
+    out.set(value, expiresAt ?? out.get(value));
+  }
+  return out;
+}
 
-/** Hold each of `values` for the slot, all or none: a registry that refuses leaves the slot as it was. */
-function holdAll(slot: string, values: readonly string[]): void {
+/** Hold each value for the slot, all or none: a registry that refuses leaves the slot as it was. */
+function holdAll(slot: string, values: Iterable<string>): void {
   const holder = slotHolder(slot);
   const added: string[] = [];
   try {
@@ -204,37 +245,99 @@ function holdAll(slot: string, values: readonly string[]): void {
   }
 }
 
-const distinct = (values: readonly SlotValue[]): string[] =>
-  [...new Set(values.filter((value): value is string => typeof value === "string" && value !== ""))];
+function slotOf(name: string): Slot {
+  let slot = slots.get(name);
+  if (!slot) {
+    slot = { live: new Map(), queue: [] };
+    slots.set(name, slot);
+  }
+  return slot;
+}
 
-/**
- * Mask `values` before they are saved, holding them for `slot` without letting go of what the slot
- * already holds. A save that fails then leaves both the old values (still in the file) and the new
- * ones masked. `rememberSecretsAt` settles the slot once the save has succeeded.
- */
-export function stageSecretsAt(slot: string, ...values: SlotValue[]): void {
-  const next = distinct(values);
-  holdAll(slot, next);
-  const held = slots.get(slot) ?? [];
-  const fresh = next.filter((value) => !held.includes(value));
-  if (fresh.length > 0) slots.set(slot, [...held, ...fresh]);
+/** Keep the queue within its bound (oldest out), then drop the slot's hold on every value it no longer has. */
+function settleSlot(name: string, slot: Slot, candidates: Iterable<string>): void {
+  while (slot.queue.length > RETIRED_PER_SLOT) {
+    const dropped = slot.queue.shift()!;
+    if (!slot.live.has(dropped.value)) releaseSecretFor(slotHolder(name), dropped.value);
+  }
+  for (const value of candidates) {
+    if (!slot.live.has(value) && !slot.queue.some((queued) => queued.value === value)) releaseSecretFor(slotHolder(name), value);
+  }
+  if (slot.live.size === 0 && slot.queue.length === 0) slots.delete(name);
+  for (const queued of slot.queue) if (queued.until !== undefined) nextExpiry = Math.min(nextExpiry, queued.until);
 }
 
 /**
- * Set `slot` to `values`: what it held before and does not hold now is let go of (by this slot
- * only). Call it after the save succeeded, never before. With no values, the slot is emptied.
+ * Mask `secrets` before they are saved, holding them for `slot` without letting go of what the
+ * slot already holds. A save that fails then leaves the old values (still in the file) and the
+ * new ones masked; the new ones wait in the queue like a value that was let go of.
+ * `rememberSecretsAt` settles the slot once the save has succeeded.
  */
-export function rememberSecretsAt(slot: string, ...values: SlotValue[]): void {
-  const next = distinct(values);
-  holdAll(slot, next);
-  for (const value of slots.get(slot) ?? []) if (!next.includes(value)) releaseSecretFor(slotHolder(slot), value);
-  if (next.length > 0) slots.set(slot, next);
-  else slots.delete(slot);
+export function stageSecretsAt(slot: string, ...secrets: SlotSecret[]): void {
+  const next = normalize(secrets);
+  holdAll(slot, next.keys());
+  const state = slotOf(slot);
+  for (const [value, until] of next) {
+    if (state.live.has(value)) continue;
+    const queued = state.queue.find((entry) => entry.value === value);
+    if (queued) queued.until = until ?? queued.until;
+    else state.queue.push({ value, until });
+  }
+  settleSlot(slot, state, []);
 }
 
-/** Empty every slot whose name starts with `prefix` and is not in `keep` (an account or plugin that is gone). */
+/**
+ * Set `slot` to `secrets`, once the save that holds them has succeeded (never before: a save
+ * that fails keeps the old values). What the slot held and no longer does is queued, not
+ * unmasked; one already past its expiry is let go of now. With no secrets, the slot is emptied
+ * the same way.
+ */
+export function rememberSecretsAt(slot: string, ...secrets: SlotSecret[]): void {
+  const next = normalize(secrets);
+  holdAll(slot, next.keys());
+  const state = slotOf(slot);
+  const now = Date.now();
+  const dropped = [...state.live].filter(([value]) => !next.has(value));
+  state.live = next;
+  state.queue = state.queue.filter((entry) => !next.has(entry.value));
+  for (const [value, until] of dropped) {
+    if (until !== undefined && until <= now) continue;
+    state.queue.push({ value, until });
+  }
+  settleSlot(slot, state, dropped.map(([value]) => value));
+}
+
+/** Let go of every slot whose name starts with `prefix` and is not in `keep` (an account or plugin that is gone). */
 export function forgetSecretSlots(prefix: string, keep: ReadonlySet<string> = new Set()): void {
   for (const slot of [...slots.keys()]) if (slot.startsWith(prefix) && !keep.has(slot)) rememberSecretsAt(slot);
+}
+
+/** Release the queued values whose expiry is at or before `now`. A value a slot holds live is never released here. */
+export function releaseExpiredSecrets(now: number = Date.now()): void {
+  nextExpiry = Infinity;
+  for (const [name, slot] of [...slots]) {
+    const expired = slot.queue.filter((entry) => entry.until !== undefined && entry.until <= now);
+    slot.queue = slot.queue.filter((entry) => !expired.includes(entry));
+    settleSlot(name, slot, expired.map((entry) => entry.value));
+  }
+}
+
+/**
+ * The provider confirmed these values are dead (a revoke that succeeded): release them from every
+ * slot's queue. A value still held live, or by another holder, stays masked.
+ */
+export function releaseRetiredSecrets(...values: string[]): void {
+  const dead = new Set(values);
+  nextExpiry = Infinity;
+  for (const [name, slot] of [...slots]) {
+    slot.queue = slot.queue.filter((entry) => !dead.has(entry.value));
+    settleSlot(name, slot, dead);
+  }
+}
+
+/** Run the expiry check when a queued value's expiry is due. */
+function releaseDue(): void {
+  if (nextExpiry !== Infinity && nextExpiry <= Date.now()) releaseExpiredSecrets();
 }
 
 /**
@@ -276,6 +379,7 @@ function inExtra(name: string, list: readonly string[]): boolean {
  * middle of something that looks like a secret.
  */
 export function holdbackLength(text: string): number {
+  releaseDue();
   const list = needles ?? rebuild();
   const longest = list[0]?.length ?? 0;
   for (let k = Math.min(text.length, longest - 1); k >= 1; k--) {
