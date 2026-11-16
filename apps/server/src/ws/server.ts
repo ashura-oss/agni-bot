@@ -35,7 +35,7 @@ import { dirname, resolve } from "node:path";
 import { ChatGPTAuth } from "../models/chatgpt-auth";
 import { PushService } from "../push/web-push";
 import { homePath } from "../home";
-import { providerKeyEnvNames } from "../models/providers";
+import { loadCustomProviders, providerKeyEnvNames } from "../models/providers";
 import { redact, registerSecretsFromEnv, secretEnvNames } from "../util/redact";
 import { StreamRedactor } from "../util/redact-stream";
 
@@ -96,10 +96,20 @@ export function healthReport(db: Database, router: Router, seq: number, startedA
   };
 }
 
+/**
+ * Mask, from here on, every secret setting in the environment (config.env in file
+ * mode, the vault's entries in vault mode, the shell otherwise): provider keys,
+ * secret-shaped names, and the key variable of each custom provider, which the
+ * owner named freely.
+ */
+export function registerEnvSecrets(env: Record<string, string | undefined> = Bun.env): void {
+  const customKeys = loadCustomProviders(env).map((provider) => provider.envKey);
+  registerSecretsFromEnv(secretEnvNames(env, [...providerKeyEnvNames(), ...customKeys]), env);
+}
+
 export function startServer(config: Config, db: Database, router: Router, startedAt = Date.now()): RunningServer {
-  // Provider keys and other secret settings read from the environment (config.env in file mode,
-  // the shell otherwise) are masked from here on, wherever the server logs, sends or stores text.
-  registerSecretsFromEnv(secretEnvNames(Bun.env, providerKeyEnvNames()), Bun.env);
+  // Wherever the server logs, sends or stores text, the secrets in its environment are masked.
+  registerEnvSecrets(Bun.env);
   const frameLog = new FrameLog(config.frameLogCapacity, (seq) => writeMeta(db, "seq", String(seq)));
   // A fresh database has no persisted counter and starts at 1. After a clean stop the
   // counter is exact (the stop left a marker equal to it), so resume from it and
