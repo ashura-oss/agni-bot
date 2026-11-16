@@ -133,6 +133,27 @@ describe("MCP transport over real sockets (S3-4 review)", () => {
     expect(origin.seen).toHaveLength(1);
   });
 
+  test("a pooled socket is keyed by the pinned address too: the same name and port at a new address gets a new connection", async () => {
+    // Listening on every interface, so 127.0.0.1 and 127.0.0.2 both reach it and each request shows which one it came in on.
+    const arrived: string[] = [];
+    let connections = 0;
+    const server = createServer((req, res) => { arrived.push(req.socket.localAddress ?? ""); res.writeHead(200, { "content-type": "text/plain" }); res.end("ok"); });
+    server.on("connection", () => { connections += 1; });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "0.0.0.0", resolve));
+    const port = (server.address() as { port: number }).port;
+    const answers = [["127.0.0.1"], ["127.0.0.1"], ["127.0.0.2"]];
+    let asked = 0;
+    const guarded = guardedFetch({ local: true, lookup: async () => answers[asked++]! });
+    for (let round = 0; round < 3; round += 1) {
+      const response = await guarded(`http://mcp.pooled.localhost:${port}/mcp`);
+      expect(await response.text()).toBe("ok");
+    }
+    expect(arrived.map((address) => address.replace("::ffff:", ""))).toEqual(["127.0.0.1", "127.0.0.1", "127.0.0.2"]);
+    // The first two share a connection (same name, port and address); the third cannot ride on the 127.0.0.1 socket.
+    expect(connections).toBeLessThanOrEqual(2);
+  });
+
   test("an unflagged host with one private answer among public ones is refused before any connection", async () => {
     const guarded = guardedFetch({ lookup: resolves({ "mcp.example.com": [PUBLIC, "10.0.0.5"] }) });
     await expect(guarded("https://mcp.example.com/mcp")).rejects.toThrow(/private/i);

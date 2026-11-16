@@ -140,6 +140,30 @@ async function bodyBytes(input: string | URL | Request, init: RequestInit | unde
   throw new Error("the MCP transport sent a request body of a kind the pinned connection does not support");
 }
 
+/** Most agents kept at once: one per set of pinned addresses (and scheme), so a handful for a handful of plugins. */
+const MAX_AGENTS = 32;
+const agents = new Map<string, http.Agent | https.Agent>();
+
+/**
+ * The connection pool for one set of pinned addresses. Node's own pool is keyed by host and port only, so a
+ * socket opened to one address would be handed to a later request for the same name that was checked and
+ * pinned to another. A pool per address set means a socket is only ever reused for the addresses it was
+ * checked against.
+ */
+function agentFor(protocol: string, addresses: string[]): http.Agent | https.Agent {
+  const key = `${protocol}${[...addresses].sort().join(",")}`;
+  const known = agents.get(key);
+  if (known) return known;
+  if (agents.size >= MAX_AGENTS) {
+    const oldest = agents.keys().next().value as string;
+    agents.get(oldest)?.destroy();
+    agents.delete(oldest);
+  }
+  const created = protocol === "https:" ? new https.Agent({ keepAlive: true }) : new http.Agent({ keepAlive: true });
+  agents.set(key, created);
+  return created;
+}
+
 /**
  * One HTTP request to `url` over a socket opened only to `addresses` (already checked).
  * The Host header, SNI and certificate verification still use the URL's own host name.
@@ -163,6 +187,7 @@ function pinnedRequest(url: URL, addresses: string[], input: string | URL | Requ
           method,
           headers: Object.fromEntries(headers.entries()),
           lookup: lookupPinned as never,
+          agent: agentFor(url.protocol, addresses),
           ...(signal ? { signal } : {}),
         }, (res) => {
           const out = new Headers();
