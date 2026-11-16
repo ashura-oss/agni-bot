@@ -119,7 +119,7 @@ describe("W2-B 9: a database kept outside AGNI_HOME gets an owner-only folder on
     }
   });
 
-  test.skipIf(process.platform !== "win32")("a folder inside the home and a database nobody configured are left alone", () => {
+  test.skipIf(process.platform !== "win32")("the data folder inside the home is locked, and a database nobody configured is left alone", () => {
     const root = mkdtempSync(join(tmpdir(), "agni-w2b-db-"));
     try {
       process.env.AGNI_HOME = join(root, "home");
@@ -127,7 +127,7 @@ describe("W2-B 9: a database kept outside AGNI_HOME gets an owner-only folder on
       process.env.AGNI_DB_PATH = join(inside, "agni.sqlite");
       db = openDatabase(process.env.AGNI_DB_PATH);
       db.close(); db = undefined;
-      expect(isOwnerOnlyDirectory(inside)).toBe(false);
+      expect(isOwnerOnlyDirectory(inside)).toBe(true);
 
       const other = join(root, "other");
       db = openDatabase(join(other, "agni.sqlite"));
