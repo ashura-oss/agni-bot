@@ -18,7 +18,23 @@ afterEach(async () => {
 
 describe("looksLikeNameAnswer", () => {
   test("accepts short names", () => {
-    for (const text of ["Agni", "Friday", "  Max  ", "Dr Watson", "Baahu Bot", "Jarvis 2"]) expect(looksLikeNameAnswer(text)).toBe(true);
+    for (const text of ["Nova", "Max", "Research Bot", "Friday", "  Max  ", "Dr Watson", "Baahu Bot", "Jarvis 2"]) expect(looksLikeNameAnswer(text)).toBe(true);
+  });
+
+  test("rejects greetings and acknowledgements, ignoring case and punctuation", () => {
+    for (const text of ["hi", "Hi!", "hello", "Hello.", "thanks", "Thank you", "ok", "OK.", "okay", "yes", "No", "help", "Good morning.", "good evening", "hey", "sure", "cool"]) {
+      expect(looksLikeNameAnswer(text)).toBe(false);
+    }
+  });
+
+  test("rejects text that starts with a common imperative verb", () => {
+    for (const text of ["Plan my week", "Summarize my inbox", "Call me Agni", "write a poem", "Find flights", "tell me a joke", "Show tasks", "check mail", "Make a list", "send it", "Schedule lunch", "remind me", "search news", "read this", "create a bot", "list jobs", "give me ideas", "Get started"]) {
+      expect(looksLikeNameAnswer(text)).toBe(false);
+    }
+  });
+
+  test("rejects the product name: a bot is never named after it", () => {
+    for (const text of ["Agni", "agni", "Agni Bot", "AGNI BOT", "Agni."]) expect(looksLikeNameAnswer(text)).toBe(false);
   });
 
   test("rejects questions, sentences, long text and multi-line text", () => {
