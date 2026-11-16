@@ -8,7 +8,7 @@
  */
 import type { Database } from "bun:sqlite";
 import type { Persona } from "./personas";
-import { getPersona, registerPersona, DEFAULT_AGENT_TOOLS } from "./personas";
+import { getPersona, registerPersona, DEFAULT_AGENT_TOOLS, MEMORY_WRITING_TOOLS } from "./personas";
 import { normalizeVisibility, type Visibility } from "./visibility";
 import { nowISO } from "../util/ids";
 import { MAX_AGENT_NAME_CHARS } from "./identity";
@@ -74,15 +74,31 @@ export function createAgentPersona(
     | null;
   if (row) throw new Error(`agent ${id} already exists (${row.display_name ?? id}) — use rename_agent to change it, or pick another id`);
 
-  const requested = (spec.tools ?? []).filter((tool) => knownTools.includes(tool));
-  const dropped = (spec.tools ?? []).filter((tool) => !knownTools.includes(tool));
-  const finalTools = requested.length > 0 ? requested : [...DEFAULT_AGENT_TOOLS];
-
-  const color = spec.color?.trim() || colorFor(id);
-  if (!/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(color)) throw new Error("color must be a hex value like #e05252");
   // DEL-007: a new agent reads user memory but cannot write it unless the
   // caller explicitly says so.
   const memoryScope = spec.memoryScope === "readwrite" ? "readwrite" : "read";
+  // `tools` absent means the default set (the app's button: the owner makes
+  // the bot, there is no creator whose tools cap it). A list that is given is
+  // taken as written: a name nobody knows is an error, never a silent drop,
+  // and an empty result never falls back to defaults the caller may lack.
+  let finalTools: string[];
+  const dropped: string[] = [];
+  if (spec.tools === undefined) {
+    finalTools = [...DEFAULT_AGENT_TOOLS];
+  } else {
+    const unknown = spec.tools.filter((tool) => !knownTools.includes(tool));
+    if (unknown.length > 0) throw new Error(`unknown tool names: ${[...new Set(unknown)].join(", ")}`);
+    finalTools = [...new Set(spec.tools)];
+    // A read-only bot cannot write memory, so it cannot hold a tool that does.
+    if (memoryScope === "read") {
+      dropped.push(...finalTools.filter((tool) => MEMORY_WRITING_TOOLS.has(tool)));
+      finalTools = finalTools.filter((tool) => !MEMORY_WRITING_TOOLS.has(tool));
+    }
+    if (finalTools.length === 0) throw new Error("a new agent needs at least one tool it may hold");
+  }
+
+  const color = spec.color?.trim() || colorFor(id);
+  if (!/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(color)) throw new Error("color must be a hex value like #e05252");
   // D-01: a new agent is `summary` — the caller learns that it finished and
   // roughly what it found, not its full working.
   const visibility = normalizeVisibility(spec.visibility);

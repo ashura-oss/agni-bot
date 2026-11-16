@@ -9,6 +9,7 @@ import { responsesBody, streamChatGPT } from "../src/models/chatgpt-responses";
 import type { ChatRequest } from "../src/models/client";
 import { Router } from "../src/models/router";
 import { HealthTracker } from "../src/models/health";
+import { withFailingAclAsync } from "./acl-helper";
 
 const pair = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const jwk = { ...pair.publicKey.export({ format: "jwk" }), kid: "unit-signing-key", alg: "RS256", use: "sig" };
@@ -275,6 +276,18 @@ describe("ChatGPT OAuth", () => {
     const { url } = await h.begin(id);
     expect(url.searchParams.get("client_id")).toBe("unit-issued-client");
     expect(url.searchParams.has("agent_name_hint")).toBe(false);
+  });
+
+  // Windows only: elsewhere the ACL step is a no-op, so there is nothing to fail.
+  test.skipIf(process.platform !== "win32")("a credential directory that cannot be secured fails the save and keeps the cause", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "agni-chatgpt-acl-"));
+    cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
+    const h = harness({ path: join(directory, "private", "accounts.json") });
+    await h.complete();
+    const error = await withFailingAclAsync(() => h.auth.setModel("unit-model")).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("Could not secure the ChatGPT credential directory.");
+    expect((error as Error).cause).toBeInstanceOf(Error);
   });
 
   test("temporary refresh errors retain credentials; terminal errors require sign-in", async () => {

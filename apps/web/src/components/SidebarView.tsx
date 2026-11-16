@@ -5,10 +5,11 @@
  * Each agent has one enduring conversation surface; sessions are seams in it,
  * not list entries (blueprint v3 §5).
  */
-import { CalendarDays, CheckCircle2, CheckSquare, Clock3, Inbox, PanelLeftClose, Plus, Search, Star, X } from "lucide-react";
+import { UserRound, CalendarDays, CheckCircle2, CheckSquare, Clock3, Inbox, PanelLeftClose, Plus, Search, Star, X } from "lucide-react";
 import { useState, type FormEvent, type ReactNode } from "react";
 import { useAppModel, useAppSnapshot } from "../state/use-app-model";
-import { AppTile, SidebarAgentBadge, connectionShortStatus, initials } from "./bits";
+import { AppTile, SidebarAgentBadge, connectionShortStatus } from "./bits";
+import { ownerInitials, previewLine, writtenRole } from "../state/display";
 
 function stateLabel(state: string): string {
   if (state === "working") return "Working";
@@ -84,10 +85,10 @@ export function SidebarView({ onCollapse, collapsed = false }: { onCollapse?: ()
           <span className="sidebar-row-top">
             <span className="sidebar-row-title">{agent.name}</span>
             {preview ? <time className="sidebar-row-time" dateTime={preview.updatedAt}>{new Date(preview.updatedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</time> : null}
-            {agent.role ? <span className="sidebar-tag-chip">{agent.role}</span> : null}
+            {writtenRole(agent.role) ? <span className="sidebar-tag-chip">{writtenRole(agent.role)}</span> : null}
           </span>
           <span className="sidebar-row-subtitle">
-            {preview?.preview ?? agent.role ?? agent.model ?? "Assistant"}
+            {(preview?.preview ? previewLine(preview.preview) : "") || writtenRole(agent.role) || agent.model || "Assistant"}
             {visibilityNote}
           </span>
         </span>
@@ -208,7 +209,7 @@ export function SidebarView({ onCollapse, collapsed = false }: { onCollapse?: ()
                     </span>
                   </span>
                   <span className="sidebar-tile-name">{agent.name}</span>
-                  {agent.role ? <span className="sidebar-tile-tag">{agent.role}</span> : null}
+                  {writtenRole(agent.role) ? <span className="sidebar-tile-tag">{writtenRole(agent.role)}</span> : null}
                 </button>
               );
             })}
@@ -233,12 +234,13 @@ export function SidebarView({ onCollapse, collapsed = false }: { onCollapse?: ()
             title={`${owner} — settings`}
             aria-label={`Open settings for ${owner}`}
           >
-            <span className="sidebar-owner-avatar">{initials(owner)}</span>
+            <span className="sidebar-owner-avatar">{ownerInitials(snapshot.settings.deviceName) ?? <UserRound size={15} aria-hidden="true" />}</span>
           </button>
           {snapshot.connectionState.kind !== "ready" ? (
             <span
-              className="presence-dot"
-              style={{ background: "#f0a04b" }}
+              className="presence-dot attention"
+              role="img"
+              aria-label={connectionShortStatus(snapshot.connectionState)}
               title={connectionShortStatus(snapshot.connectionState)}
             />
           ) : null}

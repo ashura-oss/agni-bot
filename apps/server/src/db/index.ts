@@ -1,16 +1,110 @@
 import { Database } from "bun:sqlite";
-import { existsSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
+import { dirname, isAbsolute, parse, relative, resolve } from "node:path";
+import { agniHome } from "../home";
 import { log } from "../log";
+import { isOwnerOnlyDirectory, secureDirectoryIfNeeded, secureFile, writePrivateFileSync } from "../util/private-file";
 import { MIGRATIONS } from "./migrations";
+
+/**
+ * How a database path is protected on Windows, where "private" is an ACL.
+ *  - "folder": its folder is the server's to lock, owner-only, before SQLite
+ *    opens anything, so every file made in it (the database, `-wal`, `-shm`,
+ *    and the ones SQLite makes again later) inherits that from birth. This is
+ *    the data folder inside AGNI_HOME, and a folder the owner's `AGNI_DB_PATH`
+ *    names that the server creates or finds empty.
+ *  - "files": a folder that already holds other things is not ours to change
+ *    (removing inheritance could cut access to a whole profile or shared
+ *    folder), so the three database files are created locked before SQLite
+ *    opens them.
+ * Any other database (a test, a tool, a drive root) is left alone.
+ */
+type Protection = "folder" | "files" | null;
+
+function protectionFor(path: string, createdFolder: boolean): Protection {
+  if (process.platform !== "win32") return null;
+  const folder = dirname(resolve(path));
+  if (parse(folder).root === folder) return null;
+  const inside = (dir: string, base: string): boolean => {
+    const from = relative(base, dir);
+    return from === "" || (!from.startsWith("..") && !isAbsolute(from));
+  };
+  if (inside(folder, agniHome())) return "folder";
+  const configured = process.env.AGNI_DB_PATH?.trim();
+  if (!configured || resolve(configured) !== resolve(path)) return null;
+  // Ours: made by this start, empty, or already locked owner-only by an earlier start (it holds the database now).
+  return createdFolder || readdirSync(folder).length === 0 || isOwnerOnlyDirectory(folder) ? "folder" : "files";
+}
+
+/** A refusal that names the database, so the owner can fix the folder or move it. */
+function cannotProtect(path: string, error: unknown): Error {
+  const why = error instanceof Error ? error.message : String(error);
+  return new Error(`Cannot restrict the database at ${path} to your account (${why}). Refusing to start: the data would be readable by other accounts. Fix the folder's permissions or point AGNI_DB_PATH somewhere else.`, { cause: error });
+}
+
+/** The database file and its write-ahead files. */
+const databaseFiles = (path: string): string[] => [path, `${path}-wal`, `${path}-shm`];
+
+/**
+ * Create each missing database file empty and owner-only (through the private
+ * file helper, so it is never visible with other access), and lock the ones
+ * that exist. SQLite then opens files that are already private. Throws when
+ * any cannot be locked; nothing stays behind that was created here.
+ */
+function lockDatabaseFiles(path: string): void {
+  const made: string[] = [];
+  try {
+    for (const file of databaseFiles(path)) {
+      if (existsSync(file)) secureFile(file);
+      else { writePrivateFileSync(file, ""); made.push(file); }
+    }
+  } catch (error) {
+    for (const file of made) rmSync(file, { force: true });
+    throw error;
+  }
+}
+
+/**
+ * Protect a database path before SQLite opens it (see `Protection`). A failure
+ * refuses to start, naming the path, and leaves nothing behind it created.
+ */
+function protectBeforeOpen(path: string, createdFolder: boolean): Protection {
+  const protection = protectionFor(path, createdFolder);
+  try {
+    if (protection === "folder") secureDirectoryIfNeeded(dirname(resolve(path)), "throw");
+    else if (protection === "files") {
+      log.warn(`${dirname(resolve(path))} already holds other files, so its access rules are left alone; the database files are restricted to your account one by one`);
+      lockDatabaseFiles(path);
+    }
+  } catch (error) {
+    throw cannotProtect(path, error);
+  }
+  return protection;
+}
+
+/** The write-ahead files exist once the database is in use; lock any SQLite made itself, before a row is written. */
+function protectAfterOpen(db: Database, path: string, protection: Protection): void {
+  if (protection !== "files") return;
+  try {
+    lockDatabaseFiles(path);
+  } catch (error) {
+    db.close();
+    throw cannotProtect(path, error);
+  }
+}
 
 /** Open (creating if needed), apply WAL mode and migrations, return the handle. */
 export function openDatabase(path: string): Database {
-  if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+  let protection: Protection = null;
+  if (path !== ":memory:") {
+    const created = mkdirSync(dirname(path), { recursive: true });
+    protection = protectBeforeOpen(path, created !== undefined);
+  }
   const db = new Database(path, { create: true });
   // A CLI and the daemon share this file; wait for the other writer instead of failing with SQLITE_BUSY.
   db.exec("PRAGMA busy_timeout = 5000;");
   db.exec("PRAGMA journal_mode = WAL;");
+  protectAfterOpen(db, path, protection);
   db.exec("PRAGMA foreign_keys = ON;");
   const applied = migrate(db);
   if (applied.length > 0) log.info(`db: applied migrations ${applied.join(", ")}`);
@@ -20,10 +114,13 @@ export function openDatabase(path: string): Database {
 /**
  * Open the database for a CLI command (`pair`, `revoke`, `job add`, …). The
  * schema belongs to the daemon, so this never migrates: a database that is
- * behind this build is refused with a message that says how to fix it.
+ * behind this build is refused with a message that says how to fix it. It is
+ * protected exactly as the server's own open is: the CLI can be the process
+ * that makes the -wal and -shm files while the daemon is stopped.
  */
 export function openDatabaseForCLI(path: string): Database {
   if (!existsSync(path)) throw new Error(`no database at ${path} — run \`agni setup\` (or \`agni migrate\`) first`);
+  const protection = protectBeforeOpen(path, false);
   const db = new Database(path, { readwrite: true, create: false });
   db.exec("PRAGMA busy_timeout = 5000;");
   db.exec("PRAGMA foreign_keys = ON;");
@@ -34,6 +131,7 @@ export function openDatabaseForCLI(path: string): Database {
   } catch {
     // No schema_migrations table: a database no server has ever opened.
   }
+  protectAfterOpen(db, path, protection);
   if (current < latest) {
     db.close();
     throw new Error(

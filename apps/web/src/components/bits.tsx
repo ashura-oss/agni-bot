@@ -73,7 +73,7 @@ export function AgentAvatar({
           color,
           fontSize: points * 0.42,
         }}
-        aria-label={agent?.name ?? "Agent"}
+        aria-label={agent?.name ?? "Bot"}
       >
         {initials(agent?.name ?? "A")}
       </span>
@@ -83,7 +83,7 @@ export function AgentAvatar({
     <span
       className="avatar"
       style={{ width: points + 10, height: points + 10 }}
-      aria-label={agent?.name ?? "Agni"}
+      aria-label={agent?.name ?? "Bot"}
     >
       <FlameMark size={size} alive={alive} />
     </span>
@@ -104,7 +104,7 @@ export function SidebarAgentBadge({
     <span
       className="badge"
       style={{ width: size, height: size, background, fontSize: size * 0.34 }}
-      aria-label={agent?.name ?? "Agni"}
+      aria-label={agent?.name ?? "Bot"}
     >
       {primary ? (
         <Flame size={size * 0.48} strokeWidth={1.8} fill="currentColor" />

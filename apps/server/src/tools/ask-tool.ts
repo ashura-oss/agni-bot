@@ -30,6 +30,18 @@ const objectSchema = (properties: Record<string, unknown>, required: string[]): 
 /** The owner may take a while to answer; the turn waits rather than fails. */
 const OWNER_TIMEOUT_MS = 600_000;
 
+/**
+ * No answer, in words the model can act on. When the turn itself was stopped
+ * the reason is the stop; otherwise the owner-wait ceiling ran out and the
+ * card expired, which is told the way an approval's expiry is.
+ */
+function noAnswerNote(signal: AbortSignal, what: "question" | "draft"): string {
+  if (signal.aborted) return what === "question" ? "the owner did not answer" : "the owner did not decide";
+  return what === "question"
+    ? "Not answered: nobody answered in time, so the question expired. Carry on without it, or ask again later."
+    : "Not sent: nobody answered in time, so the draft expired and no email was sent.";
+}
+
 export function registerAskTool(registry: ToolRegistry, deps: AskToolDeps): void {
   if (registry.get("ask")) return;
   registry.register({
@@ -74,7 +86,7 @@ export function registerAskTool(registry: ToolRegistry, deps: AskToolDeps): void
         },
         ctx.signal,
       );
-      if (answer === null) return { answered: false, note: "the owner did not answer" };
+      if (answer === null) return { answered: false, note: noAnswerNote(ctx.signal, "question") };
       return { answered: true, answer, options };
     },
   });
@@ -118,7 +130,7 @@ export function registerDraftEmailTool(registry: ToolRegistry, deps: AskToolDeps
         ctx.signal,
       );
       const reviewNote = review?.drafter ? { review: review.drafter } : {};
-      if (answer === null) return { decided: false, note: "the owner did not decide", ...reviewNote };
+      if (answer === null) return { decided: false, note: noAnswerNote(ctx.signal, "draft"), ...reviewNote };
       const decision = answer.trim().toLowerCase();
       const send = decision.startsWith("send") || decision === "yes";
       return {

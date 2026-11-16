@@ -140,6 +140,12 @@ export const MessageInfoSchema = z.object({
   /** The agent this message is about — a handoff notice names its target. */
   toAgentId: z.string().optional(),
   uiHint: z.string().optional(),
+  /**
+   * How the turn that produced an assistant message ended (`end`, `cancelled`,
+   * `error`, `timeout`, `budget`, ...); absent for other roles and for a turn
+   * still running. Additive in v2.
+   */
+  stopReason: z.string().optional(),
 });
 export type MessageInfo = z.infer<typeof MessageInfoSchema>;
 
@@ -214,6 +220,17 @@ export const JobInfoSchema = z.object({
   attempts: z.number().int().nonnegative(),
   /** Recurrence in milliseconds; absent for one-shot work. */
   everyMs: z.number().int().positive().optional(),
+  /** Wall-clock recurrence, "HH:MM" in the server's time zone; absent for other jobs. Additive in v2. */
+  dailyAt: z.string().optional(),
+  /** With `dailyAt`: the weekdays it fires on ("sun".."sat"); absent means every day. Additive in v2. */
+  days: z.array(z.string()).optional(),
+  /**
+   * True for the daemon's own housekeeping (tagging, embedding, backups,
+   * rollover summaries): not the owner's to manage. The server always sends
+   * it; a client that meets a server without it treats the job as the owner's.
+   * Additive in v2.
+   */
+  internal: z.boolean().optional(),
   /** The prompt this job runs, trimmed for display. */
   title: z.string().optional(),
   threadID: z.string().optional(),
@@ -222,6 +239,22 @@ export const JobInfoSchema = z.object({
   routine: RoutineInfoSchema.optional(),
 });
 export type JobInfo = z.infer<typeof JobInfoSchema>;
+
+/**
+ * One standing "Always allow" rule, as `approval.rules.list.ok` lists it. A
+ * rule is scoped to one bot, one tool and one target (the exact command, the
+ * resolved path, or the recipient list). `agentName` is null when the bot no
+ * longer exists. Additive in v2.
+ */
+export const ApprovalRuleInfoSchema = z.object({
+  id: z.string().min(1),
+  agentID: z.string(),
+  agentName: z.string().nullable(),
+  toolName: z.string(),
+  target: z.string(),
+  createdAt: z.string(),
+});
+export type ApprovalRuleInfo = z.infer<typeof ApprovalRuleInfoSchema>;
 
 export const TaskStatusSchema = z.enum(["open", "done", "snoozed"]);
 export const TaskWorkflowStatusSchema = z.enum(["not_started", "in_progress", "ai_review"]);
@@ -467,6 +500,16 @@ export const ClientFrameSchema = z.discriminatedUnion("type", [
   /** Read the routine list, or act on one routine (pause, resume, run now). */
   z.object({ type: z.literal("job.list"), limit: z.number().int().positive().max(200).optional() }),
   z.object({ type: z.literal("job.set"), jobID: z.string().min(1), action: JobActionSchema }),
+  /**
+   * The standing "Always allow" rules, newest first; answered by
+   * `approval.rules.list.ok`. Additive in v2.
+   */
+  z.object({ type: z.literal("approval.rules.list") }),
+  /**
+   * Revoke one rule; answered by `approval.rule.revoke.ok`, or by an error
+   * `not_found` when the id is unknown or already revoked. Additive in v2.
+   */
+  z.object({ type: z.literal("approval.rule.revoke"), id: z.string().min(1) }),
   /** Owner-only: replace a routine's web domain allowlist (additive v2). Bots cannot send this. */
   z.object({ type: z.literal("routine.domains.set"), jobID: z.string().min(1), domains: z.array(z.string().max(253)).max(20) }),
   /** Delete a task unless it is currently running. */
@@ -719,6 +762,20 @@ export const ServerFrameSchema = z.discriminatedUnion("type", [
     buttons: z.array(DecisionSchema).min(1),
   }),
   /**
+   * An `approval.request` or `form.request` card is no longer actionable:
+   * clients remove it. `requestID` is the `apr_...` id of the approval or the
+   * id of the form; `kind` says which. `decided` means an answer was
+   * recorded (here or on another device), `expired` means it timed out, and
+   * `cancelled` means its turn ended or was stopped. Additive in v2.
+   */
+  z.object({
+    type: z.literal("approval.closed"),
+    seq,
+    requestID: z.string(),
+    kind: z.enum(["approval", "form"]),
+    reason: z.enum(["decided", "expired", "cancelled"]),
+  }),
+  /**
    * A command needs the owner's password. The request carries no secret —
    * only what the owner is authorizing. The answer travels on `secret.reply`
    * and is consumed once, server-side.
@@ -801,6 +858,12 @@ export const ServerFrameSchema = z.discriminatedUnion("type", [
     seq,
     conversationID: z.string(),
     messages: z.array(MessageInfoSchema),
+    /**
+     * The turn running in this conversation right now, when one is (additive):
+     * a client that reloads mid-turn can show Writing and Stop at once instead of
+     * waiting for the next frame of the turn.
+     */
+    runningTurn: z.object({ turnID: z.string(), threadID: z.string(), agentID: z.string() }).optional(),
   }),
   /** Answer to `thread.export`; addressed to the requester, not replayed. */
   z.object({
@@ -814,6 +877,10 @@ export const ServerFrameSchema = z.discriminatedUnion("type", [
     createdAt: z.string(),
   }),
   z.object({ type: z.literal("job.list.ok"), seq, jobs: z.array(JobInfoSchema) }),
+  /** Answer to `approval.rules.list`; addressed to the requester, not replayed. */
+  z.object({ type: z.literal("approval.rules.list.ok"), seq, rules: z.array(ApprovalRuleInfoSchema) }),
+  /** Answer to `approval.rule.revoke`; addressed to the requester, not replayed. */
+  z.object({ type: z.literal("approval.rule.revoke.ok"), seq, id: z.string() }),
   z.object({ type: z.literal("task.list.ok"), seq, tasks: z.array(TaskInfoSchema), lists: z.array(TaskListInfoSchema).optional() }),
   z.object({ type: z.literal("task.create.ok"), seq, task: TaskInfoSchema }),
   z.object({ type: z.literal("task.list.create.ok"), seq, lists: z.array(TaskListInfoSchema) }),

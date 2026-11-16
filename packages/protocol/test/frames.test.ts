@@ -7,6 +7,7 @@ import {
   isSupportedVersion,
   parseClientFrame,
   parseServerFrame,
+  type ServerFrame,
 } from "../src/index";
 
 describe("client frames", () => {
@@ -93,6 +94,78 @@ describe("server frames", () => {
       lastSeq: 1,
     });
     expect(result.ok).toBe(true);
+  });
+
+  test("round-trips approval.closed for an approval card and a form card", () => {
+    const approval = { type: "approval.closed", seq: 20, requestID: "apr_1", kind: "approval", reason: "decided" } as const;
+    const parsedApproval = parseServerFrame(JSON.parse(encodeFrame(approval)));
+    expect(parsedApproval.ok).toBe(true);
+    if (parsedApproval.ok) expect(parsedApproval.frame).toEqual(approval);
+
+    const form = { type: "approval.closed", seq: 21, requestID: "frm_1", kind: "form", reason: "expired" } as const;
+    const parsedForm = parseServerFrame(JSON.parse(encodeFrame(form)));
+    expect(parsedForm.ok).toBe(true);
+    if (parsedForm.ok) expect(parsedForm.frame).toEqual(form);
+
+    expect(parseServerFrame({ ...approval, reason: "cancelled" }).ok).toBe(true);
+  });
+
+  test("rejects approval.closed with a bad kind, reason, or missing seq", () => {
+    const frame = { type: "approval.closed", seq: 22, requestID: "apr_1", kind: "approval", reason: "decided" };
+    expect(parseServerFrame({ ...frame, kind: "secret" }).ok).toBe(false);
+    expect(parseServerFrame({ ...frame, reason: "timeout" }).ok).toBe(false);
+    expect(parseServerFrame({ ...frame, seq: undefined }).ok).toBe(false);
+    expect(parseServerFrame({ ...frame, requestID: undefined }).ok).toBe(false);
+  });
+
+  test("round-trips the approval rules frames", () => {
+    expect(parseClientFrame({ type: "approval.rules.list" }).ok).toBe(true);
+    expect(parseClientFrame({ type: "approval.rule.revoke", id: "rul_1" }).ok).toBe(true);
+    expect(parseClientFrame({ type: "approval.rule.revoke" }).ok).toBe(false);
+    expect(parseClientFrame({ type: "approval.rule.revoke", id: "" }).ok).toBe(false);
+
+    const list: ServerFrame = {
+      type: "approval.rules.list.ok",
+      seq: 30,
+      rules: [
+        { id: "rul_1", agentID: "agni", agentName: "Agni", toolName: "bash", target: "ls", createdAt: "2026-11-01T10:00:00.000Z" },
+        { id: "rul_2", agentID: "gone", agentName: null, toolName: "write_file", target: "c:/x", createdAt: "2026-11-02T10:00:00.000Z" },
+      ],
+    };
+    const parsedList = parseServerFrame(JSON.parse(encodeFrame(list)));
+    expect(parsedList.ok).toBe(true);
+    if (parsedList.ok) expect(parsedList.frame).toEqual(list);
+    expect(parseServerFrame({ type: "approval.rules.list.ok", seq: 31, rules: [] }).ok).toBe(true);
+    expect(parseServerFrame({ ...list, rules: [{ id: "rul_1" }] }).ok).toBe(false);
+
+    const revoked = { type: "approval.rule.revoke.ok", seq: 32, id: "rul_1" } as const;
+    const parsedRevoked = parseServerFrame(JSON.parse(encodeFrame(revoked)));
+    expect(parsedRevoked.ok).toBe(true);
+    if (parsedRevoked.ok) expect(parsedRevoked.frame).toEqual(revoked);
+  });
+
+  test("job.list.ok carries recurrence and housekeeping fields, which older frames may omit", () => {
+    const job = { id: "job_1", kind: "turn", state: "queued", runAt: "2026-11-17T09:05:00.000Z", enabled: true, attempts: 0 };
+    const withFields = { ...job, dailyAt: "09:05", days: ["mon", "tue", "wed", "thu", "fri"], internal: false };
+    const parsed = parseServerFrame({ type: "job.list.ok", seq: 40, jobs: [withFields, { ...job, id: "job_2", kind: "tagger", internal: true }, job] });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok && parsed.frame.type === "job.list.ok") {
+      expect(parsed.frame.jobs[0]).toMatchObject({ dailyAt: "09:05", days: ["mon", "tue", "wed", "thu", "fri"], internal: false });
+      expect(parsed.frame.jobs[1]?.internal).toBe(true);
+    }
+    expect(parseServerFrame({ type: "job.list.ok", seq: 41, jobs: [{ ...job, days: [1, 2] }] }).ok).toBe(false);
+    expect(parseServerFrame({ type: "job.list.ok", seq: 42, jobs: [{ ...job, internal: "yes" }] }).ok).toBe(false);
+  });
+
+  test("history messages carry the stop reason of the turn that produced them", () => {
+    const message = { id: "msg_1", role: "assistant", text: "partial", createdAt: "2026-11-17T09:05:00.000Z", turnID: "trn_1" };
+    const parsed = parseServerFrame({ type: "conversation.history.ok", seq: 43, conversationID: "cnv_1", messages: [{ ...message, stopReason: "timeout" }, message] });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok && parsed.frame.type === "conversation.history.ok") {
+      expect(parsed.frame.messages[0]?.stopReason).toBe("timeout");
+      expect(parsed.frame.messages[1]?.stopReason).toBeUndefined();
+    }
+    expect(parseServerFrame({ type: "thread.history.ok", seq: 44, threadID: "thr_1", messages: [{ ...message, stopReason: 3 }] }).ok).toBe(false);
   });
 
   test("rejects server frames without seq", () => {

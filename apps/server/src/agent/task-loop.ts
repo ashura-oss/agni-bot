@@ -5,6 +5,8 @@ import type { Database } from "bun:sqlite";
 import type { PeerIntent, ServerFrameBody, StopReason } from "@agni/protocol";
 import { peerEnvelope, stripPeerTags } from "./peer-message";
 import { ApprovalBroker, waitForApprovalDecision } from "./approval-broker";
+import { abortReasonOf } from "./abort-reason";
+import { ABORTED_MID_CALL, closeRequest, isClosureNote, toolErrorCode } from "./closure";
 import { FormBroker } from "./form-broker";
 import type { Decision } from "./approval-broker";
 import type { Persona, ResolvedPersona } from "./personas";
@@ -20,7 +22,7 @@ import { registerHandoffTool } from "../tools/handoff-tool";
 import { registerDelegateTaskTool } from "../tools/delegate-task-tool";
 import { registerAskTool, registerDraftEmailTool } from "../tools/ask-tool";
 import { registerRequestOwnerInputTool } from "../tools/needs-input-tool";
-import { registerArtifactTool } from "../tools/artifact-tool";
+import { LONG_TOOL_RESULT_JSON_CHARS, registerArtifactTool } from "../tools/artifact-tool";
 import { registerSecureExecTool } from "../tools/secure-exec-tool";
 import { registerSayTool } from "../tools/say-tool";
 import { criticReview } from "./critic";
@@ -41,7 +43,11 @@ import { appendChannelMessage, getChannelSummary } from "../stores/channels";
 import { compactChannelHistory } from "./compactor";
 import { GuardrailError, MAX_DEPTH, enterDelegation, rootGuardrail, stepGuardrail, type GuardrailState } from "./guardrails";
 import type { MailAccountResolver } from "../plugins/credentials";
+import { mcpApprovalNote } from "../plugins/mcp";
 import { domainAllowed } from "../routines/egress";
+import { log } from "../log";
+import { TurnTimer } from "./turn-timer";
+import { OWNER_WAIT_CEILING_MS, expireApprovalForCall, expirePendingForTurn } from "./pending-cards";
 
 export interface TaskTurnSettings {
   firstTokenTimeoutMs: number;
@@ -58,6 +64,8 @@ export interface TaskTurnSettings {
    * nothing is injected.
    */
   minRecallScore?: number;
+  /** The longest an approval card or owner question is waited on (default 10 minutes). */
+  ownerWaitMs?: number;
 }
 export interface TaskTurnRun {
   attachmentIDs?: string[];
@@ -98,6 +106,24 @@ export interface TaskTurnRun {
    * system note ("Vision messaged you: …"), not the owner speaking.
    */
   inputRole?: "user" | "system";
+  /**
+   * Log the request as a system row so the owner's history does not show it.
+   * Only the log row changes: the turn's role, and how it is trusted, do not
+   * (see `untrustedInput` for that).
+   */
+  hideInput?: boolean;
+  /**
+   * The input carries data the owner did not write (a routine's saved state,
+   * results fetched on an earlier run). The turn is gated like peer input:
+   * tools that peer input may not use are refused, posts are marked
+   * peer-influenced, nothing is compacted from it, and nothing streams (a
+   * routine's reply ends with its saved-state block, which an open chat must
+   * not show). Unlike peer input it may use `queryText` for the topic anchor
+   * and retrieval.
+   */
+  untrustedInput?: boolean;
+  /** With `untrustedInput`: the part of the input that is the owner's own words, the only text that may shape the anchor and retrieval. */
+  queryText?: string;
   /** A retried job: reuse the input row it already wrote instead of appending it again (H20). */
   reuseInput?: boolean;
   /** The text written to the durable log (defaults to the request text). */
@@ -126,13 +152,34 @@ export interface TaskTurnRun {
 export interface TaskTurnResult { turnID: string; text: string; stopReason: StopReason }
 
 /**
- * No tool-call or output-token budget (owner decision, 2026-10-27). A turn is
- * bounded by the turn timeout, the chain step guardrail, and the loop guards
- * (duplicates, no progress, off-road).
+ * No per-turn tool-call or output-token budget (owner decision, 2026-10-27). A
+ * turn is bounded by the turn timeout, the chain step guardrail, the loop
+ * guards (duplicates, no progress, off-road), and two per-step limits: at
+ * most 25 tool calls from one model response, and an output-token ceiling on
+ * every model call.
  */
 const MAX_PROMPT_CHARS = 40_000;
 const MAX_TOOL_RESULT_CHARS = 4_000;
+/**
+ * Tools whose whole point is a long text: a delegated result, a handoff
+ * answer, an artifact page. Their strings pass up to 4,000 characters intact
+ * and the result as a whole gets room for the fields around that text.
+ */
+const LONG_RESULT_TOOLS: ReadonlySet<string> = new Set(["read_artifact", "task_status", "delegate_wait", "delegate_task", "handoff"]);
+const LONG_RESULT_TEXT_CHARS = 4_000;
+const MAX_LONG_TOOL_RESULT_CHARS = LONG_TOOL_RESULT_JSON_CHARS;
 const MAX_HISTORY_MESSAGES = 16;
+/** The owner's own messages are kept longer than tool output; a longer one is cut with a notice. */
+const MAX_USER_MESSAGE_CHARS = 48_000;
+/** Tool calls run from one model response; the rest are skipped, each with a result. */
+const MAX_TOOL_CALLS_PER_RESPONSE = 25;
+/** Output tokens asked of the model on every chat step, unless AGNI_MAX_OUTPUT_TOKENS says otherwise. */
+const DEFAULT_MAX_OUTPUT_TOKENS = 8_192;
+
+function maxOutputTokens(): number {
+  const configured = Number(process.env.AGNI_MAX_OUTPUT_TOKENS);
+  return Number.isInteger(configured) && configured > 0 ? configured : DEFAULT_MAX_OUTPUT_TOKENS;
+}
 
 /**
  * The assistant runs *inside* the app, but it is not the app's developer.
@@ -224,7 +271,9 @@ export function isThreadActive(threadID: string): boolean {
 }
 
 /** The turn running in a thread, so an interrupt can stop it. */
-const runningTurns = new Map<string, { turnID: string; controller: AbortController }>();
+const runningTurns = new Map<string, { turnID: string; controller: AbortController; cancelReason?: string }>();
+/** The cancel reason of a turn the owner's next message took over from: that request is not closed, the message continues it. */
+const SUPERSEDED = "the owner sent a new message";
 
 /**
  * Stop the turn running in a thread. The owner interrupting with a new
@@ -234,6 +283,7 @@ const runningTurns = new Map<string, { turnID: string; controller: AbortControll
 export function cancelThreadTurn(threadID: string, reason = "interrupted"): boolean {
   const running = runningTurns.get(threadID);
   if (!running) return false;
+  running.cancelReason = reason;
   try {
     running.controller.abort();
   } catch {
@@ -259,7 +309,7 @@ export async function runTaskTurn(db: Database, router: Router, settings: TaskTu
     // The owner interrupted: the running turn stops and this one takes
     // over. Waiting for the old turn to unwind keeps the two from writing
     // into the same block at the same time.
-    cancelThreadTurn(threadID, "the owner sent a new message");
+    cancelThreadTurn(threadID, SUPERSEDED);
     await waitForThreadIdle(threadID);
     if (activeThreads.has(threadID)) {
       throw new Error("a task turn is already active or awaiting approval for this thread");
@@ -282,18 +332,29 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   // continues the same conversation.
   const recovering =
     existing?.state === "running" || existing?.state === "awaiting_approval" || existing?.state === "waiting";
-  const turnID = recovering ? existing.turn_id : run.turnID ?? newID("trn");
+  // A resumed session runs under the caller's turn ID: that is the ID the
+  // owner's Stop is registered under. Without one (a job), the old ID stays.
+  const turnID = run.turnID ?? (recovering ? existing.turn_id : newID("trn"));
   let messages: ChatMessage[];
   let stepCount = recovering ? existing.step_count : 0;
   let tokenCount = recovering ? existing.token_count : 0;
   if (recovering) {
     messages = parseSessionMessages(existing.message_log);
-    recoverToolResults(db, turnID, messages);
+    // The dead turn's cards are dead too: expire them and tell clients, before
+    // recovery rejects the calls that were waiting on them.
+    expirePendingForTurn(db, existing.turn_id, "expired", run.emit);
+    // The dead turn's tool calls and approvals are filed under its own ID.
+    recoverToolResults(db, existing.turn_id, messages);
+    if (turnID !== existing.turn_id) {
+      createTurn(db, { id: turnID, threadID, agentID: persona.id });
+      db.run("UPDATE turns SET state = 'done', stop_reason = 'error', ended_at = ? WHERE id = ? AND state = 'running'", [nowISO(), existing.turn_id]);
+    }
   } else {
     createTurn(db, { id: turnID, threadID, agentID: persona.id });
     messages = recentMessages(db, threadID, MAX_HISTORY_MESSAGES)
-      .filter((message) => message.role === "user" || message.role === "assistant")
-      .map((message) => ({ role: message.role as "user" | "assistant", content: message.text, attachmentIDs: messageAttachments(db, message.id).map((file) => file.id) }));
+      // A closure note is stored as a system row (the owner's history leaves it out) but the model reads it as its own words.
+      .filter((message) => message.role === "user" || message.role === "assistant" || isClosureNote(message.role, message.text, message.kind))
+      .map((message) => ({ role: (message.role === "system" ? "assistant" : message.role) as "user" | "assistant", content: message.text, attachmentIDs: messageAttachments(db, message.id).map((file) => file.id) }));
   }
   const inputRole = run.inputRole ?? "user";
   const inputText = run.inputText ?? run.text;
@@ -305,13 +366,17 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   const reused = previous?.role === inputRole && previous.text === inputText;
   // The reused row and its turn's output are history; the model gets the input below instead.
   if (reused) messages.splice(Math.max(0, messages.length - tail.slice(at).filter((m) => m.role === "user" || m.role === "assistant").length));
-  const inputMessage = reused ? previous : appendMessage(db, { threadID, turnID, role: inputRole, text: inputText });
+  const inputMessage = reused ? previous : appendMessage(db, { threadID, turnID, role: run.hideInput ? "system" : inputRole, text: inputText });
   if (!reused && run.attachmentIDs?.length) linkAttachments(db, inputMessage.id, run.attachmentIDs);
   titleThreadFromFirstMessage(db, threadID, run.text);
   // Peer-originated input (a brief, a handoff, a completion wake) must not shape
   // the system prefix. The topic anchor and the retrieval rewrite therefore read
   // only the history from before this input, and never the input's own text.
-  const peerInput = Boolean(run.peer) || run.inputRole === "system" || Boolean(run.delegation);
+  const peerSourced = Boolean(run.peer) || run.inputRole === "system" || Boolean(run.delegation);
+  // Tool gating, post marking and compaction treat untrusted input like peer input.
+  const peerInput = peerSourced || Boolean(run.untrustedInput);
+  // The text that may shape the anchor and retrieval: none for peer input, only the owner's own part for untrusted input.
+  const queryText: string | null = peerSourced ? null : run.untrustedInput ? (run.queryText ?? null) : run.text;
   const priorHistory = messages.slice();
   // The model sees peer-written text inside the envelope; the durable log
   // row (above) keeps the plain text so the UI stays readable.
@@ -369,21 +434,21 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   const anchor = deriveAnchor({
     carrySummary: [run.carrySummary, channelSummary].filter(Boolean).join("\n\n") || null,
     history: priorHistory,
-    userText: peerInput ? "" : run.text,
+    userText: queryText ?? "",
   });
   // ASM-003/004/006: what this turn needs, retrieved rather than carried.
   // The query is rewritten when the message points back, the search is
   // hybrid, and when nothing good enough comes back the tail of the
   // previous block is used instead of a wider, worse search.
-  const rewritten = rewriteForRetrieval(run.text, { anchor, history: priorHistory });
+  const rewritten = rewriteForRetrieval(queryText ?? "", { anchor, history: priorHistory });
   // Peer input never drives retrieval: a search on a brief's own words could
   // pull stored peer text back into the system prefix as recall.
-  const retrieved = peerInput ? null : await retrieveFacts(db, {
+  const retrieved = queryText === null ? null : await retrieveFacts(db, {
     query: rewritten.query,
     callerAgentID: persona.id,
     limit: 6,
     minScore: settings.minRecallScore,
-    embedder: turnEmbedder(run.text),
+    embedder: turnEmbedder(queryText ?? ""),
   });
   const recall = recallLines(retrieved?.hits ?? [], new Set(factRows.map((row) => row.id)));
   const previousTail = openedTail(db, threadID);
@@ -395,10 +460,22 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
     db,
     emit: (frame) => run.emit(frame as ServerFrameBody),
     waitForDecision: (requestID, signal) => waitForApprovalDecision(db, requestID, signal),
+    // A call the tool will refuse for its arguments raises no card, and an MCP
+    // connector's own claim about a tool rides with the card as information.
+    validate: (name, args) => registry.validateArgs(name, args),
+    approvalNote: mcpApprovalNote,
   });
+  const controller = new AbortController();
+  let timedOut = false;
+  // The turn's clock stops while a call waits on the owner (an approval card
+  // or a question). It is created here so the form broker can hold it, and
+  // started below once the prompt is built.
+  const timer = new TurnTimer(settings.turnTimeoutMs, () => { timedOut = true; controller.abort(); });
   const formBroker = new FormBroker({
     db,
     emit: (body) => run.emit(body),
+    hold: () => timer.hold(),
+    ownerWaitMs: settings.ownerWaitMs,
   });
   db.run(
     `INSERT INTO agent_sessions (thread_id, turn_id, state, message_log, summary, step_count, token_count, max_steps, max_tokens, created_at, updated_at)
@@ -410,7 +487,6 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
     [threadID, turnID, JSON.stringify(messages), summary, stepCount, tokenCount, 0, 0, now, now],
   );
 
-  const controller = new AbortController();
   runningTurns.set(threadID, { turnID, controller });
   // The handoff tool needs the live emit/signal/guardrail; register it per
   // turn so it can spawn a delegated child in the same thread. It is added
@@ -495,7 +571,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
     // widest view, and most turns do not need it.
     rollups: run.conversationID
       ? [
-        ...(!peerInput && asksAboutPast(run.text)
+        ...(queryText !== null && asksAboutPast(queryText)
           ? listSummaries(db, { conversationID: run.conversationID, level: "epoch", limit: 2 }).map((summary) => summary.text)
           : []),
         ...listSummaries(db, { conversationID: run.conversationID, level: "day", limit: 3 }).map((summary) => summary.text),
@@ -505,15 +581,16 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
     // Only an agent that can actually hand off needs to know the roster.
     team: persona.tools.includes("handoff") ? teamRoster(db, { exclude: persona.id }) : [],
   });
-  let timedOut = false;
-  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, settings.turnTimeoutMs);
+  timer.start();
   const abort = (): void => controller.abort();
   run.signal.addEventListener("abort", abort, { once: true });
   // The last thing the agent said, for the turn result. Each utterance has
   // already been published as its own message.
   let answerText = "";
   let stopReason: StopReason = "end";
-  let usage: { provider: string; model: string; inputTokens?: number; outputTokens?: number; latencyMs: number } | undefined;
+  let cancelReason: string | undefined;
+  // Every step's usage is summed: each step re-sends the prompt, and the ledger must show what the turn cost.
+  let usage: TurnUsage | undefined;
   // Duplicate-step guard: toolName + args signature -> last step it ran on.
   // Exact repeats within the same turn are skipped so the model can't spin.
   const recentCalls = new Map<string, number>();
@@ -530,6 +607,11 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   let saidSomething = false;
   const offRoadGuard = !persona.id.startsWith("coder") && !CODE_REQUEST.test(run.text) && !FILE_REQUEST.test(run.text);
   let activeStepText = "";
+  // An answer cut at the output ceiling is continued; the pieces so far, and how often.
+  let cutOffText = "";
+  let continuations = 0;
+  const MAX_CONTINUATIONS = 2;
+  const CONTINUE_AFTER_CUT = "Your last reply was cut off at the output limit. Continue exactly where it stopped, without repeating anything.";
   // Every step streams live. A step that ends in tool calls was narration,
   // which stays in the model's context: `reset` clears it from the bubble.
   const emitToken = (delta: string, reset?: true): void => {
@@ -568,24 +650,39 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
       activeStepText = "";
       // Allowlist order is kept so the tool prefix stays stable across steps.
       const tools = taskToolSpecs(registry, callableTools.filter((name) => !deferred.includes(name) || loadedTools.has(name)), "static");
-      const result = await router.route({
-        messages: await withAttachmentContent(db, requestMessages),
+      const stepMessages = await withAttachmentContent(db, requestMessages);
+      const routeStep = (maxTokens: number | undefined) => router.route({
+        messages: stepMessages,
         signal: controller.signal,
         firstTokenTimeoutMs: settings.firstTokenTimeoutMs,
         tools,
         toolChoice: tools.length ? "auto" : "none",
         preferredModel: persona.model,
-        ...(tokenLimit === null ? {} : { maxTokens: Math.min(2_048, tokenLimit - tokenCount) }),
+        ...(maxTokens === undefined ? {} : { maxTokens }),
         onDelta: (delta: string) => {
           activeStepText += delta;
           emitToken(delta);
         },
       });
+      // Every step has an output ceiling, so one runaway response cannot run on unbounded.
+      // A budgeted turn gets the same ceiling, or what is left of its budget if that is less.
+      const stepMaxTokens = tokenLimit === null ? maxOutputTokens() : Math.max(1, Math.min(maxOutputTokens(), tokenLimit - tokenCount));
+      let result: Awaited<ReturnType<typeof routeStep>>;
+      try {
+        result = await routeStep(stepMaxTokens);
+      } catch (error) {
+        // A model whose own output limit is lower than ours says so with a 400
+        // naming max_tokens. That step runs once more without the ceiling.
+        if (!rejectsMaxTokens(error) || controller.signal.aborted) throw error;
+        log.warn(`turn ${turnID}: a provider rejected max_tokens=${stepMaxTokens}; retrying the step without it`);
+        activeStepText = "";
+        result = await routeStep(undefined);
+      }
       const streamedText = activeStepText;
       activeStepText = "";
       // Counted for the record (the debugger shows it), not enforced.
       tokenCount += result.outputTokens ?? estimateTokens(result.text + JSON.stringify(result.toolCalls ?? []));
-      usage = { provider: result.provider, model: result.model, inputTokens: result.inputTokens, outputTokens: result.outputTokens, latencyMs: result.latencyMs };
+      usage = addUsage(usage, result);
       if (tokenLimit !== null && tokenCount >= tokenLimit) {
         stopReason = "budget";
         answerText = "This run reached its output-token limit before it could finish.";
@@ -593,11 +690,27 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
         publish(answerText);
         break;
       }
+      if (!result.toolCalls?.length && result.finishReason === "length") {
+        // Cut at the output ceiling: not a finished answer. Carry on where it stopped, a couple of times at most.
+        cutOffText += result.text;
+        messages.push(assistantMessage(result.text, result.reasoning));
+        if (continuations < MAX_CONTINUATIONS) {
+          continuations += 1;
+          messages.push({ role: "user", content: CONTINUE_AFTER_CUT });
+          continue;
+        }
+        stopReason = "budget";
+        answerText = `${cutOffText}
+
+[The reply was cut off at the output limit and is not complete.]`;
+        publish(answerText);
+        break;
+      }
       if (!result.toolCalls?.length) {
-        answerText = result.text;
+        answerText = cutOffText + result.text;
         messages.push(assistantMessage(result.text, result.reasoning));
         consecutiveNonTextSteps = 0;
-        publish(result.text);
+        publish(answerText);
         break;
       }
 
@@ -607,12 +720,32 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
       // keeps it, the owner sees the tools' activity and the `say` updates.
       persistSession(db, threadID, turnID, "running", messages, summary, stepCount, tokenCount);
       let stepProgressed = false;
+      const toolHooks: ToolHooks = {
+        isUnloaded: (name) => deferred.includes(name) && !loadedTools.has(name),
+        hold: () => timer.hold(),
+        ownerWaitMs: settings.ownerWaitMs ?? OWNER_WAIT_CEILING_MS,
+        unattended: Boolean(run.untrustedInput) && !peerSourced,
+      };
       // Several read-only lookups in one step start together; the loop below
       // still consumes them in order, so guards and message order are unchanged.
-      const started = startParallelReads(result.toolCalls, recentCalls, stepCount, DUPLICATE_WINDOW,
+      // Only the first calls of a response run; the rest are answered, not started.
+      const started = startParallelReads(result.toolCalls.slice(0, MAX_TOOL_CALLS_PER_RESPONSE), recentCalls, stepCount, DUPLICATE_WINDOW,
         (call) => broker.requiresApproval(call.function.name, callArguments(call.function.arguments)),
-        (call) => executeTool(db, threadID, turnID, call, callableTools, registry, broker, controller.signal, run.emit, () => undefined, persona, guardrail, peerInput, run.allowedDomains));
-      for (const call of result.toolCalls) {
+        (call) => executeTool(db, threadID, turnID, call, callableTools, registry, broker, controller.signal, run.emit, () => undefined, persona, guardrail, toolHooks, peerInput, run.allowedDomains));
+      for (const [position, call] of result.toolCalls.entries()) {
+        // Stop (or the turn timeout) ends the step: every call still owed a
+        // result gets one, and none of them runs or raises an approval card.
+        if (controller.signal.aborted) {
+          messages.push({ role: "tool", toolCallID: call.id, content: JSON.stringify({ skipped: true, reason: "cancelled" }) });
+          continue;
+        }
+        if (position >= MAX_TOOL_CALLS_PER_RESPONSE) {
+          messages.push({
+            role: "tool", toolCallID: call.id,
+            content: JSON.stringify({ skipped: true, reason: `Not run: the per-response cap is ${MAX_TOOL_CALLS_PER_RESPONSE} tool calls, and this was call ${position + 1}. Make fewer calls per step.` }),
+          });
+          continue;
+        }
         stepCount += 1;
         // Is this step the model going off road — reading the app's own
         // source instead of doing the work? Counted before the duplicate
@@ -620,7 +753,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
         // counted across the turn, so interleaving lookups does not hide it.
         const looking = offRoadGuard && readsAppSource(call.function.name, callArguments(call.function.arguments));
         if (looking) offRoadSteps += 1;
-        const signature = `${call.function.name}:${call.function.arguments}`;
+        const signature = callSignature(call);
         const lastSeen = recentCalls.get(signature);
         if (lastSeen !== undefined && stepCount - lastSeen <= DUPLICATE_WINDOW) {
           const skipped = JSON.stringify({ skipped: true, reason: `Duplicate ${call.function.name} call already tried in this turn.` });
@@ -635,7 +768,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
           continue;
         }
         recentCalls.set(signature, stepCount);
-        const callResult = await (started.get(call.id) ?? executeTool(db, threadID, turnID, call, callableTools, registry, broker, controller.signal, run.emit, (state) => persistSession(db, threadID, turnID, state, messages, summary, stepCount, tokenCount), persona, guardrail, peerInput, run.allowedDomains));
+        const callResult = await (started.get(call.id) ?? executeTool(db, threadID, turnID, call, callableTools, registry, broker, controller.signal, run.emit, (state) => persistSession(db, threadID, turnID, state, messages, summary, stepCount, tokenCount), persona, guardrail, toolHooks, peerInput, run.allowedDomains));
         let content = callResult.content;
         if (looking && offRoadSteps === OFF_ROAD_NUDGE_AT && !offRoadNudged && !acted) {
           offRoadNudged = true;
@@ -665,6 +798,8 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
         stopReason = "needs_input";
         break;
       }
+      // Stopped mid-step: the top of the loop names the stop reason.
+      if (controller.signal.aborted) continue;
       // A step that only calls tools is normal — some models narrate nothing
       // until they have an answer. A step that calls tools and achieves
       // nothing is flailing, and that is what the guard is for.
@@ -694,11 +829,13 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
     }
   } catch (error) {
     if (error instanceof GuardrailError) {
-      // A depth/chain ceiling is an honest stop, not a crash: report it as an
-      // error frame so the user sees why the chain stopped.
+      // A depth/chain ceiling is an honest stop, not a crash. The failure
+      // travels in `turn.end`; the owner gets a plain sentence, the log the detail.
       stopReason = "error";
-      run.emit({ type: "error", code: error.code, message: error.message });
-      answerText = error.message;
+      log.warn(`turn ${turnID} stopped by a guardrail (${error.code}): ${error.message}`);
+      answerText = error.code === "depth_ceiling"
+        ? "I stopped: this chain of work is already as deep as it is allowed to go."
+        : "I stopped: this chain of work hit its step limit.";
       messages.push({ role: "assistant", content: answerText });
       publish(answerText);
     } else {
@@ -714,9 +851,8 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
           activeStepText = "";
         }
       } else {
-        const code = error instanceof RouterBusyError ? "server_busy" : error instanceof RouterError ? error.code : "task_turn_failed";
         const message = error instanceof Error ? error.message : String(error);
-        run.emit({ type: "error", code, message });
+        log.error(`turn ${turnID} ended ${stopReason}: ${message}`);
         if (activeStepText) {
           // Keep the streamed fragment in durable history, but leave the turn
           // marked failed so the UI never presents an interrupted task as done.
@@ -726,20 +862,33 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
         } else if (!answerText && stopReason === "error") {
           // A turn that failed with nothing to say still owes the user a trace:
           // they asked something, and silence reads as "still thinking".
-          answerText = `This turn failed: ${message}`;
+          answerText = failureSentence(error);
           messages.push({ role: "assistant", content: answerText });
           publish(answerText);
         }
       }
     }
   } finally {
-    clearTimeout(timer);
+    timer.clear();
     run.signal.removeEventListener("abort", abort);
-    if (runningTurns.get(threadID)?.turnID === turnID) runningTurns.delete(threadID);
+    if (runningTurns.get(threadID)?.turnID === turnID) {
+      cancelReason = runningTurns.get(threadID)?.cancelReason;
+      runningTurns.delete(threadID);
+    }
   }
 
-  if (run.channelID && run.groupContext === undefined) void compactChannelHistory(db, router, run.channelID, persona.id, peerInput);
+  if (run.channelID && run.groupContext === undefined) compactChannelHistory(db, router, run.channelID, persona.id, peerInput).catch((error) => log.warn("channel compaction failed", error));
+  // Cards this turn raised and nobody answered are dead now: expire them so a
+  // late click does nothing and a reconnect does not draw them again.
+  expirePendingForTurn(db, turnID, stopReason === "cancelled" ? "cancelled" : "expired", run.emit);
   finishTurn(db, { id: turnID, stopReason, ...usage });
+  // A request the owner stopped is closed for the model too; one their next message took over from is not.
+  if (stopReason === "cancelled" && cancelReason !== SUPERSEDED) {
+    // Only an explicit Stop is the owner's; an abort nobody labelled is "interrupted", never "Stop".
+    const why = abortReasonOf(run.signal);
+    const ownerStopped = why === "owner_stop" || cancelReason === "the owner asked to stop";
+    if (why !== "timeout") closeRequest(db, { threadID, turnID, reason: why === "device_revoked" ? "revoked" : ownerStopped ? "stopped" : "interrupted" });
+  }
   touchThread(db, threadID);
   // A turn waiting for the owner's answer is not a failed turn: the session
   // is parked, and the resume picks it up.
@@ -755,6 +904,52 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
     ...(run.delegation?.taskID ? { taskId: run.delegation.taskID } : {}),
   });
   return { turnID, text: answerText, stopReason };
+}
+
+/** Did every provider turn the step down because of the max_tokens we sent? */
+function rejectsMaxTokens(error: unknown): boolean {
+  return error instanceof RouterError && error.code === "provider_failed" && /HTTP 400/.test(error.message) && /max_(?:completion_)?tokens/i.test(error.message);
+}
+
+type TurnUsage = { provider: string; model: string; inputTokens?: number; outputTokens?: number; latencyMs: number };
+
+/** Add one step's usage to the turn's running total. The provider and model are the latest step's. */
+function addUsage(total: TurnUsage | undefined, step: TurnUsage): TurnUsage {
+  const sum = (a?: number, b?: number): number | undefined => (a === undefined && b === undefined ? undefined : (a ?? 0) + (b ?? 0));
+  return {
+    provider: step.provider,
+    model: step.model,
+    inputTokens: sum(total?.inputTokens, step.inputTokens),
+    outputTokens: sum(total?.outputTokens, step.outputTokens),
+    latencyMs: (total?.latencyMs ?? 0) + step.latencyMs,
+  };
+}
+
+/** The owner-facing sentence for a turn that failed; the detail is in the log. */
+function failureSentence(error: unknown): string {
+  if (error instanceof RouterBusyError) return "I'm handling too many requests right now. Please try again in a moment.";
+  if (error instanceof RouterError && error.code === "no_provider") return "I can't answer because no model provider is set up.";
+  if (error instanceof RouterError) return "I couldn't reach a model to finish this. Please try again.";
+  return "Something went wrong on my side, so I stopped. Please try again.";
+}
+
+/**
+ * What makes two tool calls "the same" for the duplicate guard: the tool and
+ * its arguments, with key order, JSON whitespace and padding around strings
+ * ignored, so a retry in disguise is still a retry.
+ */
+export function callSignature(call: ToolCall): string {
+  const canonical = (value: unknown): unknown => {
+    if (typeof value === "string") return value.trim();
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value !== null && typeof value === "object") {
+      return Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([key, item]) => [key, canonical(item)]));
+    }
+    return value;
+  };
+  let args = call.function.arguments.trim();
+  try { args = JSON.stringify(canonical(JSON.parse(call.function.arguments))); } catch { /* not JSON: compare the text as it is */ }
+  return `${call.function.name}:${args}`;
 }
 
 /** False when the tool reported an error; a result that is not JSON still counts. */
@@ -776,6 +971,30 @@ function callArguments(raw: string): Record<string, unknown> {
   }
 }
 
+/** Where the turn runs, for telling the checkout from the owner's own files. */
+interface PathEnv { cwd: string; platform: NodeJS.Platform }
+
+/** An absolute path on any system: posix, `~`, a drive (`C:\` or `C:/`), or a UNC share. */
+function isAbsolutePath(path: string): boolean {
+  return path.startsWith("/") || path.startsWith("~") || /^[A-Za-z]:[\\/]/.test(path) || path.startsWith("\\\\");
+}
+
+/** Does this text name the checkout? Separators are interchangeable, and case is ignored on Windows. */
+function namesCheckout(text: string, env: PathEnv): boolean {
+  const fold = (value: string): string => {
+    const slashed = value.replace(/\\/g, "/");
+    return env.platform === "win32" ? slashed.toLowerCase() : slashed;
+  };
+  const root = fold(env.cwd);
+  if (root.length <= 1) return false;
+  const roots = [root];
+  // Git Bash writes C:/x as /c/x.
+  const drive = /^([a-z]):\//.exec(root);
+  if (env.platform === "win32" && drive) roots.push(`/${drive[1]}/${root.slice(3)}`);
+  const folded = fold(text);
+  return roots.some((candidate) => folded.includes(candidate));
+}
+
 /**
  * Does this step look at the app's own source or state rather than at the
  * owner's files?
@@ -784,22 +1003,25 @@ function callArguments(raw: string): Record<string, unknown> {
  * relative paths is reading the app — even when it never says "apps/". Only
  * an absolute path outside the checkout is the owner's own.
  */
-function readsAppSource(toolName: string, args: Record<string, unknown>): boolean {
+export function readsAppSource(
+  toolName: string,
+  args: Record<string, unknown>,
+  env: PathEnv = { cwd: process.cwd(), platform: process.platform },
+): boolean {
   if (!WORKSPACE_TOOLS.has(toolName)) return false;
   const target = toolName === "bash" ? String(args.command ?? "") : String(args.path ?? "");
   if (!target) return false;
   if (APP_SOURCE_MARKERS.some((marker) => target.includes(marker))) return true;
-  const root = process.cwd();
-  if (root.length > 1 && target.includes(root)) return true;
+  if (namesCheckout(target, env)) return true;
   if (toolName !== "bash") {
     // read_file / grep / glob: a relative path is the checkout; "~" and an
     // absolute path are the owner's.
-    return !target.startsWith("/") && !target.startsWith("~");
+    return !isAbsolutePath(target);
   }
   // A command that names only relative paths reads the checkout.
-  const absolute = target.match(/(?:^|[\s"'=])(\/[^\s"';|&]+)/g) ?? [];
+  const absolute = target.match(/(?:^|[\s"'=])(?:\/[^\s"';|&]+|[A-Za-z]:[\\/][^\s"';|&]*|\\\\[^\s"';|&]+)/g) ?? [];
   if (absolute.length === 0) return !/(?:^|\s)~\//.test(target);
-  return absolute.some((path) => path.includes(root));
+  return absolute.some((path) => namesCheckout(path, env));
 }
 
 /**
@@ -862,7 +1084,7 @@ export function startParallelReads<T>(
   if (calls.length < 2 || !calls.every((call) => PARALLEL_READ_TOOLS.has(call.function.name) && !gated(call))) return started;
   const seen = new Map(recentCalls);
   calls.forEach((call, index) => {
-    const signature = `${call.function.name}:${call.function.arguments}`;
+    const signature = callSignature(call);
     const step = stepCount + index + 1;
     const last = seen.get(signature);
     if (last !== undefined && step - last <= window) return;
@@ -872,11 +1094,28 @@ export function startParallelReads<T>(
   return started;
 }
 
+/** What a tool call needs from the turn around it. */
+interface ToolHooks {
+  /** A deferred tool the model has not loaded yet. */
+  isUnloaded: (name: string) => boolean;
+  /** Stop the turn's clock while the call waits on the owner; the result ends the wait. */
+  hold: () => () => void;
+  /** The longest the owner is waited for before the card expires. */
+  ownerWaitMs: number;
+  /** An unattended routine run: refusals that blame "another agent's message" say what this is instead. */
+  unattended?: boolean;
+}
+
+/** The error the loop raises when the abort or the call's own time limit cuts a tool call in the middle. */
+class AbortedMidCall extends Error {
+  constructor() { super("tool timed out or was cancelled"); }
+}
+
 async function executeTool(  db: Database, threadID: string, turnID: string, call: ToolCall, allowlist: string[],
   registry: ReturnType<typeof buildTaskToolRegistry>, broker: ApprovalBroker, signal: AbortSignal,
   emit: (frame: ServerFrameBody) => void,
   setState: (state: string) => void,
-  persona: Persona, guardrail: GuardrailState, peerInput?: boolean, allowedDomains?: string[],
+  persona: Persona, guardrail: GuardrailState, hooks: ToolHooks, peerInput?: boolean, allowedDomains?: string[],
 ): Promise<{ content: string; awaiting: boolean }> {
   const tool = registry.get(call.function.name);
   let args: Record<string, unknown> = {};
@@ -901,6 +1140,13 @@ async function executeTool(  db: Database, threadID: string, turnID: string, cal
     emit({ type: "tool.end", callID: call.id, ok: false, preview: `not available to ${persona.id}` });
     return { content, awaiting: false };
   }
+  // Its schema was never sent, so the model is guessing at the arguments.
+  if (hooks.isUnloaded(call.function.name)) {
+    const content = JSON.stringify({ error: `${call.function.name} is not loaded yet. Call load_tools with {"names":["${call.function.name}"]} first, then call it again.` });
+    storeResult(content, false, "tool_not_loaded");
+    emit({ type: "tool.end", callID: call.id, ok: false, preview: "not loaded" });
+    return { content, awaiting: false };
+  }
   if (allowedDomains && (call.function.name === "web_fetch" || call.function.name === "web_search")) {
     if (call.function.name === "web_fetch") {
       if (typeof args.url !== "string" || !domainAllowed(args.url, allowedDomains)) {
@@ -917,15 +1163,48 @@ async function executeTool(  db: Database, threadID: string, turnID: string, cal
     }
   }
   if (broker.requiresApproval(tool.name, args)) {
+    // Stopped already: no new card for a dead turn.
+    if (signal.aborted) {
+      const content = JSON.stringify({ skipped: true, reason: "cancelled" });
+      storeResult(content, false, "cancelled");
+      emit({ type: "tool.end", callID: call.id, ok: false, preview: "cancelled" });
+      return { content, awaiting: false };
+    }
     setState("awaiting_approval");
-    const decision = await broker.request(threadID, turnID, tool.name, call.id, args, signal);
+    // The owner's time to decide is not the turn's.
+    const release = hooks.hold();
+    let decision: Decision | null;
+    const waitSignal = AbortSignal.any([signal, AbortSignal.timeout(hooks.ownerWaitMs)]);
+    try {
+      decision = await broker.request(threadID, turnID, tool.name, call.id, args, waitSignal);
+    } finally {
+      release();
+    }
     setState("running");
+    // Nobody answered in time (the turn itself was not stopped): expire the card.
+    if (!decision && !signal.aborted && waitSignal.aborted) {
+      expireApprovalForCall(db, turnID, call.id, "expired", emit);
+      const content = JSON.stringify({ error: "Not approved: nobody answered in time, so the action was not run." });
+      storeResult(content, false, "approval_expired");
+      emit({ type: "tool.end", callID: call.id, ok: false, preview: "expired" });
+      return { content, awaiting: true };
+    }
     if (!decision || decision === "reject") {
       const content = JSON.stringify({ error: decision ? "User denied this action." : "Approval was cancelled." });
       storeResult(content, false, "approval_rejected");
       emit({ type: "tool.end", callID: call.id, ok: false, preview: decision ? "denied" : "cancelled" });
       return { content, awaiting: true };
     }
+  }
+  // `run_privileged` waits on the owner inside the call (a password prompt or
+  // the system dialog), so the turn's clock stops for it as it does for an
+  // approval card, and no longer than the owner-wait ceiling. The call's own
+  // timeout still bounds the command.
+  let releaseOwnerWait: (() => void) | undefined;
+  let ownerWaitCeiling: ReturnType<typeof setTimeout> | undefined;
+  if (call.function.name === "run_privileged") {
+    releaseOwnerWait = hooks.hold();
+    ownerWaitCeiling = setTimeout(releaseOwnerWait, hooks.ownerWaitMs);
   }
   try {
     const parsed = JSON.parse(call.function.arguments) as unknown;
@@ -945,26 +1224,44 @@ async function executeTool(  db: Database, threadID: string, turnID: string, cal
         },
         hostAllowed: allowedDomains ? (url: URL) => domainAllowed(url.toString(), allowedDomains) : undefined,
       }),
-      new Promise<never>((_, reject) => combined.addEventListener("abort", () => reject(new Error("tool timed out or was cancelled")), { once: true })),
+      new Promise<never>((_, reject) => combined.addEventListener("abort", () => reject(new AbortedMidCall()), { once: true })),
     ]);
     let safeResult = result;
+    if (hooks.unattended) safeResult = unattendedWording(result);
     if (allowedDomains && call.function.name === "web_search" && typeof result === "object" && result !== null && Array.isArray((result as { results?: unknown }).results)) {
       safeResult = { ...(result as Record<string, unknown>), results: (result as { results: unknown[] }).results.filter((item) => {
         if (typeof item !== "object" || item === null || typeof (item as { url?: unknown }).url !== "string") return false;
         return domainAllowed((item as { url: string }).url, allowedDomains);
       }) };
     }
-    const content = fitToolResult(safeResult);
+    const content = LONG_RESULT_TOOLS.has(call.function.name)
+      ? fitToolResult(safeResult, MAX_LONG_TOOL_RESULT_CHARS, LONG_RESULT_TEXT_CHARS)
+      : fitToolResult(safeResult);
     storeResult(content, true, null);
     emit({ type: "tool.end", callID: call.id, ok: true, preview: toolPreview(result) });
     return { content, awaiting: false };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const content = JSON.stringify({ error: truncate(message, 500) });
-    storeResult(content, false, message);
+    // The abort's own error has its own code; a tool's message that equals a loop code is prefixed (see closure.ts).
+    storeResult(content, false, error instanceof AbortedMidCall ? ABORTED_MID_CALL : toolErrorCode(message));
     emit({ type: "tool.end", callID: call.id, ok: false, preview: truncate(message, 120) });
     return { content, awaiting: false };
+  } finally {
+    clearTimeout(ownerWaitCeiling);
+    releaseOwnerWait?.();
   }
+}
+
+/**
+ * The tools refuse peer-influenced turns with words about "another agent's message". An unattended
+ * routine run is refused for the same reason but is not that, so the refusal says what it is.
+ */
+function unattendedWording(result: unknown): unknown {
+  if (typeof result !== "object" || result === null || typeof (result as { error?: unknown }).error !== "string") return result;
+  const error = (result as { error: string }).error;
+  const reworded = error.replace("this turn started from another agent's message", "this is an unattended routine run");
+  return reworded === error ? result : { ...(result as Record<string, unknown>), error: reworded };
 }
 
 function parseSessionMessages(raw: string): ChatMessage[] {
@@ -1006,36 +1303,71 @@ function persistSession(db: Database, threadID: string, turnID: string, state: s
   db.run("UPDATE agent_sessions SET state=?, message_log=?, summary=?, step_count=?, token_count=?, updated_at=? WHERE thread_id=? AND turn_id=?", [state, JSON.stringify(messages), summary, steps, tokens, nowISO(), threadID, turnID]);
 }
 
+/** The note a cut user message ends with. Matched on the way back in, so a cut message is not cut twice. */
+const USER_CUT_NOTE = /\n\n\[Note: this message was cut to fit: kept \d+ of \d+ characters\. Tell the owner the rest was not read\.\]$/;
+
+/** The owner's message, cut at the limit with a plain note of how much was kept. */
+function clipUserMessage(content: string): string {
+  if (content.length <= MAX_USER_MESSAGE_CHARS) return content;
+  // Already cut (the note adds a little): leave it. A long message that only imitates the note is still cut.
+  if (content.length <= MAX_USER_MESSAGE_CHARS + 300 && USER_CUT_NOTE.test(content)) return content;
+  return `${content.slice(0, MAX_USER_MESSAGE_CHARS)}\n\n[Note: this message was cut to fit: kept ${MAX_USER_MESSAGE_CHARS} of ${content.length} characters. Tell the owner the rest was not read.]`;
+}
+
 export function compact(messages: ChatMessage[], previousSummary: string | null): { messages: ChatMessage[]; summary: string | null } {
   let normalized = messages.map((message) => ({
     ...message,
-    content: truncate(message.content, message.role === "tool" ? MAX_TOOL_RESULT_CHARS : 12_000),
+    content: message.role === "user" ? clipUserMessage(message.content) : truncate(message.content, message.role === "tool" ? MAX_LONG_TOOL_RESULT_CHARS : 12_000),
     ...(message.toolCalls ? { toolCalls: message.toolCalls.map((call) => call.function.arguments.length > 8_000
       ? { ...call, function: { ...call.function, arguments: "{}" } } : call) } : {}),
   }));
   const size = (): number => normalized.reduce((total, message) => total + message.content.length + JSON.stringify(message.toolCalls ?? []).length, 0);
   if (size() <= MAX_PROMPT_CHARS) return { messages: normalized, summary: previousSummary };
-  const keepFrom = Math.max(0, normalized.length - 8);
-  const firstUser = normalized.findIndex((message, index) => index >= keepFrom && message.role === "user");
-  const cut = firstUser >= 0 ? firstUser : keepFrom;
-  const dropped = normalized.slice(0, cut).filter((message) => message.role === "user" || message.role === "assistant").map((message) => `${message.role}: ${message.content}`).join("\n");
-  const summary = truncateTail([previousSummary, dropped].filter(Boolean).join("\n"), 8_000);
-  normalized = normalized.slice(cut);
-  while (size() > MAX_PROMPT_CHARS && normalized.length > 1) {
-    const nextUser = normalized.findIndex((message, index) => index > 0 && message.role === "user");
-    if (nextUser < 0) break;
-    normalized = normalized.slice(nextUser);
+  // The request this turn is answering stays verbatim, never in the
+  // "untrusted" summary. Everything else may be folded into the summary, but
+  // only whole steps: a tool result always goes with the assistant message
+  // that called it.
+  const current = normalized.findLastIndex((message) => message.role === "user");
+  const pinned = current >= 0 ? normalized[current] : undefined;
+  const folded: typeof normalized = [];
+  // Keep the last few messages, starting at a step boundary.
+  let cut = Math.max(0, normalized.length - 8);
+  while (cut > 0 && normalized[cut]!.role === "tool") cut -= 1;
+  if (pinned && cut > current) {
+    // The request is older than the kept tail: it rides in front of it.
+    folded.push(...normalized.slice(0, cut).filter((message) => message !== pinned));
+    normalized = [pinned, ...normalized.slice(cut)];
+  } else {
+    folded.push(...normalized.slice(0, cut));
+    normalized = normalized.slice(cut);
   }
+  // Still too big (a long single turn): fold the oldest whole step, keeping the newest.
+  while (size() > MAX_PROMPT_CHARS) {
+    const first = normalized.findIndex((message) => message !== pinned);
+    if (first < 0) break;
+    let end = first + 1;
+    while (end < normalized.length && normalized[end]!.role === "tool") end += 1;
+    if (normalized.slice(end).every((message) => message === pinned)) break;
+    folded.push(...normalized.slice(first, end));
+    normalized = [...normalized.slice(0, first), ...normalized.slice(end)];
+  }
+  const dropped = folded.flatMap((message) => {
+    if (message.role !== "user" && message.role !== "assistant") return [];
+    const calls = message.toolCalls?.length ? `(called ${message.toolCalls.map((call) => call.function.name).join(", ")})` : "";
+    const line = [message.content, calls].filter(Boolean).join(" ");
+    return line ? [`${message.role}: ${line}`] : [];
+  }).join("\n");
+  const summary = truncateTail([previousSummary, dropped].filter(Boolean).join("\n"), 8_000);
   return { messages: normalized, summary };
 }
 /**
  * A tool result that fits the prompt and is still valid JSON: long strings
  * and arrays are cut step by step, and the result is marked truncated.
  */
-export function fitToolResult(value: unknown, max = MAX_TOOL_RESULT_CHARS): string {
+export function fitToolResult(value: unknown, max = MAX_TOOL_RESULT_CHARS, keepChars = 1_000): string {
   const full = JSON.stringify(value) ?? "null";
   if (full.length <= max) return full;
-  for (const [items, chars] of [[20, 1_000], [10, 400], [5, 200], [3, 80]] as const) {
+  for (const [items, chars] of [[20, keepChars], [10, 400], [5, 200], [3, 80]] as const) {
     const text = JSON.stringify({ truncated: true, result: shrinkValue(value, items, chars) });
     if (text.length <= max) return text;
   }

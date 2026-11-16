@@ -12,12 +12,14 @@ import { searchTranscripts } from "../stores/transcripts";
 import { grep, glob } from "./search";
 import { readFile } from "./read-file";
 import { writeFile } from "./write-file";
-import { webSearch, webFetch, deepResearch } from "./web";
+import { webSearch, webFetch, deepResearch, DEFAULT_FETCH_CHARS, MAX_FETCH_CHARS } from "./web";
 import { runBash } from "./bash";
 import { skillsList, skillsLoad, skillsResource } from "./skills";
 import { createMailTools } from "./mail";
 import { createGoogleTools } from "./google";
 import { mcpHub } from "../plugins/mcp";
+import { IMPLICIT_AGENT_TOOLS } from "../agent/personas";
+import { SCRATCH_TOOLS } from "./scratch-tool";
 import { createJobTools } from "./jobs-tool";
 import { createRoutineTools } from "./routines-tool";
 import type { MailAccountResolver } from "../plugins/credentials";
@@ -30,6 +32,8 @@ const objectSchema = (properties: Record<string, unknown>, required: string[]): 
 const stringProp = { type: "string", minLength: 1 };
 const limitProp = { type: "integer", minimum: 1, maximum: 20 };
 const pathProp = { type: "string", minLength: 1 };
+// web_fetch's own length: a page summary is thousands of characters, not a result count.
+const fetchCharsProp = { type: "integer", minimum: 1, maximum: MAX_FETCH_CHARS, default: DEFAULT_FETCH_CHARS };
 
 export const TASK_TOOL_NAMES = ["memory_search", "memory_write", "transcript_search", "links_search", "link_save", "tasks_list", "task_create", "task_update", "grep", "glob", "read_file", "write_file", "web_search", "web_fetch", "deep_research", "bash", "skills_list", "skills_load", "skills_resource", "mail_search", "mail_read", "mail_send", "calendar_list", "calendar_create", "calendar_update", "drive_search", "drive_read", "remember_fact", "recall_fact", "forget_fact", "handoff", "share_thread", "job_schedule", "job_list", "job_cancel", "routine_create", "routine_list", "routine_pause", "routine_delete"];
 
@@ -189,8 +193,8 @@ export function buildTaskToolRegistry(db: Database, mailAccounts?: MailAccountRe
   });
   register({
     name: "web_fetch", description: "Fetch a public web page and extract its title and summary. Uses Firecrawl for JS-rendered pages if configured.", kind: "static",
-    schema: objectSchema({ url: { type: "string", format: "uri", maxLength: 2_048 }, maxChars: limitProp }, ["url"]), timeoutMs: 20_000,
-    handler: async (args, ctx) => webFetch(parseObject(args, (v) => ({ url: boundedString(v.url, 2_048), maxChars: v.maxChars === undefined ? undefined : optionalLimit(v.maxChars) })), ctx.hostAllowed),
+    schema: objectSchema({ url: { type: "string", format: "uri", maxLength: 2_048 }, maxChars: fetchCharsProp }, ["url"]), timeoutMs: 20_000,
+    handler: async (args, ctx) => webFetch(parseObject(args, (v) => ({ url: boundedString(v.url, 2_048), maxChars: v.maxChars === undefined ? undefined : boundedInteger(v.maxChars, 1, MAX_FETCH_CHARS) })), ctx.hostAllowed),
   });
   register({
     name: "deep_research", description: "Deep research: search the web and fetch top results in parallel, returning compiled findings. Use for research questions needing multiple sources.", kind: "static",
@@ -270,12 +274,21 @@ export const CORE_TOOLS = new Set([
   "tasks_list", "task_create", "handoff", "delegate_task",
 ]);
 
-/** An agent with this many tools or fewer gets every schema; deferring would cost a step. */
+/**
+ * An agent with this many tools or fewer gets every schema; deferring would
+ * cost a step. Only the tools the bot was given count: the ones every bot
+ * gets (`IMPLICIT_AGENT_TOOLS`, the delegated scratch tools) and names this
+ * turn does not register do not, so a new bot with the default toolset
+ * defers nothing.
+ */
 export const DEFER_TOOLS_ABOVE = 12;
+
+const SCRATCH_TOOL_NAMES: ReadonlySet<string> = new Set(SCRATCH_TOOLS);
 
 /** The tools of this allowlist that are listed by name instead of sent. */
 export function deferredTools(registry: ToolRegistry, allowlist: string[]): string[] {
-  if (allowlist.length <= DEFER_TOOLS_ABOVE) return [];
+  const counted = allowlist.filter((name) => registry.get(name) && !IMPLICIT_AGENT_TOOLS.has(name) && !SCRATCH_TOOL_NAMES.has(name));
+  if (counted.length <= DEFER_TOOLS_ABOVE) return [];
   return allowlist.filter((name) => !CORE_TOOLS.has(name) && registry.get(name));
 }
 
@@ -317,6 +330,7 @@ function string(value: unknown): string { if (typeof value !== "string" || !valu
 function boundedString(value: unknown, max: number): string { const result = string(value); if (result.length > max) throw new Error(`string exceeds ${max} characters`); return result; }
 function number(value: unknown): number { if (typeof value !== "number" || !Number.isFinite(value)) throw new Error("expected a number"); return value; }
 function boolean(value: unknown): boolean { if (typeof value !== "boolean") throw new Error("expected a boolean"); return value; }
+function boundedInteger(value: unknown, min: number, max: number): number { if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) throw new Error(`expected an integer from ${min} to ${max}`); return value; }
 function optionalLimit(value: unknown): number | undefined { if (value === undefined || value === null) return undefined; const n = Number(value); if (!Number.isInteger(n) || n < 1 || n > 20) return undefined; return n; }
 function optionalStrings(value: unknown): string[] | undefined { if (value === undefined) return undefined; if (!Array.isArray(value) || value.length > 20 || value.some((item) => typeof item !== "string" || !item.trim() || item.length > 80)) throw new Error("tags must be up to 20 non-empty strings of at most 80 characters"); return value.map((item: string) => item.trim()); }
 function enumValue<const T extends readonly string[]>(value: unknown, allowed: T): T[number] { if (typeof value !== "string" || !allowed.includes(value)) throw new Error(`expected one of: ${allowed.join(", ")}`); return value as T[number]; }

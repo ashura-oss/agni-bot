@@ -46,6 +46,22 @@ export interface ChatMessage {
   /** Set on a question from a delegated task; the answer carries it back. */
   taskId: string | null;
   questionId: string | null;
+  /**
+   * The reply of a background job (a reminder, a brief) that streamed into
+   * this conversation from a session block of its own. It never counts as the
+   * owner's own empty answer.
+   */
+  isBackground: boolean;
+  /**
+   * The text so far is the middle of a reply: this view picked the turn up
+   * after it began (the owner switched away and back). The full text replaces
+   * it when the answer is sealed.
+   */
+  isContinuation: boolean;
+  /** The daemon said how this message's turn ended (history rows carry it). */
+  stopKnown?: boolean;
+  /** On a pending send: the ids of every durable row this chat knew when it was sent. */
+  knownBeforeSend?: ReadonlySet<string>;
 }
 
 export interface ApprovalRow {
@@ -55,6 +71,8 @@ export interface ApprovalRow {
   decisions: string[];
   decision: string | null;
   isLocal: boolean;
+  /** The bot whose turn asked, when the frames said so; null when unknown. */
+  agentID?: string | null;
 }
 
 export interface FormEmail {
@@ -75,6 +93,8 @@ export interface FormRow {
   multiple: boolean;
   /** The draft, when the kind is "email". */
   email: FormEmail | null;
+  /** The bot whose turn asked, when the frames said so; null when unknown. */
+  agentID?: string | null;
 }
 
 /** A one-time password prompt. The value never lives in this row. */
@@ -101,7 +121,20 @@ export interface NoticeRow {
 export type ConversationEffect =
   | { kind: "refreshThreadList" }
   | { kind: "reloadDurableState" }
-  | { kind: "notify"; title: string; body: string; sound: boolean; threadID?: string }
+  | {
+      kind: "notify";
+      title: string;
+      body: string;
+      sound: boolean;
+      threadID?: string;
+      /**
+       * Set when the notice is the app asking the owner for something. `title`
+       * is neutral; the app puts the asking bot's name in front when it knows
+       * it. The product name is never used as a bot's name.
+       */
+      need?: "approval" | "question" | "password";
+      agentID?: string | null;
+    }
   | { kind: "focusComposer" }
   | { kind: "unread"; threadID: string }
   | { kind: "agentsChanged"; agents: AgentInfo[] }
@@ -127,6 +160,8 @@ function newMessage(partial: Partial<ChatMessage> & Pick<ChatMessage, "id" | "ro
     uiHint: null,
     taskId: null,
     questionId: null,
+    isBackground: false,
+    isContinuation: false,
     ...partial,
   };
 }
@@ -184,6 +219,22 @@ export class Conversation {
    * their tokens carry only a block id, so attribution survives the seam.
    */
   private adoptedTurns = new Set<string>();
+  /** Which bot runs each turn this view follows: who an approval is "from". */
+  private turnAgents = new Map<string, string>();
+  /**
+   * Turns whose start named another conversation. Their tokens carry no conversation of
+   * their own, so this is the only way to tell them from this chat's.
+   */
+  private declinedTurns = new Set<string>();
+  /** Every durable row id this chat has loaded. */
+  private knownDurableIDs = new Set<string>();
+  /** Turns whose turn.end this view has seen, so a late history answer cannot bring one back. */
+  private endedTurns = new Set<string>();
+  /**
+   * Turns started in a conversation while this chat did not yet know its own (after a reload,
+   * the replay arrives before `conversation.open` answers). They are judged when the chat binds.
+   */
+  private pendingTurns = new Map<string, { threadID: string; conversationID: string; agentID: string }>();
 
   private static readonly noticeCap = 40;
 
@@ -225,10 +276,56 @@ export class Conversation {
   /** Local echo: the bubble appears before the socket answers (S6). */
   appendLocalUserMessage(text: string, at: Date = new Date(), attachments: AttachmentInfo[] = []): string {
     const id = `local_${randomID()}`;
+    // What the chat already knew, so only a row that appears afterwards can be this send's own.
+    const known = new Set(this.knownDurableIDs);
+    for (const message of this.messages) if (!message.isLocalEcho) known.add(message.id);
     this.messages.push(
-      newMessage({ id, role: "user", text, attachments, createdAt: at, sessionID: this.threadID, isLocalEcho: true }),
+      newMessage({ id, role: "user", text, attachments, createdAt: at, sessionID: this.threadID, isLocalEcho: true, knownBeforeSend: known }),
     );
     return id;
+  }
+
+  /**
+   * The daemon behind this view restarted (or lost its replay log): whatever it was in the
+   * middle of is gone. Forget the running turn and its half-written bubbles, and drop the
+   * approval, question and password cards that belonged to the old process. `keepCards`
+   * names cards the new process has already re-sent. History is reloaded separately.
+   */
+  resetLive(options: { keepCards?: ReadonlySet<string> } = {}): void {
+    const keep = options.keepCards ?? new Set<string>();
+    this.inFlightTurnID = null;
+    this.inFlightThreadID = null;
+    this.adoptedTurns.clear();
+    this.turnAnswers.clear();
+    this.turnAgents.clear();
+    this.failures.clear();
+    this.declinedTurns.clear();
+    this.pendingTurns.clear();
+    this.messages = this.messages.filter((message) => !isStreaming(message));
+    this.approvals = this.approvals.filter((approval) => keep.has(approval.id));
+    this.forms = this.forms.filter((form) => keep.has(form.id));
+    this.secrets = this.secrets.filter((secret) => keep.has(secret.id));
+  }
+
+  /**
+   * The daemon says the turn Stop was pressed on is no longer running: it finished. Stop and
+   * "Writing" go away; the finished reply comes from the durable history.
+   */
+  finishTurnLocally(): void {
+    const turnID = this.inFlightTurnID;
+    this.inFlightTurnID = null;
+    this.inFlightThreadID = null;
+    if (turnID !== null) {
+      this.adoptedTurns.delete(turnID);
+      this.turnAgents.delete(turnID);
+      // A half-drawn bubble would outlive the reload (history keeps bubbles still streaming).
+      this.messages = this.messages.filter((message) => !(message.turnID === turnID && isStreaming(message)));
+    }
+  }
+
+  /** Take back a local echo the daemon refused, so the text can go back to the composer. */
+  discardLocalEcho(id: string): void {
+    this.messages = this.messages.filter((message) => !(message.id === id && message.isLocalEcho));
   }
 
   markLocalFailure(id: string, reason: string): void {
@@ -282,6 +379,38 @@ export class Conversation {
     this.inFlightThreadID = null;
     this.adoptedTurns.clear();
     this.turnAnswers.clear();
+    this.adoptPendingTurns();
+  }
+
+  /** Decide the turns that began before this chat knew its conversation: ours are picked up, others declined. */
+  private adoptPendingTurns(): void {
+    const pending = [...this.pendingTurns];
+    this.pendingTurns.clear();
+    for (const [turnID, turn] of pending) {
+      if (turn.conversationID !== this.conversationID) {
+        this.declinedTurns.add(turnID);
+        continue;
+      }
+      this.adoptedTurns.add(turnID);
+      this.turnAgents.set(turnID, turn.agentID);
+      this.inFlightTurnID = turnID;
+      this.inFlightThreadID = turn.threadID;
+      this.messages.push(
+        newMessage({
+          id: Conversation.assistantID(turnID),
+          role: "assistant",
+          text: "",
+          createdAt: new Date(),
+          turnID,
+          agentID: turn.agentID,
+          sessionID: turn.threadID,
+          state: { kind: "streaming" },
+          isBackground: this.threadID !== null && this.threadID !== turn.threadID,
+          // The replay's tokens went by before the chat was bound: the start of the reply is not here.
+          isContinuation: true,
+        }),
+      );
+    }
   }
 
   /** A session block boundary arrived: everything after this lands in the new block. */
@@ -305,10 +434,51 @@ export class Conversation {
   }
 
   /** The conversation transcript across session blocks (v2). */
-  loadConversationHistory(conversationID: string, agentID: string | null, incoming: MessageInfo[]): void {
+  loadConversationHistory(
+    conversationID: string,
+    agentID: string | null,
+    incoming: MessageInfo[],
+    runningTurn?: { turnID: string; threadID: string; agentID: string } | null,
+  ): void {
     this.conversationID = conversationID;
     if (agentID) this.agentID = agentID;
     this.replaceDurable(incoming);
+    if (runningTurn) this.adoptRunningTurn(runningTurn);
+  }
+
+  /**
+   * The daemon says a turn of this conversation is running right now. A page that was just
+   * loaded saw no turn.start for it (the replay does not reach back that far), so without this
+   * there is no Writing, no Stop and no bubble until the turn ends.
+   */
+  private adoptRunningTurn(turn: { turnID: string; threadID: string; agentID: string }): void {
+    if (turn.agentID !== this.agentID) return;
+    if (this.endedTurns.has(turn.turnID) || this.declinedTurns.has(turn.turnID)) return;
+    this.adoptedTurns.add(turn.turnID);
+    this.turnAgents.set(turn.turnID, turn.agentID);
+    this.inFlightTurnID = turn.turnID;
+    this.inFlightThreadID = turn.threadID;
+    const id = Conversation.assistantID(turn.turnID);
+    const existing = this.messages.find((message) => message.id === id);
+    if (existing) {
+      existing.state = { kind: "streaming" };
+      return;
+    }
+    this.messages.push(
+      newMessage({
+        id,
+        role: "assistant",
+        text: "",
+        createdAt: new Date(),
+        turnID: turn.turnID,
+        agentID: turn.agentID,
+        sessionID: turn.threadID,
+        state: { kind: "streaming" },
+        isBackground: this.threadID !== null && this.threadID !== turn.threadID,
+        // Whatever was written before this page loaded is not here: the full text comes with the reload at the end.
+        isContinuation: true,
+      }),
+    );
   }
 
   /**
@@ -333,6 +503,15 @@ export class Conversation {
         senderColor: info.senderColor ?? null,
         toAgentId: info.toAgentId ?? null,
         uiHint: info.uiHint ?? null,
+        ...(info.role === "assistant" && info.stopReason !== undefined
+          ? {
+              stopKnown: true,
+              state:
+                info.stopReason === "end" || info.stopReason === "needs_input"
+                  ? ({ kind: "complete" } as const)
+                  : ({ kind: "stopped", reason: info.stopReason } as const),
+            }
+          : {}),
       }),
     );
 
@@ -340,18 +519,70 @@ export class Conversation {
     const echoes = this.messages.filter(
       (message) => message.isLocalEcho && !(message.state.kind === "failed" && message.state.reason === ""),
     );
-    rebuilt.push(...streaming);
+    // A pending send is answered by a durable row of the same text that was not known when it
+    // was sent; each such row answers one send, oldest send first. The text alone is not enough
+    // (an older row with the same words must not swallow a message still on its way), and no clock
+    // is compared: the daemon's and the browser's need not agree.
+    const claimed = new Set<string>();
+    const answeredBy = new Map<ChatMessage, string>();
+    const keep = new Set<ChatMessage>(streaming);
     for (const echo of echoes) {
-      if (!rebuilt.some((message) => message.role === "user" && message.text === echo.text)) {
-        rebuilt.push(echo);
-      }
+      const answer = rebuilt.find(
+        (message) =>
+          message.role === "user" &&
+          message.text === echo.text &&
+          !claimed.has(message.id) &&
+          !(echo.knownBeforeSend?.has(message.id) ?? false),
+      );
+      if (answer) {
+        claimed.add(answer.id);
+        answeredBy.set(echo, answer.id);
+      } else keep.add(echo);
     }
+    // Survivors stay where they were: right after the last durable row they followed, in the
+    // order they were added. Nothing is sorted by time or by what it says.
+    const rebuiltIDs = new Set(rebuilt.map((message) => message.id));
+    const placed = new Map<string | null, number>();
+    let follows: string | null = null;
+    for (const message of this.messages) {
+      if (!keep.has(message)) {
+        // A send answered by a durable row now sits where that row is.
+        const answer = answeredBy.get(message);
+        if (answer !== undefined) follows = answer;
+        else if (rebuiltIDs.has(message.id)) follows = message.id;
+        continue;
+      }
+      const count = placed.get(follows) ?? 0;
+      placed.set(follows, count + 1);
+      const anchor = follows === null ? -1 : rebuilt.findIndex((candidate) => candidate.id === follows);
+      // With nothing before it (a chat that was only an echo) a survivor is the newest thing: the end.
+      rebuilt.splice(follows === null ? rebuilt.length : anchor + 1 + count, 0, message);
+    }
+    for (const message of rebuilt) this.knownDurableIDs.add(message.id);
     // Survivors predate the blocks they stream into; stamp them with the
     // active block so a seam renders the instant history reloads.
     for (const message of rebuilt) {
       if (message.sessionID === null) message.sessionID = this.threadID;
     }
     this.messages = rebuilt;
+  }
+
+  /**
+   * Re-mark replies that did not finish. History carries no stop reason, so
+   * the app remembers the reasons it saw on `turn.end` and hands them back
+   * after a reload; the last answer of each such turn gets its marker again.
+   */
+  restoreStops(stops: Readonly<Record<string, string>>): void {
+    for (const [turnID, reason] of Object.entries(stops)) {
+      if (reason === "end" || reason === "needs_input") continue;
+      for (let index = this.messages.length - 1; index >= 0; index -= 1) {
+        const message = this.messages[index];
+        if (!message || message.turnID !== turnID || message.role !== "assistant") continue;
+        if (message.stopKnown) break;
+        if (message.state.kind === "complete") message.state = { kind: "stopped", reason };
+        break;
+      }
+    }
   }
 
   // MARK: frames
@@ -398,6 +629,22 @@ export class Conversation {
       case "channel.created":
       case "channel.list.ok":
       case "channel.history.ok":
+        return [];
+
+      // The "Always allow" rules live in the app's settings state, not in a transcript.
+      case "approval.rules.list.ok":
+      case "approval.rule.revoke.ok":
+        return [];
+
+      case "approval.closed":
+        // The card is no longer actionable (answered here or elsewhere, timed
+        // out, or its turn ended). The id spaces of approvals and forms are
+        // separate, so `kind` says which list the card is in.
+        if (frame.kind === "approval") {
+          this.approvals = this.approvals.filter((approval) => approval.id !== frame.requestID);
+        } else {
+          this.forms = this.forms.filter((form) => form.id !== frame.requestID);
+        }
         return [];
 
       case "presence":
@@ -453,6 +700,7 @@ export class Conversation {
             streamed.text = frame.text;
             streamed.createdAt = parseISO(frame.createdAt);
             streamed.state = { kind: "complete" };
+            streamed.isContinuation = false;
             streamed.senderName = frame.senderName;
             streamed.senderColor = frame.senderColor ?? null;
             streamed.uiHint = frame.uiHint ?? null;
@@ -512,11 +760,28 @@ export class Conversation {
 
       case "turn.start": {
         const isOurs = this.belongsTo(frame.threadID, frame.conversationID ?? null);
-        if (!isOurs) return [{ kind: "unread", threadID: frame.threadID }, { kind: "refreshThreadList" }];
+        if (!isOurs && this.conversationID === null && frame.conversationID !== undefined) {
+          // Not known yet whose this is: the chat has not learned its conversation. Judge it at bind.
+          this.pendingTurns.set(frame.turnID, { threadID: frame.threadID, conversationID: frame.conversationID, agentID: frame.agentID });
+          return [{ kind: "refreshThreadList" }];
+        }
+        if (!isOurs) {
+          this.declinedTurns.add(frame.turnID);
+          for (const old of [...this.declinedTurns].slice(0, Math.max(0, this.declinedTurns.size - 100))) this.declinedTurns.delete(old);
+          return [{ kind: "unread", threadID: frame.threadID }, { kind: "refreshThreadList" }];
+        }
         if (frame.conversationID !== undefined || this.threadID === frame.threadID) {
           this.adoptedTurns.add(frame.turnID);
         }
-        this.adopt(frame.threadID);
+        this.turnAgents.set(frame.turnID, frame.agentID);
+        // A turn bound in by conversation but running in a block other than the
+        // open one is background work (a reminder, a brief), not the owner's chat.
+        // A chat that does not know its own block yet (a fresh conversation) cannot compare
+        // blocks: then the owner's message waiting for its answer is what marks a turn as theirs.
+        const isBackground =
+          frame.conversationID !== undefined &&
+          (this.threadID !== null ? this.threadID !== frame.threadID : !this.messages.some((message) => message.isLocalEcho));
+        if (!isBackground) this.adopt(frame.threadID);
         this.inFlightTurnID = frame.turnID;
         this.inFlightThreadID = frame.threadID;
         const id = Conversation.assistantID(frame.turnID);
@@ -535,6 +800,7 @@ export class Conversation {
               agentID: frame.agentID,
               sessionID: frame.threadID,
               state: { kind: "streaming" },
+              isBackground,
             }),
           );
         }
@@ -542,8 +808,11 @@ export class Conversation {
       }
 
       case "token": {
+        if (this.declinedTurns.has(frame.turnID)) return [];
         const adopted = this.adoptedTurns.has(frame.turnID);
-        if (!this.belongsTo(frame.threadID, null) && !adopted) return [];
+        // With no turn.start seen, only a block this chat already knows is proof the turn is its own:
+        // a chat that has not learned its block yet (just switched to) would take any bot's tokens.
+        if (!adopted && !(this.threadID !== null && this.threadID === frame.threadID)) return [];
         const id = Conversation.assistantID(frame.turnID);
         const message = this.messages.find((candidate) => candidate.id === id);
         if (message) {
@@ -562,6 +831,8 @@ export class Conversation {
               agentID: this.agentID,
               sessionID: frame.threadID,
               state: { kind: "streaming" },
+              // No turn.start was seen, so the start of this reply is not here.
+              isContinuation: true,
             }),
           );
         }
@@ -570,6 +841,10 @@ export class Conversation {
 
       case "turn.end": {
         const adopted = this.adoptedTurns.delete(frame.turnID);
+        const wasDeclined = this.declinedTurns.delete(frame.turnID);
+        this.endedTurns.add(frame.turnID);
+        for (const old of [...this.endedTurns].slice(0, Math.max(0, this.endedTurns.size - 100))) this.endedTurns.delete(old);
+        this.pendingTurns.delete(frame.turnID);
         const isOurs =
           adopted ||
           this.belongsTo(frame.threadID, frame.conversationID ?? null) ||
@@ -577,11 +852,25 @@ export class Conversation {
         const id = Conversation.assistantID(frame.turnID);
         const message = this.messages.find((candidate) => candidate.id === id);
         const answerID = this.turnAnswers.get(frame.turnID);
+        let droppedSilentBackground = false;
+        this.turnAgents.delete(frame.turnID);
         if (message) {
           if (message.text.length === 0 && answerID !== undefined) {
             // The answer was sealed under its durable id; this is only the
             // empty bubble opened for a next step that never came.
             this.messages = this.messages.filter((candidate) => candidate !== message);
+          } else if (
+            message.text.length === 0 &&
+            message.isBackground &&
+            message.tools.length === 0 &&
+            frame.stopReason === "end"
+          ) {
+            // A background job that finished and said nothing is not a failed reply in the
+            // owner's chat. One that failed or timed out keeps its bubble, so the owner
+            // hears that their reminder did not run. Its saved result, if it left one, comes
+            // from the durable history: a routine streams nothing, so nothing else shows it.
+            this.messages = this.messages.filter((candidate) => candidate !== message);
+            droppedSilentBackground = true;
           } else {
             // A turn that ended badly keeps the daemon's own explanation when
             // one arrived while it was running.
@@ -608,12 +897,17 @@ export class Conversation {
         }
         this.turnAnswers.delete(frame.turnID);
         this.failures.delete(frame.turnID);
+        // A reply this view only saw the tail of is completed from the durable copy.
+        // So is a turn of this conversation whose tokens were not shown (its block was not known
+        // yet): there is no bubble, but the durable history has the reply.
+        const unseen = !message && !wasDeclined && isOurs && frame.stopReason === "end" && frame.conversationID !== undefined && frame.conversationID === this.conversationID && answerID === undefined;
+        const pickedUpMidStream = unseen || droppedSilentBackground || (message?.isContinuation === true && message.text.length > 0);
         if (!isOurs) return [{ kind: "unread", threadID: frame.threadID }, { kind: "refreshThreadList" }];
         if (this.inFlightTurnID === frame.turnID) {
           this.inFlightTurnID = null;
           this.inFlightThreadID = null;
         }
-        return [{ kind: "refreshThreadList" }];
+        return pickedUpMidStream ? [{ kind: "refreshThreadList" }, { kind: "reloadDurableState" }] : [{ kind: "refreshThreadList" }];
       }
 
       case "tool.start":
@@ -642,9 +936,17 @@ export class Conversation {
           decisions: frame.buttons,
           decision: null,
           isLocal: false,
+          agentID: this.requestingAgentID(),
         });
         return [
-          { kind: "notify", title: "Agni needs you", body: frame.action, sound: true },
+          {
+            kind: "notify",
+            title: "Approval needed",
+            body: frame.action,
+            sound: true,
+            need: "approval",
+            agentID: this.requestingAgentID(),
+          },
           { kind: "refreshThreadList" },
         ];
 
@@ -658,9 +960,17 @@ export class Conversation {
           kind: frame.kind === "email" ? "email" : "choice",
           multiple: frame.multiple === true,
           email: frame.email ?? null,
+          agentID: this.requestingAgentID(),
         });
         return [
-          { kind: "notify", title: "Agni asked a question", body: frame.question, sound: false },
+          {
+            kind: "notify",
+            title: "A question for you",
+            body: frame.question,
+            sound: false,
+            need: "question",
+            agentID: this.requestingAgentID(),
+          },
           { kind: "focusComposer" },
         ];
 
@@ -674,7 +984,14 @@ export class Conversation {
           expiresAt: frame.expiresAt,
         });
         return [
-          { kind: "notify", title: "Agni needs your password", body: frame.purpose, sound: true },
+          {
+            kind: "notify",
+            title: "Password needed",
+            body: frame.purpose,
+            sound: true,
+            need: "password",
+            agentID: this.requestingAgentID(),
+          },
         ];
 
       case "secret.cancel":
@@ -729,6 +1046,15 @@ export class Conversation {
     if (conversationID) return conversationID === this.conversationID;
     if (this.threadID) return this.threadID === threadID;
     return true;
+  }
+
+  /**
+   * The bot whose turn is running here, which is who an approval or question
+   * arriving now is from. Those frames name no bot, so with no turn in flight
+   * this is null and the wording stays neutral.
+   */
+  private requestingAgentID(): string | null {
+    return this.inFlightTurnID ? (this.turnAgents.get(this.inFlightTurnID) ?? null) : null;
   }
 
   private adopt(threadID: string): void {

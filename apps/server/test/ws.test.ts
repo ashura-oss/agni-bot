@@ -152,11 +152,12 @@ let db: Database | undefined;
 // Bots created here join the process-wide roster; drop them so later files start clean.
 const INITIAL_ROSTER = PERSONAS.length;
 
-afterEach(() => {
+afterEach(async () => {
   PERSONAS.length = INITIAL_ROSTER;
   client?.close();
   client = undefined;
-  server?.stop();
+  // Turns outlive their sockets now, so a stopping server settles them before the database closes.
+  await server?.stop();
   server = undefined;
   db?.close();
   db = undefined;
@@ -250,9 +251,12 @@ describe("websocket end-to-end", () => {
     let request = 0;
     const fetchMock = (async () => {
       request += 1;
+      // A deferred tool must be loaded before it can be called.
       return request === 1
-        ? sseToolCall("run_privileged", { command: "cat", purpose: "prove the secret stays out" })
-        : sseResponse("Done.");
+        ? sseToolCall("load_tools", { names: ["run_privileged"] })
+        : request === 2
+          ? sseToolCall("run_privileged", { command: "cat", purpose: "prove the secret stays out" })
+          : sseResponse("Done.");
     }) as unknown as typeof fetch;
     await startTestServer(fetchMock);
 
@@ -418,9 +422,12 @@ describe("websocket end-to-end", () => {
     let call = 0;
     const fetchMock = (async () => {
       call += 1;
+      // A deferred tool must be loaded before it can be called.
       return call === 1
-        ? sseToolCall("draft_email", { to: "sarah@acme.com", subject: "Moving the review", body: "Hi Sarah," })
-        : sseResponse("Sent.");
+        ? sseToolCall("load_tools", { names: ["draft_email"] })
+        : call === 2
+          ? sseToolCall("draft_email", { to: "sarah@acme.com", subject: "Moving the review", body: "Hi Sarah," })
+          : sseResponse("Sent.");
     }) as unknown as typeof fetch;
     await startTestServer(fetchMock);
 

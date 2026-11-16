@@ -3,13 +3,24 @@
  * needed. There is no enforced sandbox here — the guard is policy, not
  * mechanism: `ApprovalBroker.requiresApproval` routes writes *outside* the
  * scratch tree through the approval card, and lets scratch writes run free
- * (AGENTS.md). `isOutsideScratch` is the boundary check both sides share.
+ * unless they would overwrite a file that already exists (AGENTS.md).
+ * `isOutsideScratch` is the boundary check both sides share, and
+ * `resolveWritePath` is the one answer to "which file does this path mean":
+ * relative paths are relative to scratch, symlinks are followed.
  */
-import { lstatSync, mkdirSync, realpathSync, writeFileSync, statSync } from "node:fs";
+import { appendFileSync, lstatSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { homePath } from "../home";
 
 const MAX_BYTES = 1024 * 1024;
+
+/**
+ * Windows file systems ignore case, so paths compare folded there. macOS's
+ * default file system does too, but it is left case-sensitive here: a path
+ * that differs only in case then counts as outside scratch (it asks) and as
+ * a different rule target (it asks again), which is the safe direction.
+ */
+const CASE_INSENSITIVE = process.platform === "win32";
 
 /**
  * The tree the owner has declared safe for ungated writes. Defaults to
@@ -21,14 +32,22 @@ export function scratchDir(): string {
   return resolve(configured && configured.length > 0 ? configured : homePath("scratch"));
 }
 
+/** True when `child` is `parent` or lies under it. A shared name prefix is not containment. */
+export function isInsidePath(parent: string, child: string, caseInsensitive = CASE_INSENSITIVE, separator = sep): boolean {
+  const fold = (path: string): string => (caseInsensitive ? path.toLowerCase() : path);
+  const base = fold(parent);
+  const target = fold(child);
+  return target === base || target.startsWith(base.endsWith(separator) ? base : base + separator);
+}
+
 /**
  * The real path `path` names: symlinks are followed through its nearest
  * existing ancestor, and the missing tail is appended. Null for a dangling
- * symlink, whose real target cannot be known. Relative paths resolve against
- * the process cwd, like the file tools themselves.
+ * symlink, whose real target cannot be known. A relative path resolves
+ * against `base`.
  */
-function realTarget(path: string): string | null {
-  let target = resolve(path);
+function realTarget(path: string, base: string): string | null {
+  let target = resolve(base, path);
   const tail: string[] = [];
   for (;;) {
     try {
@@ -43,19 +62,41 @@ function realTarget(path: string): string | null {
   }
 }
 
-/** True when `path` really lives outside the scratch tree (symlinks followed). */
-export function isOutsideScratch(path: string): boolean {
-  if (path.trim().length === 0) return true;
-  const target = realTarget(path);
-  const scratch = realTarget(scratchDir());
-  if (!target || !scratch) return true;
-  return target !== scratch && !target.startsWith(scratch.endsWith(sep) ? scratch : scratch + sep);
+/**
+ * The absolute real path the file tools mean by `path`: a relative path is
+ * relative to the scratch directory (never the server's working directory),
+ * and symlinks are followed. Null for a dangling symlink. `write_file`, the
+ * approval check, and the "always allow" rule target all use this one answer.
+ */
+export function resolveWritePath(path: string): string | null {
+  return realTarget(path, scratchDir());
 }
 
-/** The real path of `path`, or a throw when it escapes the scratch tree. */
+/**
+ * True when `path` really lives outside the scratch tree (symlinks followed).
+ * A relative `path` resolves against `base`. The file tools pass the scratch
+ * directory; the default, the process cwd, is for a caller that hands the
+ * path to the operating system (the shell's `cwd`), which resolves it there.
+ */
+export function isOutsideScratch(path: string, base: string = process.cwd()): boolean {
+  if (path.trim().length === 0) return true;
+  const target = realTarget(path, base);
+  const scratch = realTarget(scratchDir(), base);
+  if (!target || !scratch) return true;
+  return !isInsidePath(scratch, target);
+}
+
+/** The real path of `path` (relative to scratch), or a throw when it escapes the scratch tree. */
 export function confineToScratch(path: string): string {
-  if (isOutsideScratch(path)) throw new Error(`${path} is outside the scratch directory`);
-  return realTarget(path)!;
+  if (isOutsideScratch(path, scratchDir())) throw new Error(`${path} is outside the scratch directory`);
+  return resolveWritePath(path)!;
+}
+
+/** True when a write to `path` would replace something already there. A dangling link counts. */
+export function writeTargetExists(path: string): boolean {
+  const target = resolveWritePath(path);
+  if (!target) return true;
+  try { lstatSync(target); return true; } catch { return false; }
 }
 
 export interface WriteFileArgs {
@@ -70,16 +111,29 @@ export interface WriteFileResult {
   created: boolean;
 }
 
+/**
+ * Write `content` to a file that did not exist a moment ago. The file is
+ * created exclusively, so one that appeared since the check (and so was never
+ * shown to the owner) is not silently replaced; appending never replaces.
+ */
+export function createExclusive(target: string, content: string, append: boolean): void {
+  try {
+    writeFileSync(target, content, { flag: append ? "a" : "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error(`${target} already exists; it was not overwritten`);
+    throw error;
+  }
+}
+
 export function writeFile(args: WriteFileArgs): WriteFileResult {
   if (args.content.length > MAX_BYTES) throw new Error("content exceeds 1 MB");
-  let created = false;
-  try { statSync(args.path); } catch { created = true; }
-  mkdirSync(join(args.path, ".."), { recursive: true });
-  if (args.append) {
-    const existing = created ? "" : require("node:fs").readFileSync(args.path, "utf8");
-    writeFileSync(args.path, existing + args.content, { flag: "w" });
-  } else {
-    writeFileSync(args.path, args.content, { flag: "w" });
-  }
-  return { path: args.path, bytesWritten: args.content.length, created };
+  const target = resolveWritePath(args.path);
+  if (!target) throw new Error(`${args.path} is a dangling link and cannot be written`);
+  const created = !writeTargetExists(args.path);
+  mkdirSync(dirname(target), { recursive: true });
+  if (created) createExclusive(target, args.content, args.append === true);
+  // The file exists: appending adds to the end and leaves what is there as it was.
+  else if (args.append) appendFileSync(target, args.content);
+  else writeFileSync(target, args.content, { flag: "w" });
+  return { path: target, bytesWritten: args.content.length, created };
 }

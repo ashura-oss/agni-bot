@@ -100,6 +100,11 @@ export interface ChatResult {
    */
   reasoning?: string;
   responseItems?: ResponseContextItem[];
+  /**
+   * Why the provider stopped (`stop`, `tool_calls`, `length`, ...), when it said.
+   * `length` means the answer was cut at the output ceiling, not finished.
+   */
+  finishReason?: string;
 }
 
 /** Parse an HTTP Retry-After header (seconds or HTTP date) into milliseconds. */
@@ -195,6 +200,7 @@ export async function streamChat(request: ChatRequest): Promise<ChatResult> {
   const toolFragments = new Map<number, { id?: string; name?: string; arguments: string }>();
   // A stream that closes without [DONE] or a finish_reason was cut off, not finished.
   let finished = false;
+  let finishReason: string | undefined;
   const markFirstToken = (): void => {
     if (firstTokenMs < 0) { firstTokenMs = Date.now() - startedAt; arm(); }
   };
@@ -220,7 +226,10 @@ export async function streamChat(request: ChatRequest): Promise<ChatResult> {
           continue; // keep-alive comments and partial junk are not fatal
         }
         const choice = (payload as { choices?: Array<{ delta?: Record<string, unknown>; finish_reason?: unknown }> }).choices?.[0];
-        if (choice?.finish_reason) finished = true;
+        if (choice?.finish_reason) {
+          finished = true;
+          if (typeof choice.finish_reason === "string") finishReason = choice.finish_reason;
+        }
         if (!choice?.delta) continue;
         const delta = choice.delta;
         const content = delta.content;
@@ -282,6 +291,7 @@ export async function streamChat(request: ChatRequest): Promise<ChatResult> {
   const toolCalls = buildToolCalls(toolFragments);
   return {
     text, firstTokenMs, inputTokens, outputTokens,
+    ...(finishReason ? { finishReason } : {}),
     ...(reasoning.trim().length > 0 ? { reasoning: reasoning.trim() } : {}),
     ...(toolCalls.length ? { toolCalls } : {}),
   };

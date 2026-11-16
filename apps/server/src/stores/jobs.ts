@@ -61,20 +61,24 @@ export function enqueueJob(
   return row;
 }
 
-/** Atomically pick the oldest due job and mark it running. Paused jobs wait. */
+/**
+ * Atomically pick the oldest due job and mark it running. Paused jobs wait,
+ * except for a Run now (`run_once`), which the same UPDATE that claims it
+ * clears: one claim, whatever the handler then does.
+ */
 export function claimDueJob(db: Database, now = nowISO(), excludeKinds: readonly string[] = []): JobRow | null {
   return db.transaction((): JobRow | null => {
     const row = db
       .query<JobRow, [string, string]>(
         `SELECT ${COLUMNS} FROM jobs
-         WHERE state = 'queued' AND enabled = 1 AND run_at <= ?
+         WHERE state = 'queued' AND (enabled = 1 OR run_once = 1) AND run_at <= ?
            AND kind NOT IN (SELECT value FROM json_each(?))
          ORDER BY run_at ASC, rowid ASC
          LIMIT 1`,
       )
       .get(now, JSON.stringify(excludeKinds));
     if (!row) return null;
-    db.run("UPDATE jobs SET state = 'running', attempts = attempts + 1, updated_at = ? WHERE id = ?", [
+    db.run("UPDATE jobs SET state = 'running', run_once = 0, attempts = attempts + 1, updated_at = ? WHERE id = ?", [
       nowISO(),
       row.id,
     ]);
@@ -98,16 +102,56 @@ export function requeueJob(db: Database, id: string, runAt: string): void {
 }
 
 /**
- * Make a job (any state) due now — the manual "run it" escape hatch. Running
- * it implies you want it: a paused job is resumed, since a claim would skip it
- * otherwise.
+ * Job kinds the daemon runs for itself (tagging, embedding, backups, rollover
+ * summaries, the harness review). They are not the owner's to pause, run or
+ * read about. A kind not listed here (a new one, one the owner made) is the
+ * owner's: hiding something they may have created is the worse mistake.
  */
-export function wakeJob(db: Database, id: string): boolean {
+const INTERNAL_JOB_KINDS: ReadonlySet<string> = new Set([
+  "tagger",
+  "memory.embed",
+  "memory.consolidate",
+  "summary.rollup",
+  "rollover.summarize",
+  "db.backup",
+  "harness.review",
+]);
+
+export function isInternalJobKind(kind: string): boolean {
+  return INTERNAL_JOB_KINDS.has(kind);
+}
+
+/** What `wakeJob` did: made the job due, left a running copy alone, or found no such job. */
+export type WakeOutcome = "woken" | "running" | "not_found";
+
+/**
+ * Make a job (any state) due now — the manual "run it" escape hatch. Running
+ * it once is all that is asked: a paused job is run one time and stays paused
+ * (`enabled` is not changed; resuming is the owner's other button).
+ *
+ * A job that is already running is left alone. Queueing it again would let
+ * the next tick claim a second copy beside the first (routines and turns run
+ * in parallel), so the caller is told it is running instead.
+ */
+export function wakeJob(db: Database, id: string): WakeOutcome {
   const result = db.run(
-    "UPDATE jobs SET state = 'queued', enabled = 1, run_at = ?, attempts = 0, result = NULL, updated_at = ? WHERE id = ?",
+    "UPDATE jobs SET state = 'queued', run_at = ?, attempts = 0, result = NULL, run_once = CASE WHEN enabled = 1 THEN 0 ELSE 1 END, updated_at = ? WHERE id = ? AND state != 'running'",
     [nowISO(), nowISO(), id],
   );
-  return result.changes > 0;
+  if (result.changes > 0) return "woken";
+  return getJob(db, id) ? "running" : "not_found";
+}
+
+/** What to tell the person who asked to run a job now: whether it worked, in words. */
+export function describeWake(id: string, outcome: WakeOutcome): { ok: boolean; message: string } {
+  switch (outcome) {
+    case "woken":
+      return { ok: true, message: `${id} is due now — the daemon picks it up on its next poll` };
+    case "running":
+      return { ok: false, message: `${id} is already running — it was not queued again; run it again after it finishes` };
+    case "not_found":
+      return { ok: false, message: `no job ${id}` };
+  }
 }
 
 export function getJob(db: Database, id: string): JobRow | null {
@@ -147,7 +191,8 @@ export function listFinishedJobs(db: Database, limit = 10): JobRow[] {
 
 /** Pause or resume a job. A running job finishes; paused work stays visible. */
 export function setJobEnabled(db: Database, id: string, enabled: boolean): boolean {
-  const result = db.run("UPDATE jobs SET enabled = ?, updated_at = ? WHERE id = ?", [
+  // Pausing or resuming also withdraws a Run now that has not been claimed yet.
+  const result = db.run("UPDATE jobs SET enabled = ?, run_once = 0, updated_at = ? WHERE id = ?", [
     enabled ? 1 : 0,
     nowISO(),
     id,

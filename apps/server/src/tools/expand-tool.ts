@@ -8,10 +8,25 @@
  */
 import type { Database } from "bun:sqlite";
 import type { ToolRegistry } from "./registry";
-import { getAgentMemory } from "../stores/agent-memories";
-import { resolvePersona } from "../agent/personas";
-import { DEFAULT_VISIBILITY, redactForCaller } from "../agent/visibility";
+import { getAgentMemory, type AgentMemoryRow } from "../stores/agent-memories";
+import { canonicalAgentID, resolvePersona } from "../agent/personas";
+import { DEFAULT_VISIBILITY, redactForCaller, type RedactedText } from "../agent/visibility";
 import { searchTranscripts } from "../stores/transcripts";
+
+/**
+ * A fact as this caller may read it. Two rules apply: the fact's own `private`
+ * flag (a private row belongs to its owner alone, the same rule the query
+ * layer applies when facts are listed or recalled; a row with no owner
+ * belongs to the assistant), and then the owning bot's visibility.
+ */
+function redactMemory(db: Database, row: AgentMemoryRow, callerAgentID: string): RedactedText {
+  const owner = row.agent_id ?? "";
+  const visibility = owner ? resolvePersona(db, owner)?.visibility ?? DEFAULT_VISIBILITY : DEFAULT_VISIBILITY;
+  if (row.visibility === "private" && (row.agent_id ?? "ea") !== canonicalAgentID(callerAgentID)) {
+    return { text: null, redacted: true, mode: "private" };
+  }
+  return redactForCaller(row.content, owner, callerAgentID, visibility);
+}
 
 export interface ExpandToolDeps {
   db: Database;
@@ -50,10 +65,8 @@ export function registerExpandTool(registry: ToolRegistry, deps: ExpandToolDeps)
       if (kind === "memory") {
         const row = getAgentMemory(deps.db, id);
         if (!row) throw new Error(`no memory ${id}`);
-        const owner = row.agent_id ?? "";
-        const visibility = owner ? resolvePersona(deps.db, owner)?.visibility ?? DEFAULT_VISIBILITY : DEFAULT_VISIBILITY;
         // A private fact stays private, whoever asks.
-        const visible = redactForCaller(row.content, owner, deps.currentAgentID, visibility);
+        const visible = redactMemory(deps.db, row, deps.currentAgentID);
         return {
           kind: "memory",
           id: row.id,
@@ -120,9 +133,7 @@ export function registerExpandTool(registry: ToolRegistry, deps: ExpandToolDeps)
       if (!id) throw new Error("id is required");
       const row = getAgentMemory(deps.db, id);
       if (!row) throw new Error(`no fact ${id}`);
-      const owner = row.agent_id ?? "";
-      const visibility = owner ? resolvePersona(deps.db, owner)?.visibility ?? DEFAULT_VISIBILITY : DEFAULT_VISIBILITY;
-      const visible = redactForCaller(row.content, owner, deps.currentAgentID, visibility);
+      const visible = redactMemory(deps.db, row, deps.currentAgentID);
       return {
         id: row.id,
         text: visible.text,
@@ -147,9 +158,7 @@ export function readFacts(
   for (const id of ids.slice(0, 20)) {
     const row = getAgentMemory(db, id);
     if (!row) continue;
-    const owner = row.agent_id ?? "";
-    const visibility = owner ? resolvePersona(db, owner)?.visibility ?? DEFAULT_VISIBILITY : DEFAULT_VISIBILITY;
-    const visible = redactForCaller(row.content, owner, callerAgentID, visibility);
+    const visible = redactMemory(db, row, callerAgentID);
     if (visible.text) facts.push({ id: row.id, text: visible.text.slice(0, 1_000) });
   }
   return facts;

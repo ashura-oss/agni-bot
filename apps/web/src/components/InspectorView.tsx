@@ -3,13 +3,14 @@
  * connections it depends on, and today's numbers. Everything here is either
  * reported by the daemon or absent — nothing is estimated.
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronDown, Plus, RefreshCw } from "lucide-react";
-import { format, type JobInfo, type MemoryItem, type TaskInfo } from "@agni/client";
+import { format, ownerJobs, recurrenceLabel, type JobInfo, type MemoryItem, type TaskInfo } from "@agni/client";
 import type { RoutineInfo, RoutineRunInfo } from "@agni/protocol";
 import { useAppModel, useAppSnapshot } from "../state/use-app-model";
 import { AgentAvatar, PresenceDot } from "./bits";
 import { AddProviderView } from "./AddProviderView";
+import { jobKindLabel, memorySourceLabel, memoryScopeLabel, plainJobResult, plainPreview, providerLabel } from "../state/display";
 
 export function InspectorView() {
   const model = useAppModel();
@@ -19,8 +20,13 @@ export function InspectorView() {
   const agent = model.agent;
   const openTasks = snapshot.tasks.filter((task) => task.status !== "done");
   const completed = snapshot.tasks.filter((task) => task.status === "done").slice(0, 5);
-  const recurring = snapshot.jobs.filter((job) => job.routine !== undefined || job.everyMs !== undefined);
-  const scheduled = snapshot.jobs.filter((job) => job.routine === undefined && job.everyMs === undefined);
+  // The daemon's own housekeeping jobs (tagger, backups, ...) are not the owner's to manage.
+  const jobs = ownerJobs(snapshot.jobs);
+  // A fixed order (by name): the daemon lists jobs by state and next run, so rows would otherwise
+  // trade places under the cursor whenever one runs, and a second click would hit another job.
+  const byName = (a: JobInfo, b: JobInfo) => jobName(a).localeCompare(jobName(b), undefined, { sensitivity: "base" }) || a.id.localeCompare(b.id);
+  const recurring = jobs.filter((job) => job.routine !== undefined || job.everyMs !== undefined || job.dailyAt !== undefined || job.kind === "brief").sort(byName);
+  const scheduled = jobs.filter((job) => !(job.routine !== undefined || job.everyMs !== undefined || job.dailyAt !== undefined || job.kind === "brief")).sort(byName);
 
   return (
     <aside className="inspector">
@@ -28,7 +34,7 @@ export function InspectorView() {
         <div className="inspector-agent-head">
           <AgentAvatar agent={agent} alive={snapshot.conversation.isStreaming} size="large" />
           <div>
-            <div className="inspector-agent-name">{agent?.name ?? "Agni"}</div>
+            <div className="inspector-agent-name">{agent?.name ?? "Your bot"}</div>
             <div className="inspector-presence">
               <PresenceDot online={snapshot.connectionState.kind === "ready"} />
               {snapshot.connectionState.kind === "ready" ? "Available" : "Offline"}
@@ -36,12 +42,11 @@ export function InspectorView() {
           </div>
         </div>
         <Row label="Model" value={agent?.model ?? "routed by the daemon"} />
-        <Row label="Lane" value="task — tools, no step cap" />
+        <Row label="Lane" value="task — tools; up to 48 steps per chain (24 when delegated), 25 tool calls per reply" />
         <Row
           label="Tools"
           value={agent?.tools && agent.tools.length > 0 ? agent.tools.join(", ") : "none in this lane"}
         />
-        {snapshot.conversation.threadID ? <Row label="Thread" value={snapshot.conversation.threadID} /> : null}
       </section>
 
       <section className="inspector-section">
@@ -98,7 +103,7 @@ export function InspectorView() {
 
       <section className="inspector-section">
         <div className="section-title">Routines</div>
-        {snapshot.jobs.length === 0 ? (
+        {jobs.length === 0 ? (
           <div className="empty-note">
             <strong>Nothing scheduled</strong>
             <span>
@@ -112,13 +117,13 @@ export function InspectorView() {
         ))}
         {scheduled.length > 0 ? (
           <div className="section-title" style={{ paddingTop: 4 }}>
-            Scheduled once
+            Scheduled
           </div>
         ) : null}
         {scheduled.map((job) => (
           <RoutineRow key={job.id} job={job} />
         ))}
-        {snapshot.jobs.length > 0 ? (
+        {jobs.length > 0 ? (
           <button type="button" className="link" onClick={() => model.refreshJobs()} style={{ alignSelf: "flex-start" }}>
             Refresh
           </button>
@@ -150,7 +155,7 @@ export function InspectorView() {
               <div key={provider.id} className="provider-row">
                 <span className={`provider-dot${provider.available ? "" : " off"}`} style={{ marginTop: 5 }} />
                 <div className="provider-main">
-                  <div className="provider-name">{provider.label}</div>
+                  <div className="provider-name">{providerLabel(provider)}</div>
                   <div className="provider-model">{provider.model}</div>
                   {!provider.available ? (
                     <div className="provider-note warning-text">
@@ -192,8 +197,9 @@ export function InspectorView() {
           <Row label="Usage" value="unknown" />
         )}
         <p className="settings-note">
-          Free-tier providers are the default; if a NIM pay-as-you-go key is set, spend is
-          capped by the daemon's daily limits.
+          {snapshot.health && snapshot.health.providers.length > 0
+            ? `Requests go to ${snapshot.health.providers.map((provider) => providerLabel(provider)).join(", ")}, chosen by the daemon. Spend limits are set on the daemon.`
+            : "No model provider is connected yet. Spend limits are set on the daemon."}
         </p>
       </section>
 
@@ -269,9 +275,9 @@ function MemoryRow({ memory }: { memory: MemoryItem }) {
     <div className="memory-row">
       <div className="memory-text">{memory.text}</div>
       <div className="memory-meta">
-        <span>{memory.scope}</span>
+        <span>{memoryScopeLabel(memory.scope)}</span>
         <span>·</span>
-        <span>{memory.source}</span>
+        <span>{memorySourceLabel(memory.source)}</span>
         <span>·</span>
         <span title="How sure the agent is">{(memory.confidence * 100).toFixed(0)}%</span>
         {used ? (
@@ -367,6 +373,10 @@ function humanCadence(cron: string, timezone: string): string {
   if (minute === "0" && hourStep && dom === "*" && month === "*" && dow === "*") {
     return `Every ${format.count(Number(hourStep[1]), "hour")}${zone}`;
   }
+  if (/^\d+$/u.test(minute) && /^\d+(,\d+)+$/u.test(hour) && Number(minute) < 60 && dom === "*" && month === "*" && (dow === "*" || dow === "0-6" || dow === "1-5")) {
+    const times = hour.split(",").map((value) => `${value.padStart(2, "0")}:${minute.padStart(2, "0")}`).join(", ");
+    return `${dow === "1-5" ? "Weekdays" : "Daily"} at ${times}${zone}`;
+  }
   if (/^\d+$/u.test(minute) && /^\d+$/u.test(hour) && Number(minute) < 60 && Number(hour) < 24 && dom === "*" && month === "*") {
     const clock = `${hour.padStart(2, "0")}:${minute.padStart(2, "0")}`;
     if (dow === "*" || dow === "0-6") return `Daily at ${clock}${zone}`;
@@ -375,23 +385,79 @@ function humanCadence(cron: string, timezone: string): string {
   return `${cron}${zone}`;
 }
 
-function RoutineRow({ job }: { job: JobInfo }) {
+/**
+ * "Run now" for one job. The daemon starts a second copy if asked while the
+ * first is running, so the button stays off while the job runs, and from the
+ * click until the job's state moves (the daemon answers the click at once with
+ * the job still queued, so that first report does not count).
+ */
+function jobName(job: JobInfo): string {
+  return job.routine?.name ?? (job.title && job.title.length > 0 ? job.title : jobKindLabel(job.kind));
+}
+
+function useRunNow(job: JobInfo): { busy: boolean; start: () => void } {
   const model = useAppModel();
-  if (job.routine) return <CronRoutineRow job={job} routine={job.routine} />;
-  const cadence = format.cadence(job.everyMs ?? null, format.parseISO(job.runAt));
+  const refusals = useAppSnapshot().runRefusals;
+  const [requested, setRequested] = useState(false);
+  useEffect(() => {
+    setRequested(false);
+  }, [job.state, job.attempts, job.lastResult]);
+  // The daemon said it is already running: stand down at once, it will report the job itself.
+  useEffect(() => {
+    setRequested(false);
+  }, [refusals]);
+  useEffect(() => {
+    if (!requested) return;
+    // If the daemon never reports back, do not leave the button off for good.
+    const timer = setTimeout(() => setRequested(false), 8000);
+    return () => clearTimeout(timer);
+  }, [requested]);
+  return {
+    busy: job.state === "running" || requested,
+    start: () => {
+      if (job.state === "running" || requested) return;
+      setRequested(true);
+      model.runRoutine(job);
+    },
+  };
+}
+
+function RoutineRow({ job }: { job: JobInfo }) {
+  return job.routine ? <CronRoutineRow job={job} routine={job.routine} /> : <PlainRoutineRow job={job} />;
+}
+
+function PlainRoutineRow({ job }: { job: JobInfo }) {
+  const model = useAppModel();
+  const runAt = format.parseISO(job.runAt);
+  // The daemon reports how a job repeats: every N minutes (`everyMs`) or on a clock
+  // (`dailyAt`, `days`). A server old enough not to send `internal` does not send
+  // `dailyAt` either, so there a one-off cannot be told from a clock job: say when it
+  // runs next rather than claiming it runs once.
+  const clock = recurrenceLabel(job);
+  const knowsRecurrence = job.internal !== undefined;
+  const next = job.enabled && runAt ? ` · next ${format.stamp(runAt)}` : "";
   const timing =
     job.state === "running"
       ? "Running now"
-      : job.enabled && job.everyMs !== undefined && format.parseISO(job.runAt)
-        ? `${cadence} · next ${format.stamp(format.parseISO(job.runAt) as Date)}`
-        : cadence;
+      : job.everyMs !== undefined
+        ? `${format.cadence(job.everyMs, runAt)}${next}`
+        : clock
+          ? `${clock}${next}`
+          : knowsRecurrence
+            ? runAt
+              ? `Once · ${job.state === "done" ? "ran" : "runs"} ${format.stamp(runAt)}`
+              : "Once"
+            : runAt
+              ? `${job.state === "done" ? "Last ran" : "Next run"} ${format.stamp(runAt)}`
+              : "Scheduled";
+  const run = useRunNow(job);
   return (
     <div className="routine-row">
       <div className="routine-main">
-        <div className="routine-title">{job.title && job.title.length > 0 ? job.title : job.kind}</div>
+        <div className="routine-title">{jobName(job)}</div>
         <div className="routine-meta">{timing}</div>
         {job.lastResult && job.lastResult.length > 0 ? (
-          <div className="routine-meta tertiary">{format.preview(job.lastResult, 90)}</div>
+          <div className="routine-meta tertiary">{format.preview(plainJobResult(job.lastResult), 90)}</div>
         ) : null}
         {job.state === "failed" ? (
           <div className="routine-meta warning-text">Failed after {job.attempts} attempts</div>
@@ -401,9 +467,10 @@ function RoutineRow({ job }: { job: JobInfo }) {
       <button
         type="button"
         className="icon-btn"
-        title="Run now"
-        aria-label={`Run ${job.title ?? job.kind} now`}
-        onClick={() => model.runRoutine(job)}
+        title={run.busy ? "Running now" : "Run now"}
+        aria-label={`Run ${jobName(job)} now`}
+        disabled={run.busy}
+        onClick={run.start}
       >
         <RefreshCw size={12} />
       </button>
@@ -411,7 +478,7 @@ function RoutineRow({ job }: { job: JobInfo }) {
         type="checkbox"
         className="toggle"
         checked={job.enabled}
-        aria-label={`${job.title ?? job.kind} routine`}
+        aria-label={`${jobName(job)} routine`}
         title={job.enabled ? "Pause this routine" : "Resume this routine"}
         onChange={(event) => model.setRoutine(job, event.target.checked)}
       />
@@ -442,6 +509,7 @@ function CronRoutineRow({ job, routine }: { job: JobInfo; routine: RoutineInfo }
         ? `${routine.successStreak} ok in a row`
         : null;
   const threadID = job.threadID;
+  const run = useRunNow(job);
 
   return (
     <div className="routine-row">
@@ -472,9 +540,9 @@ function CronRoutineRow({ job, routine }: { job: JobInfo; routine: RoutineInfo }
       </button>
       {expanded ? (
         <div className="routine-detail">
-          {runs.length > 0 ? (
+          {skipped.length > 0 ? (
             <div className="routine-meta">
-              {`${skipped.length} of last ${runs.length} runs skipped, ${skippedTokens.toLocaleString()} tokens`}
+              {`${skipped.length} of the last ${runs.length} ${runs.length === 1 ? "run" : "runs"} found nothing new${skippedTokens > 0 ? `, using ${skippedTokens.toLocaleString()} tokens` : ""}`}
             </div>
           ) : null}
           {runs.map((run, index) => (
@@ -488,8 +556,8 @@ function CronRoutineRow({ job, routine }: { job: JobInfo; routine: RoutineInfo }
             <button type="button" className="btn small" onClick={() => model.setRoutine(job, !job.enabled)}>
               {job.enabled ? "Pause" : "Resume"}
             </button>
-            <button type="button" className="btn small" onClick={() => model.runRoutine(job)}>
-              Run now
+            <button type="button" className="btn small" disabled={run.busy} onClick={run.start}>
+              {run.busy ? "Running…" : "Run now"}
             </button>
             <button
               type="button"
@@ -522,7 +590,7 @@ function RoutineRunLine({ run }: { run: RoutineRunInfo }) {
           .filter(Boolean)
           .join(" · ")}
       </div>
-      {run.summary ? <div className="routine-meta tertiary">{format.preview(run.summary, 200)}</div> : null}
+      {run.summary ? <div className="routine-meta tertiary">{format.preview(plainPreview(run.summary), 200)}</div> : null}
     </div>
   );
 }

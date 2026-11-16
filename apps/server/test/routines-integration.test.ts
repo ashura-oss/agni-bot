@@ -142,7 +142,7 @@ describe("routine integration", () => {
     db.close();
   });
 
-  test("job list adds routine details and leaves non-routine shape unchanged", async () => {
+  test("job list adds routine details and leaves the non-routine shape to the base fields plus internal", async () => {
     const db = openDatabase(":memory:");
     const { job, routine } = fixture(db);
     for (let index = 0; index < 7; index++) {
@@ -165,7 +165,7 @@ describe("routine integration", () => {
     expect(routineInfo.title).toBe("Daily check");
     expect((routineInfo.routine as { recentRuns: unknown[] }).recentRuns).toHaveLength(5);
     const ordinaryInfo = response.jobs.find((item) => item.id === ordinary.id)!;
-    expect(ordinaryInfo).toEqual({ id: ordinary.id, kind: "turn", state: "queued", runAt: ordinary.run_at, enabled: true, attempts: 0, title: "hello" });
+    expect(ordinaryInfo).toEqual({ id: ordinary.id, kind: "turn", state: "queued", runAt: ordinary.run_at, enabled: true, attempts: 0, internal: false, title: "hello" });
     db.close();
   });
 

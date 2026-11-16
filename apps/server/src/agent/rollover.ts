@@ -13,6 +13,7 @@
  * the background job and not in front of the rotation: a pre-close sweep
  * would put a model call on the path of the user's next turn.
  */
+import { isClosureNote } from "./closure";
 import { extractJSONObject } from "../util/json";
 import type { Database } from "bun:sqlite";
 import { z } from "zod";
@@ -24,13 +25,15 @@ import {
   getConversation,
   openSession,
   sessionCharLoad,
-  updateSummary,
+  updateSummaryIfNewer,
   type ConversationRow,
   type SessionCloseReason,
 } from "../stores/conversations";
 import { log } from "../log";
 import { enqueueJob } from "../stores/jobs";
 import type { RolloverJobPayload } from "../jobs/rollover";
+import { dayOf, saveSummary } from "../stores/summaries";
+import { AUX_FIRST_TOKEN_MS, AUX_MAX_TOKENS, AUX_TIMEOUT_MS, NEW_COMMAND_SUMMARY_WAIT_MS } from "./aux-limits";
 
 /**
  * A block crossing this many chars of accumulated message text rolls over
@@ -175,7 +178,7 @@ export function rotateNow(
       payload: {
         threadID: active.id,
         conversationID: conversation.id,
-        version: Date.parse(active.created_at) || Date.now(),
+        version: summaryVersion(active),
       } satisfies RolloverJobPayload,
     });
   }
@@ -281,12 +284,48 @@ export async function rotate(deps: RolloverDeps, agentOrConversation: string | C
       : (getConversation(db, agentOrConversation.id) ?? agentOrConversation);
   const active = activeSession(db, conversation);
   if (active) {
-    // The owner asked for this boundary, so the summary is worth the wait.
-    // A failure here carries the previous summary forward: the owner's /new must not break.
-    const summary = await summarizeBlock(deps, conversation, active).catch(() => null);
-    if (summary) updateSummary(db, conversation.id, summary.text);
+    // The owner asked for this boundary, so the summary is worth a bounded
+    // wait. A failure or a timeout carries the previous summary forward: the
+    // owner's /new must not break, and the queued job tries again in the
+    // background with the full deadline.
+    const summary = await summarizeBlock(deps, conversation, active, { timeoutMs: NEW_COMMAND_SUMMARY_WAIT_MS }).catch(() => null);
+    // S1-33: store it as the job would, under the block's own version, so the
+    // `rollover.summarize` job rotateNow queues finds it done and is a no-op.
+    if (summary) storeBlockSummary(db, conversation, active, summary);
   }
   return rotateNow(deps, conversation, reason);
+}
+
+/** The version a block's summary carries: the block's creation time. */
+function summaryVersion(block: ThreadRow): number {
+  return Date.parse(block.created_at) || Date.now();
+}
+
+/**
+ * Store the summary of a closed block: as the conversation's carried summary
+ * (only if it is newer than what is there) and as a block row the day and
+ * epoch roll-ups read. Returns whether it became the carried summary.
+ */
+export function storeBlockSummary(
+  db: Database,
+  conversation: ConversationRow,
+  block: ThreadRow,
+  summary: { text: string; structured: StructuredSummary },
+  version = summaryVersion(block),
+): boolean {
+  const stored = updateSummaryIfNewer(db, conversation.id, { summary: summary.text, structured: summary.structured, version });
+  saveSummary(db, {
+    conversationID: conversation.id,
+    agentID: conversation.agent_id,
+    level: "block",
+    title: `Block ${block.id.slice(-6)}`,
+    text: summary.text,
+    structured: summary.structured,
+    sourceFrom: summary.structured.source_turn_range?.from ?? null,
+    sourceTo: summary.structured.source_turn_range?.to ?? null,
+    day: dayOf(block.created_at),
+  });
+  return stored;
 }
 
 /**
@@ -298,14 +337,19 @@ export async function summarizeBlock(
   deps: RolloverDeps,
   conversation: ConversationRow,
   block: ThreadRow,
+  options: { timeoutMs?: number } = {},
 ): Promise<{ text: string; structured: StructuredSummary } | null> {
   const { db } = deps;
   const previous = conversation.summary ?? "";
-  const messages = recentMessages(db, block.id, 40);
+  // S1-33: the whole block, oldest first — not its last 40 messages. The size
+  // is bounded in `blockTranscript`, so a long block costs one call, not more.
+  const messages = db
+    .query<{ role: string; text: string; kind: string | null }, [string]>(
+      "SELECT role, text, kind FROM messages WHERE thread_id = ? ORDER BY created_at ASC, rowid ASC",
+    )
+    .all(block.id);
   if (messages.length === 0) return null;
-  const full = messages.map((message, index) => `${index}: ${message.role}: ${message.text}`).join("\n");
-  // H29: keep the start and the end of the block, not just the oldest 12k.
-  const transcript = full.length > 12_000 ? `${full.slice(0, 4_000)}\n[... middle omitted ...]\n${full.slice(-8_000)}` : full;
+  const transcript = blockTranscript(messages);
   try {
     const result = await deps.router.route({
       messages: [
@@ -317,24 +361,89 @@ export async function summarizeBlock(
             .join("\n\n"),
         },
       ],
-      signal: AbortSignal.timeout(20_000),
-      firstTokenTimeoutMs: deps.firstTokenTimeoutMs,
+      signal: AbortSignal.timeout(options.timeoutMs ?? AUX_TIMEOUT_MS),
+      // A summary is background work: a short chat first-token window must not
+      // starve a reasoning model that thinks before it writes (S1-17).
+      firstTokenTimeoutMs: Math.max(deps.firstTokenTimeoutMs, AUX_FIRST_TOKEN_MS),
       onDelta: () => {},
       toolChoice: "none",
-      maxTokens: 1500,
+      maxTokens: AUX_MAX_TOKENS,
     });
-    const structured = parseStructuredSummary(result.text);
+    const answer = result.text.trim();
+    const parsed = StructuredSummarySchema.safeParse(extractJSONObject(answer));
+    const structured = parsed.success ? parsed.data : parseStructuredSummary("");
     // A model that answers in prose still gets a summary: the structured
-    // shape is preferred, the text is the fallback.
-    const rendered = renderSummary(structured);
-    const text = clampCarry(rendered || result.text);
-    if (!text) throw new RouterError("provider_failed", "empty summary");
+    // shape is preferred, the text is the fallback. A well-formed answer with
+    // nothing in it ("{}") is an empty answer, not prose to carry forward.
+    const text = clampCarry(renderSummary(structured) || (parsed.success ? "" : answer));
+    if (!text) {
+      // S1-17: a reasoning model that spent its budget thinking returns no
+      // text. That is a failure: the previous summary stays, and the log says
+      // whether the model thought at length (raise the budget) or said nothing.
+      log.warn(
+        `carry summary empty for block ${block.id} (answer ${answer.length} chars, reasoning ${result.reasoning?.length ?? 0} chars, ` +
+          `output tokens ${result.outputTokens ?? "?"}); previous summary kept`,
+      );
+      throw new RouterError("provider_failed", "empty summary");
+    }
     return { text, structured };
   } catch (error) {
     // H28: let the job runner retry; callers that can live without it catch.
     log.warn(`carry summary failed: ${error instanceof Error ? error.message : String(error)}`);
     throw error;
   }
+}
+
+/**
+ * The most transcript one summary call reads (~6k tokens). A block rotates
+ * at about 20-30k chars, so most blocks fit whole after the per-message cap.
+ */
+export const SUMMARY_INPUT_CHARS = 24_000;
+
+/** One message's share of that: a long answer keeps its opening and its close. */
+const SUMMARY_MESSAGE_CHARS = 1_200;
+
+/**
+ * The block as the summary model reads it: every message, oldest first and
+ * numbered by its place in the block (the model reports `source_turn_range`
+ * in these numbers). Each message is capped, so one long answer cannot crowd
+ * out the rest; if the capped block still exceeds the budget, a third of the
+ * budget goes to the start and two thirds to the end, and the cut says how
+ * many messages it dropped.
+ */
+export function blockTranscript(messages: Array<{ role: string; text: string; kind?: string | null }>): string {
+  // System rows hold what the server fed a turn: a routine's instruction with its saved state, a peer's brief,
+  // wake text. That is untrusted text and not part of the conversation, so the summariser never reads it;
+  // only the fixed closure notes (which say a request was closed) go in.
+  const lines = messages.filter((message) => message.role !== "system" || isClosureNote(message.role, message.text, message.kind)).map((message, index) => `${index}: ${message.role}: ${capMessage(message.text)}`);
+  const size = (list: string[]): number => list.reduce((sum, line) => sum + line.length + 1, 0);
+  if (size(lines) <= SUMMARY_INPUT_CHARS) return lines.join("\n");
+  const head: string[] = [];
+  const tail: string[] = [];
+  const headBudget = Math.floor(SUMMARY_INPUT_CHARS / 3);
+  const tailBudget = SUMMARY_INPUT_CHARS - headBudget;
+  let used = 0;
+  for (const line of lines) {
+    if (head.length > 0 && used + line.length + 1 > headBudget) break;
+    head.push(line);
+    used += line.length + 1;
+  }
+  used = 0;
+  for (let index = lines.length - 1; index >= head.length; index -= 1) {
+    const line = lines[index]!;
+    if (tail.length > 0 && used + line.length + 1 > tailBudget) break;
+    tail.unshift(line);
+    used += line.length + 1;
+  }
+  const omitted = lines.length - head.length - tail.length;
+  return [...head, ...(omitted > 0 ? [`[... ${omitted} message${omitted === 1 ? "" : "s"} omitted ...]`] : []), ...tail].join("\n");
+}
+
+function capMessage(text: string): string {
+  if (text.length <= SUMMARY_MESSAGE_CHARS) return text;
+  const head = Math.floor(SUMMARY_MESSAGE_CHARS * 0.65);
+  const tail = SUMMARY_MESSAGE_CHARS - head;
+  return `${text.slice(0, head)} [... ${text.length - head - tail} chars omitted ...] ${text.slice(text.length - tail)}`;
 }
 
 /** Parse the model's answer into the structured shape. */

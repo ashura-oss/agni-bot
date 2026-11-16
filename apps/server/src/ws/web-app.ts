@@ -5,6 +5,7 @@
  */
 import { statSync } from "node:fs";
 import { resolve, sep } from "node:path";
+import { webAppHeaders } from "./csp";
 
 export function webDir(env: Record<string, string | undefined> = process.env): string {
   return resolve(env.AGNI_WEB_DIR?.trim() || resolve(import.meta.dir, "../../../web/dist"));
@@ -18,7 +19,11 @@ function isFile(path: string): boolean {
   }
 }
 
-export function webAppRequest(pathname: string, root = webDir()): Response {
+/**
+ * `host` is the request's Host header (already vetted by the server's Host
+ * check); it is the one socket address the page's policy allows besides itself.
+ */
+export function webAppRequest(pathname: string, root = webDir(), host?: string): Response {
   let decoded: string;
   try {
     decoded = decodeURIComponent(pathname);
@@ -30,12 +35,17 @@ export function webAppRequest(pathname: string, root = webDir()): Response {
     // Vite fingerprints everything under assets/, so those never change.
     const immutable = path.startsWith(resolve(root, "assets") + sep);
     return new Response(Bun.file(path), {
-      headers: { "cache-control": immutable ? "public, max-age=31536000, immutable" : "no-cache" },
+      headers: {
+        "cache-control": immutable ? "public, max-age=31536000, immutable" : "no-cache",
+        ...(path.endsWith(".html") ? webAppHeaders(host) : {}),
+      },
     });
   }
   const index = resolve(root, "index.html");
   if (!isFile(index)) {
     return new Response("The web app is not built yet. Run `bun run web:build`, then reload.", { status: 404 });
   }
-  return new Response(Bun.file(index), { headers: { "cache-control": "no-cache", "content-type": "text/html; charset=utf-8" } });
+  return new Response(Bun.file(index), {
+    headers: { "cache-control": "no-cache", "content-type": "text/html; charset=utf-8", ...webAppHeaders(host) },
+  });
 }

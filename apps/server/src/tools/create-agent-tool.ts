@@ -8,7 +8,7 @@
  */
 import type { Database } from "bun:sqlite";
 import type { ServerFrameBody } from "@agni/protocol";
-import { personaInfo, mentionRoster, getPersona, DEFAULT_AGENT_TOOLS } from "../agent/personas";
+import { personaInfo, mentionRoster, getPersona, DEFAULT_AGENT_TOOLS, IMPLICIT_AGENT_TOOLS, MEMORY_WRITING_TOOLS } from "../agent/personas";
 import { createAgentPersona } from "../agent/creation";
 import { nowISO } from "../util/ids";
 import { MAX_AGENT_NAME_CHARS } from "../agent/identity";
@@ -48,17 +48,40 @@ export function registerCreateAgentTool(registry: ToolRegistry, deps: CreateAgen
     handler: async (args: Record<string, unknown>, ctx) => {
       if (ctx.peerInput) return { error: "not done: this turn started from another agent's message" };
       const db = deps.db;
-      const known = registry.listByKind("static").map((tool) => tool.name);
+      const known = registry.list().map((tool) => tool.name);
       // M19: a new bot never exceeds its creator's tools or memory scope.
       const creator = getPersona(ctx.chain?.currentAgentID ?? "");
       if (!creator) return { error: "not done: unknown calling agent" };
-      const wanted = Array.isArray(args.tools) ? args.tools.map((tool) => String(tool)) : [];
-      const over = wanted.filter((tool) => known.includes(tool) && !creator.tools.includes(tool));
+      // The creator's MCP wildcard stands for every MCP tool it can reach, so
+      // it can pass the wildcard (or one named MCP tool) on; nothing else.
+      const creatorHas = (tool: string): boolean =>
+        creator.tools.includes(tool) || (tool.startsWith("mcp_") && creator.tools.includes("mcp_*"));
+      const isKnown = (tool: string): boolean => known.includes(tool) || tool === "mcp_*";
+      const asked = Array.isArray(args.tools) ? [...new Set(args.tools.map((tool) => String(tool)))] : undefined;
+      // `say`, `ask` and the like come with every bot: naming one is no grant.
+      const wanted = asked?.filter((tool) => !IMPLICIT_AGENT_TOOLS.has(tool));
+      const grantable = creator.tools.filter(isKnown);
+      // An unknown name is an error, never a silent drop: a bot that comes
+      // back without the tool the creator thought it gave is a worse failure
+      // than a refusal that says what to fix.
+      const unknown = (wanted ?? []).filter((tool) => !isKnown(tool));
+      if (unknown.length > 0) {
+        return { error: `not done: unknown tool names: ${unknown.join(", ")}. Tools you may grant: ${grantable.join(", ") || "none"}` };
+      }
+      const over = (wanted ?? []).filter((tool) => !creatorHas(tool));
       if (over.length > 0) return { error: `not done: you cannot grant tools you lack: ${over.join(", ")}` };
       if (args.memoryScope === "readwrite" && creator.memoryScope !== "readwrite") {
         return { error: "not done: you cannot grant write memory you lack" };
       }
-      const tools = wanted.length > 0 ? wanted : DEFAULT_AGENT_TOOLS.filter((tool) => creator.tools.includes(tool));
+      const memoryScope = args.memoryScope === "readwrite" ? "readwrite" : "read";
+      if (asked && asked.length > 0 && (wanted ?? []).length === 0) {
+        return { error: "not done: name at least one tool beyond the ones every bot already has, or leave tools out for the defaults" };
+      }
+      if (memoryScope === "read" && wanted && wanted.length > 0 && wanted.every((tool) => MEMORY_WRITING_TOOLS.has(tool))) {
+        return { error: `not done: ${wanted.join(", ")} write memory and this bot's memoryScope is read; set memoryScope to readwrite (you must hold it) or name other tools` };
+      }
+      // No tools named: the defaults, cut down to what the creator holds.
+      const tools = wanted && wanted.length > 0 ? wanted : DEFAULT_AGENT_TOOLS.filter((tool) => creatorHas(tool));
       if (tools.length === 0) return { error: "not done: no tools to give the new agent" };
       const created = createAgentPersona(
         db,
@@ -69,13 +92,14 @@ export function registerCreateAgentTool(registry: ToolRegistry, deps: CreateAgen
           prompt: String(args.prompt ?? ""),
           color: typeof args.color === "string" ? args.color : undefined,
           tools,
-          memoryScope: args.memoryScope === "readwrite" ? "readwrite" : "read",
+          memoryScope,
           visibility:
             typeof args.visibility === "string"
               ? (args.visibility as "private" | "summary" | "shared")
               : undefined,
         },
-        known,
+        // The creator ceiling above already limited the names to what it holds.
+        [...known, "mcp_*", ...DEFAULT_AGENT_TOOLS],
       );
       deps.emit({ type: "agents.update", agents: personaInfo(db), mentions: mentionRoster(db) });
 
@@ -87,7 +111,13 @@ export function registerCreateAgentTool(registry: ToolRegistry, deps: CreateAgen
         tools: created.tools,
         memoryScope: created.memoryScope,
         visibility: created.visibility,
-        ...(created.droppedTools.length > 0 ? { droppedTools: created.droppedTools } : {}),
+        ...(created.droppedTools.length > 0
+          ? {
+            droppedTools: created.droppedTools,
+            note: `${created.droppedTools.join(", ")} write memory, and this bot's memoryScope is read, so it was not given ` +
+              "(set memoryScope to readwrite to grant it; you must hold readwrite yourself).",
+          }
+          : {}),
         promptChars: created.promptChars,
       };
     },

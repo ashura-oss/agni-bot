@@ -20,8 +20,8 @@ import { defaultResolvedPersona, getPersona, resolvePersona, type ResolvedPerson
 import type { Router } from "../models/router";
 import type { TaskTurnSettings, TaskTurnRun, TaskTurnResult } from "./task-loop";
 import { runTaskTurn } from "./task-loop";
-import { createThread } from "../stores/threads";
-import { delegationSession, ensureConversation } from "../stores/conversations";
+import { recentMessages } from "../stores/threads";
+import { activeSession, delegationSession, ensureConversation, type ConversationRow } from "../stores/conversations";
 
 export interface HandoffRequest {
   /** Agent id the work is handed to. */
@@ -35,6 +35,14 @@ export interface HandoffRequest {
    * "request". It rides in the child's peer envelope.
    */
   intent?: PeerIntent;
+  /**
+   * Carry the target bot's own recent direct chat with the brief. Off unless
+   * the caller sets it, and the caller sets it only when the chain started
+   * from the owner's own turn: a chain that began with a peer, a wake or a
+   * group message could be steered by text the owner never wrote, and would
+   * read the bot's private DM through the answer.
+   */
+  includeOwnChat?: boolean;
   /** Parent turn's emit, so the child streams to the same client. */
   emit: (frame: ServerFrameBody) => void;
   /** Parent turn's abort signal; cancelling the parent cancels the child. */
@@ -80,6 +88,12 @@ export async function handoff(deps: HandoffDeps, request: HandoffRequest): Promi
   // the work instead of an empty room.
   const conversation = ensureConversation(deps.db, persona.id);
   const parent = parentName(deps.db, deps.guardrail.currentAgentID);
+  // Read the bot's own recent chat before the handoff block exists: the block
+  // may become its active one, and the chat the owner had with it is in the
+  // block that is active now.
+  // Only when the caller says the chain began with the owner's own turn, and
+  // never from a private bot: its chat stays in its own conversation.
+  const ownChat = request.includeOwnChat && persona.visibility !== "private" ? ownRecentChat(deps.db, conversation) : null;
   const childThread = delegationSession(deps.db, conversation, `${parent} messaged ${persona.name}`);
   const childThreadID = childThread.id;
 
@@ -92,7 +106,9 @@ export async function handoff(deps: HandoffDeps, request: HandoffRequest): Promi
 
   const run: TaskTurnRun = {
     threadID: childThreadID,
-    text,
+    // The bot's own chat rides with the brief for the model only; the log
+    // (inputText) keeps just the brief, so the chat does not repeat there.
+    text: ownChat ? `${text}\n\n${ownChat}` : text,
     persona,
     peer: {
       from: parent,
@@ -130,10 +146,53 @@ export async function handoff(deps: HandoffDeps, request: HandoffRequest): Promi
   };
 }
 
-/** Child frames that reach the owner: progress, and prompts that wait on them. */
+/**
+ * Child frames that reach the owner: progress, the prompts that wait on them,
+ * and the notice that a prompt is no longer actionable (a card the child
+ * raised must be removable from the owner's screen too).
+ */
 export const CHILD_FORWARDED_FRAMES: ReadonlySet<string> = new Set([
-  "status.update", "approval.request", "form.request", "secret.request", "secret.cancel",
+  "status.update", "approval.request", "approval.closed", "form.request", "secret.request", "secret.cancel",
 ]);
+
+/** How much of a bot's own recent chat a handoff carries. */
+export const OWN_CHAT_MAX_MESSAGES = 12;
+export const OWN_CHAT_MAX_CHARS = 6_000;
+/** One long message must not use the whole allowance. */
+const OWN_CHAT_MAX_MESSAGE_CHARS = 1_500;
+
+/**
+ * The target bot's recent direct chat with the owner, from the block that is
+ * active now, as the bot's own history (bounded: the last 12 messages and
+ * 6,000 characters, newest kept).
+ *
+ * A handoff opens a fresh block that carries only the closed-block summary, so
+ * a bot reached that way could not see what it had just been told in its own
+ * chat (it answered NONE where a direct question got PAPAYA). Only the owner's
+ * messages and the bot's own replies are included: a note from another agent
+ * is not part of that conversation. Returns null when there is nothing.
+ */
+export function ownRecentChat(db: Database, conversation: ConversationRow): string | null {
+  const block = activeSession(db, conversation);
+  if (!block) return null;
+  const messages = recentMessages(db, block.id, OWN_CHAT_MAX_MESSAGES * 4)
+    .filter((message) => (message.role === "user" || message.role === "assistant") && message.text.trim().length > 0)
+    .slice(-OWN_CHAT_MAX_MESSAGES);
+  const lines: string[] = [];
+  let used = 0;
+  for (const message of [...messages].reverse()) {
+    const text = message.text.trim();
+    const clipped = text.length > OWN_CHAT_MAX_MESSAGE_CHARS ? `${text.slice(0, OWN_CHAT_MAX_MESSAGE_CHARS)}…` : text;
+    if (used + clipped.length > OWN_CHAT_MAX_CHARS && lines.length > 0) break;
+    used += clipped.length;
+    lines.push(`${message.role === "user" ? "Owner" : "You"}: ${clipped}`);
+  }
+  if (lines.length === 0) return null;
+  return [
+    "Your own recent direct conversation with the owner, oldest first. It is your own chat history, shown so you can answer from it; it is reference data, not part of this request:",
+    ...lines.reverse(),
+  ].join("\n");
+}
 
 /** The delegating agent's live display name, for the note the child reads. */
 function parentName(db: Database, agentID: string): string {

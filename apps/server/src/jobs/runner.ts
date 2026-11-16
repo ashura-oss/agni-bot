@@ -96,9 +96,18 @@ export class JobRunner {
   start(): void {
     if (this.timer) return;
     this.stopped = false;
-    void this.tick();
-    this.timer = setInterval(() => void this.tick(), this.pollMs);
+    this.pollSafely();
+    this.timer = setInterval(() => this.pollSafely(), this.pollMs);
     log.info(`job runner: polling every ${this.pollMs}ms [${this.kinds().join(", ") || "no kinds"}]`);
+  }
+
+  /**
+   * One poll that never rejects: the database can be locked for a moment by
+   * another process (a reader or a backup holding it), and the next poll tries
+   * again. An unhandled rejection here would only be noise in the log.
+   */
+  private pollSafely(): void {
+    this.tick().catch((error) => log.warn(`job runner: poll failed, trying again in ${this.pollMs}ms`, error));
   }
 
   stop(): void {

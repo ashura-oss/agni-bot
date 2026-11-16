@@ -36,6 +36,8 @@ export interface SessionMessage {
   role: string;
   text: string;
   created_at: string;
+  /** The turn that wrote the row, when one did. */
+  turnID: string | null;
 }
 
 /** Get the agent's conversation, creating it (empty, blockless) if needed. */
@@ -120,8 +122,15 @@ export function openSession(
 ): ThreadRow {
   const now = nowISO();
   return db.transaction(() => {
-    if (conversation.active_thread_id) {
-      db.run("UPDATE threads SET closed_at = ?, closed_by = ? WHERE id = ?", [now, reason, conversation.active_thread_id]);
+    // S1-33: close the block that is active NOW, as the row says, not the one
+    // the caller's snapshot named. A rotation can wait ~20 s on a summary, and
+    // another may open a block in that time; closing the stale id would leave
+    // the newer block open forever. A block already closed keeps its close.
+    const current = db
+      .query<{ active_thread_id: string | null }, [string]>("SELECT active_thread_id FROM conversations WHERE id = ?")
+      .get(conversation.id)?.active_thread_id;
+    if (current) {
+      db.run("UPDATE threads SET closed_at = ?, closed_by = ? WHERE id = ? AND closed_at IS NULL", [now, reason, current]);
     }
     const block = createThread(db, conversation.agent_id, undefined, { conversationID: conversation.id });
     db.run("UPDATE threads SET opened_carry = ?, opened_tail = ?, created_at = ? WHERE id = ?", [
@@ -233,12 +242,16 @@ export function conversationTranscript(
   db: Database,
   conversationID: string,
   limit = 200,
+  options: { excludeSystem?: boolean } = {},
 ): SessionMessage[] {
+  // `system` rows are instructions the server fed a turn (a scheduled job's
+  // prompt, a delegated task's result): not something the owner said, and
+  // left out when `excludeSystem` is set so they do not use up the limit.
   const rows = db
     .query<SessionMessage, [string, number]>(
-      `SELECT m.id, m.thread_id AS sessionID, m.role, m.text, m.created_at
+      `SELECT m.id, m.thread_id AS sessionID, m.role, m.text, m.created_at, m.turn_id AS turnID
        FROM messages m JOIN threads t ON t.id = m.thread_id
-       WHERE t.conversation_id = ?
+       WHERE t.conversation_id = ?${options.excludeSystem ? " AND m.role <> 'system'" : ""}
        ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?`,
     )
     .all(conversationID, limit);

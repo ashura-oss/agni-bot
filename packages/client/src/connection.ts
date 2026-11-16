@@ -41,8 +41,12 @@ export type ConnectionEvent =
   | { type: "frame"; frame: IncomingFrame }
   /** A frame the server sent that this build could not parse. */
   | { type: "malformed"; detail: string }
-  /** `resync` could not be replayed: reload durable state. */
-  | { type: "durableReloadRequired" }
+  /**
+   * `resync` could not be replayed: reload durable state. `restarted` is true only when the
+   * daemon's own counter is behind ours, which proves it restarted. A plain resync gap (a log
+   * that moved on while we slept) proves nothing about the turns it was running.
+   */
+  | { type: "durableReloadRequired"; restarted: boolean }
   /** lastSeq moved; persist it so a reload can resume. */
   | { type: "lastSeq"; seq: number };
 
@@ -265,16 +269,21 @@ export class AgniConnection {
                 // Server restarted behind us (M3): our seq is meaningless now.
                 this.settings.lastSeq = frame.lastSeq;
                 this.onEventValue?.({ type: "lastSeq", seq: frame.lastSeq });
-                this.onEventValue?.({ type: "durableReloadRequired" });
+                this.onEventValue?.({ type: "durableReloadRequired", restarted: true });
               }
               const resumeAfterSeq = this.settings.lastSeq;
-              this.setState({ kind: "ready", lastSeq: frame.lastSeq });
-              // Re-enter the stream where this browser left off.
+              // Re-enter the stream where this browser left off. This must reach
+              // the server before the app hears "ready": the app answers ready
+              // by sending its list requests, and any frame that arrives ahead
+              // of `resync` releases the server's hold on live frames, so lastSeq
+              // jumps past the replay and the replay is dropped as already seen.
               try {
                 await socket.send(encodeClientFrame({ type: "resync", lastSeq: resumeAfterSeq }));
               } catch {
                 // The receive loop will report a closed socket next iteration.
               }
+              if (this.aborted(id)) return "stopped";
+              this.setState({ kind: "ready", lastSeq: frame.lastSeq });
             } else if (frame.type === "error" && !("__unknown" in frame)) {
               // The server rejects before hello.ok: unauthorized, version_mismatch.
               throw TransportError.closed(frame.code === "version_mismatch" ? 4002 : 4003, frame.message);
@@ -292,7 +301,7 @@ export class AgniConnection {
           this.observe(seq);
 
           if (frame.type === "error" && !("__unknown" in frame) && frame.code === "resync_gap") {
-            this.onEventValue?.({ type: "durableReloadRequired" });
+            this.onEventValue?.({ type: "durableReloadRequired", restarted: false });
           }
           this.onEventValue?.({ type: "frame", frame });
         }

@@ -9,7 +9,7 @@ import { getThread } from "../stores/threads";
 import { getJob, setJobEnabled } from "../stores/jobs";
 import { newID, nowISO } from "../util/ids";
 import { runPreflight } from "./preflight";
-import { buildRoutinePrompt, parseRoutineState } from "./prompt";
+import { buildRoutinePrompt, parseRoutineState, stripRoutineState } from "./prompt";
 import { getRoutine, recordRun, updateRoutineState } from "../stores/routines";
 import { ROUTINE_LIMITS, type Routine, type RoutineRun } from "./types";
 
@@ -105,6 +105,15 @@ export async function executeRoutine(deps: RoutineRunDeps, routine: Routine): Pr
     const result = await runTaskTurn(deps.db, deps.router, deps.settings, {
       threadID,
       text: buildRoutinePrompt(routine),
+      // The instruction (and the saved state in it) is the daemon's, not something the owner
+      // typed: it is logged as a system row, so history never shows it as the owner's
+      // message.
+      hideInput: true,
+      // The saved state in the instruction is data from earlier runs, which can carry text an
+      // attacker planted: the turn is gated like peer input, and only the routine's own prompt
+      // may shape its topic anchor and retrieval. Nothing streams: the reply ends with the state block.
+      untrustedInput: true,
+      queryText: routine.prompt,
       persona,
       emit: deps.emit,
       signal,
@@ -115,7 +124,11 @@ export async function executeRoutine(deps: RoutineRunDeps, routine: Routine): Pr
       maxTokens: routine.maxTokens,
       allowedDomains: routine.allowedDomains,
     });
-    run.summary = result.text.slice(0, 200);
+    // The state block is for the next run, not for the owner: it is cut from the stored
+    // reply, the run line and the notification, and read from the full text below.
+    const visibleText = stripRoutineState(result.text);
+    hideRoutineState(deps.db, result.turnID);
+    run.summary = visibleText.slice(0, 200) || null;
     const usage = deps.db.query<{ tokens: number }, [string]>("SELECT COALESCE(SUM(input_tokens + output_tokens), 0) AS tokens FROM usage_ledger WHERE turn_id = ?").get(result.turnID);
     run.tokens = usage?.tokens ?? 0;
     const toolRows = deps.db.query("SELECT tool_name, args FROM tool_calls WHERE turn_id = ? ORDER BY created_at").all(result.turnID) as Array<{ tool_name: string; args: string }>;
@@ -149,6 +162,23 @@ export async function executeRoutine(deps: RoutineRunDeps, routine: Routine): Pr
   }
   return record(deps, run);
 }
+
+/**
+ * What the turn's last reply looks like once stored: the state block (and its label) is cut so a reload
+ * shows only what the routine had to say; a reply that is NOTHING_TO_REPORT is not stored at all; a reply
+ * that was nothing but state says the run completed rather than vanishing. Earlier replies are left as written.
+ */
+export function hideRoutineState(db: Database, turnID: string): void {
+  const last = db.query<{ id: string; text: string }, [string]>("SELECT id, text FROM messages WHERE turn_id = ? AND role = 'assistant' ORDER BY created_at DESC, rowid DESC LIMIT 1").get(turnID);
+  if (!last) return;
+  const visible = stripRoutineState(last.text);
+  if (/^\s*NOTHING_TO_REPORT\b/.test(visible)) { db.run("DELETE FROM messages WHERE id = ?", [last.id]); return; }
+  if (!visible) { db.run("UPDATE messages SET text = ? WHERE id = ?", [STATE_ONLY_REPLY, last.id]); return; }
+  if (visible !== last.text.trim()) db.run("UPDATE messages SET text = ? WHERE id = ?", [visible, last.id]);
+}
+
+/** What stays of a last reply that held nothing but the state block. */
+const STATE_ONLY_REPLY = "Routine completed; state saved.";
 
 function safeJson(value: string): unknown {
   try { return JSON.parse(value); } catch { return value; }

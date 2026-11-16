@@ -1,8 +1,9 @@
 /** Add one API provider key to the daemon. The browser never keeps a copy. */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAppModel, useAppSnapshot } from "../state/use-app-model";
 import { Spinner } from "./bits";
 import { ChatGPTConnectionView } from "./ChatGPTConnectionView";
+import { useDialog } from "./use-dialog";
 
 interface ProviderOption {
   id: string;
@@ -34,6 +35,8 @@ const CUSTOM_ID = "custom";
 export function AddProviderView({ onDismiss }: { onDismiss: () => void }) {
   const model = useAppModel();
   const snapshot = useAppSnapshot();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialog(dialogRef, () => { model.cancelChatGPTLogin(); onDismiss(); });
   const [providerID, setProviderID] = useState("chatgpt");
   const [apiKey, setApiKey] = useState("");
   const [modelID, setModelID] = useState(SUGGESTED_MODELS.groq ?? "");
@@ -81,7 +84,7 @@ export function AddProviderView({ onDismiss }: { onDismiss: () => void }) {
         if (event.target === event.currentTarget) { model.cancelChatGPTLogin(); onDismiss(); }
       }}
     >
-      <div className="dialog wide" role="dialog" aria-label="Add a provider">
+      <div className="dialog wide" role="dialog" aria-modal="true" ref={dialogRef} aria-label="Add a provider">
         <div>
           <h2>Add a provider</h2>
           <p style={{ marginTop: 4 }}>Connect your ChatGPT account or add an API provider.</p>

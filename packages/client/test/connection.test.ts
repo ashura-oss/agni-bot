@@ -26,6 +26,11 @@ class FakeTransport implements FrameTransport {
     this.queue = [...script];
   }
 
+  /** Deliver one more frame to the receive loop. */
+  push(text: string): void {
+    this.queue.push({ text });
+  }
+
   async open(): Promise<void> {
     this.openCount += 1;
     this.closed = false;
@@ -121,6 +126,55 @@ describe("connection", () => {
     expect(states.some(ready)).toBe(true);
   });
 
+  test("resync goes out before the app is told it is ready, so replayed frames are applied (S1-09)", async () => {
+    // A server that behaves like dispatch.ts: it holds live frames until the
+    // first client frame after hello. `resync` replays what was missed; any
+    // other frame releases the hold first, so a live frame overtakes the replay.
+    class HoldingServer extends FakeTransport {
+      private held = true;
+
+      override async send(text: string): Promise<void> {
+        await super.send(text);
+        if (!this.held) return;
+        this.held = false;
+        const frame = JSON.parse(text) as ClientFrame;
+        if (frame.type === "hello") {
+          this.held = true;
+          return;
+        }
+        const replay = [4, 5, 6].map((seq) => ({ type: "presence", seq, state: "online" }));
+        const live = { type: "presence", seq: 10, state: "online" };
+        const frames = frame.type === "resync" ? [...replay, live] : [live, ...replay];
+        for (const next of frames) this.push(JSON.stringify(next));
+      }
+    }
+
+    const transport = new HoldingServer([
+      { text: JSON.stringify({ type: "hello.ok", seq: 3, v: 1, serverTime: "now", lastSeq: 10 }) },
+    ]);
+    const seqs: number[] = [];
+    const connection = new AgniConnection({
+      settings: settings(3),
+      token: "t",
+      makeTransport: () => transport,
+      handshakeTimeoutMs: 5000,
+    });
+    connection.onEvent = (event) => {
+      if (event.type === "frame" && "seq" in event.frame) seqs.push(event.frame.seq as number);
+      // The app reacts to ready by asking for its lists, as app-model.ts does.
+      if (event.type === "state" && event.state.kind === "ready") {
+        void connection.send({ type: "thread.list" });
+      }
+    };
+    connection.start();
+    expect(await settle(() => seqs.includes(10))).toBe(true);
+    connection.stop();
+
+    const order = transport.decodedSent().map((frame) => frame.type);
+    expect(order.slice(0, 3)).toEqual(["hello", "resync", "thread.list"]);
+    expect(seqs).toEqual([4, 5, 6, 10]);
+  });
+
   test("hello omits the token when the cookie authenticates", async () => {
     const transport = new FakeTransport([
       { text: JSON.stringify({ type: "hello.ok", seq: 1, v: 1, serverTime: "now", lastSeq: 1 }) },
@@ -198,6 +252,30 @@ describe("connection", () => {
     expect(connection.lastSeq).toBe(2);
     expect(events.some((e) => e.type === "durableReloadRequired")).toBe(true);
     expect(transport.decodedSent()).toContainEqual({ type: "resync", lastSeq: 2 });
+  });
+
+  test("only a hello.ok behind our seq says the daemon restarted; a resync gap alone does not (final round)", async () => {
+    const behind = new FakeTransport([{ text: JSON.stringify({ type: "hello.ok", seq: 2, v: 1, serverTime: "now", lastSeq: 2 }) }]);
+    const behindEvents: ConnectionEvent[] = [];
+    const first = new AgniConnection({ settings: settings(50), token: "t", makeTransport: () => behind, handshakeTimeoutMs: 5000 });
+    first.onEvent = (event) => behindEvents.push(event);
+    first.start();
+    expect(await settle(() => ready(first.state))).toBe(true);
+    first.stop();
+    expect(behindEvents).toContainEqual({ type: "durableReloadRequired", restarted: true });
+
+    const gap = new FakeTransport([
+      { text: JSON.stringify({ type: "hello.ok", seq: 90, v: 1, serverTime: "now", lastSeq: 90 }) },
+      { text: JSON.stringify({ type: "error", seq: 91, code: "resync_gap", message: "cannot replay from 3" }) },
+    ]);
+    const gapEvents: ConnectionEvent[] = [];
+    const second = new AgniConnection({ settings: settings(3), token: "t", makeTransport: () => gap, handshakeTimeoutMs: 5000 });
+    second.onEvent = (event) => gapEvents.push(event);
+    second.start();
+    expect(await settle(() => gapEvents.some((event) => event.type === "durableReloadRequired"))).toBe(true);
+    second.stop();
+    expect(gapEvents).toContainEqual({ type: "durableReloadRequired", restarted: false });
+    expect(gapEvents).not.toContainEqual({ type: "durableReloadRequired", restarted: true });
   });
 
   test("a revoked token stops retrying", async () => {

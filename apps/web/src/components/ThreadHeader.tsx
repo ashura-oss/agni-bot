@@ -19,7 +19,9 @@ export function ThreadHeader({ onToggleSidebar }: { onToggleSidebar?: () => void
   const [connectionOpen, setConnectionOpen] = useState(false);
   const agent = model.agent;
   const agentState = agent ? snapshot.agentStates[agent.id] : undefined;
-  const working = snapshot.conversation.isStreaming || agentState === "working";
+  const connected = snapshot.connectionState.kind === "ready";
+  // A lost connection is not "writing": nothing can arrive until it is back.
+  const working = connected && (snapshot.conversation.isStreaming || agentState === "working");
 
   return (
     <header className="thread-header" onKeyDown={(event) => { if (event.key === "Escape") { setActionsOpen(false); setConnectionOpen(false); } }}>
@@ -41,8 +43,8 @@ export function ThreadHeader({ onToggleSidebar }: { onToggleSidebar?: () => void
           <SidebarAgentBadge agent={agent} size={36} />
           {working ? <span className="agent-pill-dot" aria-label="Working" /> : null}
         </span>
-        <span className="agent-pill-name">{agent?.name ?? "New Bot"}</span>
-        {working ? <span className="header-status">Writing…</span> : snapshot.connectionState.kind !== "ready" ? <span className="header-status">{connectionTitle(snapshot.connectionState)}</span> : null}
+        <span className="agent-pill-name">{agent?.name ?? "Your bot"}</span>
+        {working ? <span className="header-status">Writing…</span> : null}
       </button>
       <span className="thread-header-spacer" />
 

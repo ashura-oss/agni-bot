@@ -20,6 +20,8 @@ import {
   websocketURL,
   type AgentInfo,
   type ApprovalRow,
+  type ApprovalRuleInfo,
+  safeLine,
   type ChatMessage,
   type ClientFrame,
   type ChatGPTConnection,
@@ -51,6 +53,7 @@ import {
   savePreferences,
   type Preferences,
 } from "./preferences";
+import { loadStops, rememberStop } from "./stops";
 import { APPEARANCE_PENDING_KEY, cacheAppearance, defaultAppearance, loadCachedAppearance, loadPendingAppearance } from "../appearance";
 
 export type AppScreen = "pairing" | "chat";
@@ -132,6 +135,12 @@ export interface AppSnapshot {
   focusComposerToken: number;
   statusText: string | null;
   toast: NoticeRow | null;
+  /** The standing "Always allow" rules; null until the daemon has answered. */
+  approvalRules: ApprovalRuleInfo[] | null;
+  /** Counts the daemon's "already running" refusals of Run now, so a button can stand down. */
+  runRefusals: number;
+  /** A message the daemon refused as too long: its text goes back to the composer. */
+  rejectedDraft: { token: number; text: string; message: string } | null;
 }
 
 export interface AppModelEnv {
@@ -143,6 +152,8 @@ export interface AppModelEnv {
 }
 
 const PRIMARY_AGENTS = new Set(["ea", "agni"]);
+/** The product's own name: the tab title before the roster is known. Never a bot's name. */
+const APP_TITLE = "Agni";
 
 export function isPrimaryAgent(agent: AgentInfo | null | undefined): boolean {
   return !agent || PRIMARY_AGENTS.has(agent.id);
@@ -154,11 +165,10 @@ function seedAgents(): AgentInfo[] {
 
 /** What the "+" button makes: an agent with a placeholder name, not a form. */
 const NEW_AGENT_NAME = "New bot";
-const NEW_AGENT_ROLE = "unnamed";
 const NEW_AGENT_PROMPT = `You are {name}, an agent {user} just created in the app. You have no job description yet.
 
-Open with one short line, then ask two things: what they want to call you, and what you should do for them.
-When they give you a name, call rename_agent so the app shows it — do not simply agree in prose.
+Open with one short line, then ask what you should do for them.
+You cannot rename yourself. If they want to call you something else, tell them to change your name in your profile (the name at the top of this chat) and carry on.
 When they describe your job, call update_agent with a short role and a prompt written as instructions to yourself.
 Until then, answer what is asked, briefly.`;
 
@@ -210,6 +220,8 @@ export class AppModel {
   private conversation = new Conversation("ea");
   private threads: ThreadInfo[] = [];
   private agents: AgentInfo[] = seedAgents();
+  /** The daemon has sent the real roster; until then the seed row is only a stand-in. */
+  private rosterKnown = false;
   /** Hidden specialists are absent from the sidebar but still addressable. */
   private mentionAgents: AgentInfo[] = seedAgents();
   /** The channel this client is bound to, when it bound itself to an agent. */
@@ -267,6 +279,31 @@ export class AppModel {
   private focusComposerToken = 0;
   private statusText: string | null = null;
   private toast: NoticeRow | null = null;
+  private approvalRules: ApprovalRuleInfo[] | null = null;
+  private runRefusals = 0;
+  private rejectedDraft: AppSnapshot["rejectedDraft"] = null;
+  /** The local echo of the message just sent, so a refusal can take it back. */
+  private lastSent: { localID: string; text: string } | null = null;
+  /**
+   * Cards the owner has answered that the daemon has not yet closed. An `unknown_request`
+   * error names no card, so it is only pinned to one when exactly one answer is outstanding.
+   */
+  private answered = new Set<string>();
+  /**
+   * Counts connection attempts (one per hello). A card is stamped with the count when it
+   * arrives, so after a restart the cards the new process re-sent can be told from the
+   * ones left over from the old one.
+   */
+  private connectionEpoch = 0;
+  /** The conversation whose block the history handler already asked the daemon to open. */
+  private openAskedFor: string | null = null;
+  /** When Stop and a rule revoke were last sent: both can be answered `not_found`, for different reasons. */
+  private lastCancelAt = 0;
+  private lastRevokeAt = 0;
+  /** When a frame last arrived, and the last one before the current connection attempt began. */
+  private lastFrameAt = Date.now();
+  private outageStart = Date.now();
+  private cardEpoch = new Map<string, number>();
 
   private connection: AgniConnection | null = null;
   private pendingPairing: { settings: ServerSettings; token: string } | null = null;
@@ -375,6 +412,9 @@ export class AppModel {
       focusComposerToken: this.focusComposerToken,
       statusText: this.statusText,
       toast: this.toast,
+      approvalRules: this.approvalRules,
+      runRefusals: this.runRefusals,
+      rejectedDraft: this.rejectedDraft,
     };
   }
 
@@ -382,7 +422,8 @@ export class AppModel {
     this.snapshotValue = this.buildSnapshot();
     for (const listener of this.listeners) listener();
     if (typeof document !== "undefined") {
-      document.title = this.agent?.name ?? "Agni";
+      // The seed bot's placeholder name must not flash in the tab before the roster arrives.
+      document.title = this.rosterKnown ? (this.agent?.name ?? APP_TITLE) : APP_TITLE;
     }
   }
 
@@ -489,8 +530,7 @@ export class AppModel {
 
   private syncAgentRoute(): void {
     if (!this.pendingAgentRoute) return;
-    const key = this.pendingAgentRoute.toLowerCase();
-    const agent = [...this.mentionAgents, ...this.agents].find((item) => item.id.toLowerCase() === key || item.name.toLowerCase().replace(/[^a-z0-9]+/g, "-") === key);
+    const agent = agentForRoute(this.pendingAgentRoute, [...this.mentionAgents, ...this.agents]);
     if (!agent) return;
     this.pendingAgentRoute = null;
     this.selectAgent(agent, false);
@@ -604,6 +644,7 @@ export class AppModel {
     this.secretKind = null;
     this.threads = [];
     this.agents = seedAgents();
+    this.rosterKnown = false;
     this.mentionAgents = seedAgents();
     this.conversation = new Conversation("ea");
     this.health = null;
@@ -888,6 +929,7 @@ export class AppModel {
     const outgoing = mention ? mention.text : content;
     if (outgoing.length === 0) return false;
     const localID = this.conversation.appendLocalUserMessage(outgoing, new Date(), attachments);
+    this.lastSent = { localID, text: content };
     this.publish();
     const connection = this.connection;
     if (!connection || !isReady(this.connectionState)) {
@@ -1016,6 +1058,7 @@ export class AppModel {
     const turnID = this.conversation.inFlightTurnID;
     const connection = this.connection;
     if (!turnID || !connection) return;
+    this.lastCancelAt = Date.now();
     void connection.send({ type: "msg.cancel", turnID }).catch(() => undefined);
   }
 
@@ -1035,6 +1078,9 @@ export class AppModel {
     connection.send(frame).then(
       () => {
         this.unsent.delete(requestID);
+        this.answered.add(requestID);
+        // A stale entry is harmless but should not pile up: keep the latest few.
+        for (const old of [...this.answered].slice(0, Math.max(0, this.answered.size - 50))) this.answered.delete(old);
         resolve();
         this.publish();
       },
@@ -1047,10 +1093,17 @@ export class AppModel {
   }
 
   answer(approval: ApprovalRow, decision: string): void {
+    // A card the daemon has closed (answered elsewhere, expired) is gone: nothing to send.
+    if (!this.conversation.approvals.some((candidate) => candidate.id === approval.id)) return;
     this.reply(
       approval.id,
       { type: "approve.reply", requestID: approval.id, decision: decision as "once" | "always" | "reject" },
-      () => this.conversation.resolveApproval(approval.id, decision),
+      () => {
+        this.conversation.resolveApproval(approval.id, decision);
+        // "Always allow" makes a rule: the reply is already on the wire, so the list asked for
+        // next comes back with it.
+        if (decision === "always") this.refreshApprovalRules();
+      },
     );
   }
 
@@ -1059,6 +1112,7 @@ export class AppModel {
    * so the turn waiting on it can carry on.
    */
   answerForm(form: FormRow, answer: string): void {
+    if (!this.conversation.forms.some((candidate) => candidate.id === form.id)) return;
     this.reply(form.id, { type: "form.answer", requestID: form.id, answer }, () =>
       this.conversation.resolveForm(form.id, answer),
     );
@@ -1283,6 +1337,25 @@ export class AppModel {
     });
   }
 
+  // MARK: approval rules
+
+  refreshApprovalRules(): void {
+    const connection = this.connection;
+    if (!connection || !isReady(this.connectionState)) return;
+    void connection.send({ type: "approval.rules.list" }).catch(() => undefined);
+  }
+
+  /** Take one "Always allow" rule away; the list shown follows the daemon's answer. */
+  revokeApprovalRule(id: string): void {
+    const connection = this.connection;
+    if (!connection || !isReady(this.connectionState)) {
+      this.showToast(notice("failure", "Not revoked", "Reconnect to the daemon first."));
+      return;
+    }
+    this.lastRevokeAt = Date.now();
+    void connection.send({ type: "approval.rule.revoke", id }).catch(() => undefined);
+  }
+
   // MARK: chrome
 
   setSearchText(text: string): void {
@@ -1304,6 +1377,8 @@ export class AppModel {
 
   toggleInspector(): void {
     this.isInspectorPresented = !this.isInspectorPresented;
+    // The jobs list is only pushed in answer to a request: ask again when the panel opens.
+    if (this.isInspectorPresented) this.refreshJobs();
     this.publish();
   }
 
@@ -1444,7 +1519,7 @@ export class AppModel {
     const connection = this.connection;
     if (!connection) return;
     const { id, name } = nextNewAgent([...this.agents, ...this.mentionAgents]);
-    const agent: AgentInfo = { id, name, role: NEW_AGENT_ROLE, tools: [] };
+    const agent: AgentInfo = { id, name, tools: [] };
     this.agents = [...this.agents, agent];
     this.mentionAgents = [...this.mentionAgents, agent];
     void connection
@@ -1452,7 +1527,6 @@ export class AppModel {
         type: "agent.create",
         id: agent.id,
         name,
-        role: NEW_AGENT_ROLE,
         prompt: NEW_AGENT_PROMPT,
       })
       .catch(() => undefined);
@@ -1542,6 +1616,11 @@ export class AppModel {
               this.notifyUser("Agni cannot connect", event.state.reason);
             }
             break;
+          case "handshaking":
+            this.connectionEpoch += 1;
+            this.openAskedFor = null;
+            this.outageStart = this.lastFrameAt;
+            break;
           case "waiting":
             this.stopHealthPolling();
             break;
@@ -1561,7 +1640,12 @@ export class AppModel {
         this.publish();
         return;
 
-      case "durableReloadRequired":
+      case "durableReloadRequired": {
+        // The daemon could not replay. Only a restart kills what it was running; a replay log that
+        // merely moved on while this browser slept leaves the running turn alive and streaming.
+        const deadTurn = this.conversation.inFlightTurnID;
+        if (event.restarted) this.resetAfterRestart(deadTurn);
+        else void this.confirmRestart(deadTurn, Date.now() - this.outageStart);
         this.conversation.note(
           notice(
             "info",
@@ -1573,12 +1657,51 @@ export class AppModel {
         this.reloadConversation();
         this.publish();
         return;
+      }
 
       case "lastSeq":
         this.settings = { ...this.settings, lastSeq: event.seq };
         this.saveSettingsSoon();
         return;
     }
+  }
+
+  /**
+   * Did the daemon boot while this browser was away? Its uptime says so: a daemon that has been
+   * up longer than the outage never stopped, and its running turns are still running.
+   */
+  private async confirmRestart(deadTurn: string | null, outageMs: number): Promise<void> {
+    const url = healthURL(this.settings);
+    if (!url) return;
+    try {
+      const report = await this.healthFetch(url);
+      if (report.uptimeMs + 2000 < outageMs) this.resetAfterRestart(deadTurn);
+    } catch {
+      // No answer: assume nothing, keep what is on screen.
+    }
+  }
+
+  /**
+   * The daemon behind this view restarted: whatever it was in the middle of is gone with it.
+   * Forget the running turn and the cards of the old process; the cards the new one re-sent
+   * after this connection's hello are kept. Skipped if a different turn has begun since.
+   */
+  private resetAfterRestart(deadTurn: string | null): void {
+    if (this.conversation.inFlightTurnID !== deadTurn) return;
+    const current = new Set([...this.cardEpoch].filter(([, epoch]) => epoch === this.connectionEpoch).map(([id]) => id));
+    // Tokens still queued for the next animation frame belong to the turn that just died;
+    // applied after the reset they would bring its bubble, and the Stop button, back.
+    if (this.tokenTimer !== null) {
+      if (this.tokenIsFrame) cancelAnimationFrame(this.tokenTimer as number);
+      else clearTimeout(this.tokenTimer as ReturnType<typeof setTimeout>);
+      this.tokenTimer = null;
+    }
+    this.tokenQueue = [];
+    // "Working" and "waiting" were the old process's word; it sends no presence on connect.
+    this.agentStates = {};
+    this.conversation.resetLive({ keepCards: current });
+    for (const id of [...this.cardEpoch.keys()]) if (!current.has(id)) this.cardEpoch.delete(id);
+    this.publish();
   }
 
   private activeChannel(): string {
@@ -1613,6 +1736,7 @@ export class AppModel {
   };
 
   private handleFrame(frame: IncomingFrame): void {
+    this.lastFrameAt = Date.now();
     // A frame type this build does not know is data, not an instruction.
     if (!isKnownFrame(frame)) return;
 
@@ -1638,7 +1762,8 @@ export class AppModel {
     }
 
     if (frame.type === "msg.new") {
-      if (frame.channelId !== this.activeChannel() || frame.internal) return;
+      // The agent's own channel, or the one the daemon bound this chat to (a routine posts into either).
+      if ((frame.channelId !== this.activeChannel() && frame.channelId !== this.boundChannelID) || frame.internal) return;
       this.statusText = null;
       this.run(this.conversation.apply(frame));
       this.publish();
@@ -1692,7 +1817,12 @@ export class AppModel {
       // agent they name is what tells a live reply from a stale one.
       if (frame.agentID !== this.conversation.agentID) return;
       const freshSurface = this.conversation.conversationID !== frame.conversationID;
+      // This answer is to the open the history handler asked for (to learn the session block):
+      // the history it follows is already on screen, so asking for it again would loop for as
+      // long as the conversation has no block.
+      const answersHistoryOpen = !freshSurface && this.openAskedFor === frame.conversationID;
       if (freshSurface) {
+        this.openAskedFor = null;
         this.conversation.bind(
           frame.conversationID,
           frame.agentID,
@@ -1702,7 +1832,7 @@ export class AppModel {
         this.conversation.startSession(frame.sessionID, frame.conversationID);
       }
       const connection = this.connection;
-      if (connection && isReady(this.connectionState)) {
+      if (connection && isReady(this.connectionState) && !answersHistoryOpen) {
         void connection
           .send({ type: "conversation.history", conversationID: frame.conversationID, limit: 400 })
           .catch(() => undefined);
@@ -1727,10 +1857,15 @@ export class AppModel {
         frame.conversationID,
         this.conversation.agentID,
         frame.messages,
+        // A turn running right now (added to the frame by newer daemons; absent from older ones).
+        (frame as { runningTurn?: { turnID: string; threadID: string; agentID: string } }).runningTurn ?? null,
       );
-      if (this.conversation.threadID === null) {
+      // History does not say how a turn ended; put back the "didn't finish" marks this browser saw.
+      this.conversation.restoreStops(loadStops());
+      if (this.conversation.threadID === null && this.openAskedFor !== frame.conversationID) {
         const connection = this.connection;
         if (connection && isReady(this.connectionState)) {
+          this.openAskedFor = frame.conversationID;
           void connection
             .send({
               type: "conversation.open",
@@ -1740,6 +1875,18 @@ export class AppModel {
             .catch(() => undefined);
         }
       }
+      this.publish();
+      return;
+    }
+
+    if (frame.type === "approval.rules.list.ok") {
+      this.approvalRules = frame.rules;
+      this.publish();
+      return;
+    }
+
+    if (frame.type === "approval.rule.revoke.ok") {
+      this.approvalRules = (this.approvalRules ?? []).filter((rule) => rule.id !== frame.id);
       this.publish();
       return;
     }
@@ -1891,6 +2038,58 @@ export class AppModel {
     if (frame.type === "hello.ok") return;
 
     if (frame.type === "error") {
+      if (
+        frame.code === "not_running" ||
+        (frame.code === "not_found" && this.lastCancelAt > this.lastRevokeAt && Date.now() - this.lastCancelAt < 10_000)
+      ) {
+        // Stop pressed just as the turn finished: there was nothing left to stop. Not an error.
+        this.lastCancelAt = 0;
+        this.conversation.finishTurnLocally();
+        this.reloadConversation();
+        this.publish();
+        return;
+      }
+      if (frame.code === "not_found") {
+        // A rule that was already revoked (here or on another device): show what is true now.
+        this.showToast(notice("info", "Already gone", frame.message));
+        this.refreshApprovalRules();
+        return;
+      }
+      if (frame.code === "already_running") {
+        this.runRefusals += 1;
+        // The daemon names the job by id; the owner knows it by what it does.
+        const named = this.jobs.reduce((text, job) => (job.title ? text.split(job.id).join(`“${job.title}”`) : text), frame.message);
+        this.showToast(notice("info", "Already running", named));
+        return;
+      }
+      if (frame.code === "unknown_request") {
+        // The card was answered elsewhere or timed out: it is gone, not an error to puzzle over.
+        // The error may name the card; otherwise it is only safe to close one when it is the
+        // single answer still waiting. With two in flight, closing a guess could drop a live card.
+        const outstanding = [...this.answered];
+        const named = outstanding.filter((id) => frame.message.includes(id));
+        const id = named.length === 1 ? named[0] : outstanding.length === 1 ? outstanding[0] : undefined;
+        if (id) {
+          this.answered.delete(id);
+          this.unsent.delete(id);
+          this.conversation.apply({ type: "approval.closed", seq: frame.seq, requestID: id, kind: "approval", reason: "expired" });
+          this.conversation.apply({ type: "approval.closed", seq: frame.seq, requestID: id, kind: "form", reason: "expired" });
+          this.conversation.resolveSecret(id);
+          this.showToast(notice("info", "Request expired", "That request expired or was already answered."));
+        } else {
+          this.showToast(notice("info", "Request expired", "A request had expired or was already answered."));
+        }
+        return;
+      }
+      if (frame.code === "bad_frame" && /too long/i.test(frame.message) && this.lastSent) {
+        // Nothing was stored: take the bubble back and hand the text to the composer.
+        const sent = this.lastSent;
+        this.lastSent = null;
+        this.conversation.discardLocalEcho(sent.localID);
+        this.rejectedDraft = { token: (this.rejectedDraft?.token ?? 0) + 1, text: sent.text, message: frame.message };
+        this.publish();
+        return;
+      }
       if (frame.code === "provider_auth") {
         this.chatgptError = frame.message; this.chatgptBusy = false;
         this.isAddingProvider = false; this.pendingProviderID = null;
@@ -1940,8 +2139,20 @@ export class AppModel {
     }
 
     if (frame.type === "agents.update" && frame.mentions) this.mentionAgents = frame.mentions;
+    if (frame.type === "approval.request" || frame.type === "form.request" || frame.type === "secret.request") {
+      this.cardEpoch.set(frame.requestID, this.connectionEpoch);
+    }
+    // A card the daemon closed must not have a late answer re-sent for it on reconnect.
+    if (frame.type === "approval.closed") {
+      this.unsent.delete(frame.requestID);
+      this.answered.delete(frame.requestID);
+    }
+    if (frame.type === "turn.end" && frame.stopReason !== "end" && frame.stopReason !== "needs_input") {
+      rememberStop(frame.turnID, frame.stopReason);
+    }
     const effects = this.conversation.apply(frame);
     if (frame.type === "turn.end" || frame.type === "turn.start") this.refreshThreadList();
+    if ((frame.type === "turn.end" || frame.type === "notify") && this.isInspectorPresented) this.refreshJobs();
     this.run(effects);
     this.syncAgentRoute();
     this.publish();
@@ -1958,7 +2169,7 @@ export class AppModel {
           this.reloadConversation();
           break;
         case "notify":
-          this.notifyUser(effect.title, effect.body, effect.sound, effect.threadID);
+          this.notifyUser(this.attentionTitle(effect), effect.body, effect.sound, effect.threadID);
           break;
         case "focusComposer":
           this.focusComposer();
@@ -1967,6 +2178,7 @@ export class AppModel {
           if (effect.threadID !== this.conversation.threadID) this.unread.add(effect.threadID);
           break;
         case "agentsChanged":
+          this.rosterKnown = true;
           if (JSON.stringify(effect.agents) !== JSON.stringify(this.agents)) this.agents = effect.agents;
           break;
         case "taskChanged":
@@ -2025,6 +2237,7 @@ export class AppModel {
     this.refreshPlugins();
     this.refreshChatGPT();
     this.refreshAppearance();
+    this.refreshApprovalRules();
   }
 
   refreshAppearance(): void {
@@ -2093,7 +2306,40 @@ export class AppModel {
 
   // MARK: notifications
 
-  private notifyUser(title: string, body: string, sound = false, threadID?: string): void {
+  /**
+   * The bot behind a card. The frames name none, so a card replayed after a reload falls back
+   * to the one bot the daemon says is waiting for the owner, when there is exactly one.
+   */
+  cardRequesterName(agentID: string | null | undefined): string | null {
+    if (agentID) return this.requesterName(agentID);
+    const waiting = Object.entries(this.agentStates).filter(([, state]) => state === "waiting");
+    return waiting.length === 1 ? this.requesterName(waiting[0]![0]) : null;
+  }
+
+  /** The display name of the bot that asked for something, or null when no bot is known. */
+  requesterName(agentID: string | null | undefined): string | null {
+    if (!agentID) return null;
+    return [...this.mentionAgents, ...this.agents].find((agent) => agent.id === agentID)?.name ?? null;
+  }
+
+  /** "<bot> needs your approval", or the neutral wording when the frames named no bot. */
+  private attentionTitle(effect: Extract<ConversationEffect, { kind: "notify" }>): string {
+    const name = this.requesterName(effect.agentID);
+    if (!effect.need || !name) return effect.title;
+    switch (effect.need) {
+      case "approval":
+        return `${name} needs your approval`;
+      case "question":
+        return `${name} has a question`;
+      case "password":
+        return `${name} needs your password`;
+    }
+  }
+
+  private notifyUser(rawTitle: string, rawBody: string, sound = false, threadID?: string): void {
+    // A toast or system notification repeats what a bot wrote (a command, a question): show it escaped.
+    const title = safeLine(rawTitle, 200);
+    const body = safeLine(rawBody, 400);
     this.showToast(notice("info", title, body, threadID ?? null));
     if (!this.preferences.notifications) return;
     this.notifier.post(title, body, sound, threadID, (id) => this.openThreadFromNotification(id));
@@ -2112,7 +2358,21 @@ export class AppModel {
 
 export type { ChatMessage };
 
-function agentPath(agent: AgentInfo | null): string {
-  const slug = agent?.name.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "agni";
-  return `/agent/${encodeURIComponent(slug)}`;
+/**
+ * A bot's address is its id: it never changes when the bot is renamed, and no
+ * two bots share one. (Names change and can collide, which left `/agent/new-bot`
+ * pointing at the wrong bot after a rename or a second "New bot".)
+ */
+export function agentPath(agent: AgentInfo | null): string {
+  return `/agent/${encodeURIComponent(agent?.id ?? "ea")}`;
+}
+
+/** The bot a `/agent/<key>` address names: by id, else by a name nobody else shares (old links). */
+export function agentForRoute(key: string, roster: readonly AgentInfo[]): AgentInfo | null {
+  const wanted = key.toLowerCase();
+  const byID = roster.find((agent) => agent.id.toLowerCase() === wanted);
+  if (byID) return byID;
+  const slug = (name: string) => name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  const byName = roster.filter((agent) => slug(agent.name) === wanted);
+  return byName.length === 1 ? (byName[0] ?? null) : null;
 }

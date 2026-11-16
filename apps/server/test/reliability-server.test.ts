@@ -70,9 +70,10 @@ async function until(check: () => boolean, timeoutMs = 4000): Promise<void> {
   }
 }
 
-const cleanups: Array<() => void> = [];
-afterEach(() => {
-  for (const cleanup of cleanups.splice(0).reverse()) cleanup();
+const cleanups: Array<() => unknown> = [];
+afterEach(async () => {
+  // Turns outlive their sockets now, so a stopping server settles them before the database closes.
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
 function config(dbPath: string): Config {
@@ -151,18 +152,54 @@ describe("H36 + H32 reconnect", () => {
     let calls = 0;
     const server = serve(db, (async () => {
       calls += 1;
-      return calls === 1 ? toolCall("bash", { command: "rm -rf /tmp/agni-test-nothing" }) : text("done");
+      // A deferred tool must be loaded before it can be called.
+      return calls === 1 ? toolCall("load_tools", { names: ["bash"] }) : calls === 2 ? toolCall("bash", { command: "rm -rf /tmp/agni-test-nothing" }) : text("done");
     }) as unknown as typeof fetch);
     const url = `ws://127.0.0.1:${server.port}/ws`;
     const first = await Client.open(url, token);
     first.send({ type: "msg.send", channelId: "main", text: "clean up please" });
     const approval = await first.waitFor((frame) => frame.type === "approval.request");
-    first.ws.close();
 
+    // Another client connects while the turn is still waiting: it gets the live card.
     const second = await Client.open(url, token);
     second.send({ type: "resync", lastSeq: approval.seq });
     const again = await second.waitFor((frame) => frame.type === "approval.request");
     expect(again.requestID).toBe(approval.requestID);
+
+    // Let the turn finish before the database closes under it.
+    first.send({ type: "approve.reply", requestID: String(approval.requestID), decision: "reject" });
+    await first.waitFor((frame) => frame.type === "turn.end");
+  });
+
+  test("a card whose turn has ended is not re-sent to a reconnecting client", async () => {
+    const db = memoryDB();
+    const { token } = await mintToken(db, "t");
+    let calls = 0;
+    const server = serve(db, (async () => {
+      calls += 1;
+      // A deferred tool must be loaded before it can be called.
+      return calls === 1 ? toolCall("load_tools", { names: ["bash"] }) : calls === 2 ? toolCall("bash", { command: "rm -rf /tmp/agni-test-nothing" }) : text("done");
+    }) as unknown as typeof fetch);
+    const url = `ws://127.0.0.1:${server.port}/ws`;
+    const first = await Client.open(url, token);
+    first.send({ type: "msg.send", channelId: "main", text: "clean up please" });
+    const approval = await first.waitFor((frame) => frame.type === "approval.request");
+    // A turn outlives its socket, so closing it no longer ends the turn. Stopping the turn does:
+    // its card is dead, so it must expire and must not come back.
+    const started = await first.waitFor((frame) => frame.type === "turn.start");
+    first.send({ type: "msg.cancel", turnID: String(started.turnID) });
+    await first.waitFor((frame) => frame.type === "turn.end");
+    first.ws.close();
+    for (let waited = 0; waited < 3_000; waited += 25) {
+      if (db.query<{ status: string }, [string]>("SELECT status FROM approvals WHERE id = ?").get(String(approval.requestID))?.status !== "pending") break;
+      await Bun.sleep(25);
+    }
+    expect(db.query<{ status: string }, [string]>("SELECT status FROM approvals WHERE id = ?").get(String(approval.requestID))?.status).toBe("expired");
+
+    const second = await Client.open(url, token);
+    second.send({ type: "resync", lastSeq: approval.seq });
+    await Bun.sleep(300);
+    expect(second.frames.some((frame) => frame.type === "approval.request")).toBe(false);
   });
 
   test("live broadcasts wait for the resync replay: seq strictly increases", async () => {

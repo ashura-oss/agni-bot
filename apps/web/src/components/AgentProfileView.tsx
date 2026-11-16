@@ -12,6 +12,7 @@ import { useEffect, useState } from "react";
 import { Check, Link2, X } from "lucide-react";
 import { useAppModel, useAppSnapshot } from "../state/use-app-model";
 import { SidebarAgentBadge } from "./bits";
+import { checkAgentName, writtenRole } from "../state/display";
 
 type Tab = "details" | "activity";
 
@@ -27,26 +28,44 @@ export function AgentProfileView() {
   const agent = model.agent;
   const [tab, setTab] = useState<Tab>("details");
   const [name, setName] = useState(agent?.name ?? "");
-  const [tag, setTag] = useState(agent?.role ?? "");
+  const [tag, setTag] = useState(writtenRole(agent?.role));
   const [saved, setSaved] = useState<string | null>(null);
+  const [nameError, setNameError] = useState<string | null>(null);
+  // Which bot the drafts belong to. When the open bot changes, a field that loses focus in the
+  // same moment must not save the old bot's draft onto the new one.
+  const [draftFor, setDraftFor] = useState(agent?.id);
 
   useEffect(() => {
+    setDraftFor(agent?.id);
     setName(agent?.name ?? "");
-    setTag(agent?.role ?? "");
+    setTag(writtenRole(agent?.role));
+    setNameError(null);
   }, [agent?.id, agent?.name, agent?.role]);
 
   if (!agent) return null;
 
   /** Enter or leaving the field both commit — no lost typing on the way out. */
   const commitName = () => {
-    const trimmed = name.trim();
-    if (trimmed.length === 0 || trimmed === agent.name) return;
-    model.renameAgent(trimmed, agent.id);
+    if (draftFor !== agent.id) return;
+    if (name.trim() === agent.name) {
+      setNameError(null);
+      return;
+    }
+    // An empty or over-long name is refused out loud, not ignored while "Saved" stays on screen.
+    const checked = checkAgentName(name);
+    if (!checked.ok) {
+      setNameError(checked.message);
+      setSaved(null);
+      return;
+    }
+    setNameError(null);
+    model.renameAgent(checked.name, agent.id);
     setSaved("name");
   };
   const commitTag = () => {
+    if (draftFor !== agent.id) return;
     const trimmed = tag.trim();
-    if (trimmed.length === 0 || trimmed === (agent.role ?? "")) return;
+    if (trimmed.length === 0 || trimmed === writtenRole(agent.role)) return;
     model.updateAgentProfile(agent.id, { role: trimmed });
     setSaved("tag");
   };
@@ -79,15 +98,25 @@ export function AgentProfileView() {
             id="agent-name"
             className="profile-name-input"
             value={name}
-            maxLength={64}
-            onChange={(event) => setName(event.target.value)}
+            aria-invalid={nameError !== null}
+            aria-describedby={nameError ? "agent-name-error" : undefined}
+            onChange={(event) => {
+              setName(event.target.value);
+              setNameError(null);
+              setSaved(null);
+            }}
             onBlur={commitName}
             onKeyDown={(event) => {
               if (event.key !== "Enter") return;
               commitName();
             }}
           />
-          <div className="profile-by">by {agent.id}</div>
+          {nameError ? (
+            <div id="agent-name-error" className="profile-field-error" role="alert">
+              {nameError}
+            </div>
+          ) : null}
+          <div className="profile-by">Mention as @{agent.name}</div>
         </div>
 
         <div className="profile-tag-block">
@@ -98,7 +127,10 @@ export function AgentProfileView() {
             value={tag}
             maxLength={160}
             placeholder="What is it for?"
-            onChange={(event) => setTag(event.target.value)}
+            onChange={(event) => {
+              setTag(event.target.value);
+              setSaved(null);
+            }}
             onBlur={commitTag}
             onKeyDown={(event) => {
               if (event.key !== "Enter") return;
@@ -134,7 +166,7 @@ export function AgentProfileView() {
           <div className="profile-rows">
             <div className="profile-row">
               <span className="profile-row-label">Tag</span>
-              <span className="profile-row-value">{agent.role ?? "Not set"}</span>
+              <span className="profile-row-value">{writtenRole(agent.role) || "Not set"}</span>
             </div>
             <div className="profile-row">
               <span className="profile-row-label">Model</span>

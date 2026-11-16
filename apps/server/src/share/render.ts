@@ -171,7 +171,7 @@ function renderRecord(record: ShareRecord): string {
 
 function approvalLine(record: ShareRecord): string {
   const verb =
-    record.decision === "reject" ? "was denied" : record.decision === "always" ? "was allowed, and remembered" : record.decision === "once" ? "was allowed once" : "was never answered";
+    record.decision === "reject" ? "was denied" : record.decision === "always" ? "was allowed, and remembered" : record.decision === "once" ? "was allowed once" : record.decision === "expired" ? "expired" : "was never answered";
   return `${record.text ?? "An action"} — ${verb}.`;
 }
 

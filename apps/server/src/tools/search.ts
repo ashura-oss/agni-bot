@@ -5,7 +5,7 @@
  * these run synchronously, so a timeout cannot interrupt them.
  */
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
-import { join, basename } from "node:path";
+import { join, basename, sep } from "node:path";
 import { confineToScratch, scratchDir } from "./write-file";
 
 const MAX_RESULTS = 200;
@@ -95,7 +95,8 @@ export function glob(args: GlobArgs): GlobResult {
 
   const truncated = walk(root, (path) => {
     if (matches.length >= limit) return false;
-    const rel = path.slice(root.length).replace(/^\/+/, "");
+    // Glob patterns and the paths shown to the model use "/" on every platform.
+    const rel = path.slice(root.length).split(sep).join("/").replace(/^\/+/, "");
     if (matchGlob(rel, globRe) || matchGlob(basename(path), globRe)) matches.push(rel);
     return true;
   });

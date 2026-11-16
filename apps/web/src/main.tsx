@@ -6,6 +6,7 @@ import { AppModelProvider } from "./state/use-app-model";
 import { RootView } from "./components/RootView";
 import "./styles/tokens.css";
 import "./styles/app.css";
+import "./styles/s1-web.css";
 
 const model = new AppModel();
 model.start();

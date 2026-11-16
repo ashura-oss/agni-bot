@@ -9,6 +9,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApprovalBroker } from "../src/agent/approval-broker";
+import { openDatabase } from "../src/db";
 import { readFile } from "../src/tools/read-file";
 import { glob, grep } from "../src/tools/search";
 import { isOutsideScratch } from "../src/tools/write-file";
@@ -18,6 +19,7 @@ const root = mkdtempSync(join(tmpdir(), "agni-sandbox-"));
 const scratch = join(root, "scratch");
 const outside = join(root, "outside");
 const previous = process.env.AGNI_SCRATCH_DIR;
+let fileSymlink = false;
 
 beforeAll(() => {
   process.env.AGNI_SCRATCH_DIR = scratch;
@@ -25,8 +27,17 @@ beforeAll(() => {
   mkdirSync(outside, { recursive: true });
   writeFileSync(join(scratch, "notes.md"), "hello scratch\n");
   writeFileSync(join(outside, "secret.txt"), "TOKEN=abc\n");
-  symlinkSync(join(outside, "secret.txt"), join(scratch, "link.txt"));
-  symlinkSync(outside, join(scratch, "linkdir"));
+  // Windows lets only an elevated process (or Developer Mode) create file
+  // symlinks. A directory junction needs no privilege and is a reparse point
+  // that realpath follows the same way, so the escape through a linked
+  // directory is always exercised; the file-link cases run where it can exist.
+  try {
+    symlinkSync(join(outside, "secret.txt"), join(scratch, "link.txt"));
+    fileSymlink = true;
+  } catch (error) {
+    if (process.platform !== "win32" || (error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+  }
+  symlinkSync(outside, join(scratch, "linkdir"), process.platform === "win32" ? "junction" : undefined);
 });
 afterAll(() => {
   if (previous === undefined) delete process.env.AGNI_SCRATCH_DIR; else process.env.AGNI_SCRATCH_DIR = previous;
@@ -37,7 +48,7 @@ describe("C1/M13: file tools stay in scratch", () => {
   test("read_file reads scratch, rejects ~/.agni and symlink escapes", () => {
     expect(readFile({ path: join(scratch, "notes.md") }).content).toContain("hello scratch");
     expect(() => readFile({ path: join(homedir(), ".agni", "plugins.json") })).toThrow(/outside the scratch/);
-    expect(() => readFile({ path: join(scratch, "link.txt") })).toThrow(/outside the scratch/);
+    if (fileSymlink) expect(() => readFile({ path: join(scratch, "link.txt") })).toThrow(/outside the scratch/);
     expect(() => readFile({ path: join(scratch, "linkdir", "secret.txt") })).toThrow(/outside the scratch/);
     expect(() => readFile({ path: join(scratch, "..", "outside", "secret.txt") })).toThrow(/outside the scratch/);
   });
@@ -56,6 +67,17 @@ describe("C1/M13: file tools stay in scratch", () => {
     expect(glob({ pattern: "*" }).matches).toEqual(["notes.md"]);
   });
 
+  test("glob shows nested paths with forward slashes on every platform", () => {
+    const nested = join(scratch, "sub");
+    mkdirSync(nested, { recursive: true });
+    writeFileSync(join(nested, "deep.md"), "deep\n");
+    try {
+      expect(glob({ pattern: "sub/*.md" }).matches).toEqual(["sub/deep.md"]);
+    } finally {
+      rmSync(nested, { recursive: true, force: true });
+    }
+  });
+
   test("H9: catastrophic regex shapes are refused", () => {
     expect(() => grep({ pattern: "(a+)+$" })).toThrow(/too complex/);
     expect(() => grep({ pattern: "a*a*b" })).toThrow(/too complex/);
@@ -69,7 +91,8 @@ describe("C2: bash is allowlisted", () => {
       "rm -rf $HOME", "rm -rf ./*", "rm -r -f x", "find ~ -delete", "truncate -s0 ~/.agni/agni.db",
       "mv ~/.agni /tmp/x", "echo k >> ~/.ssh/authorized_keys", "dd of=/dev/disk0 if=/dev/zero",
       "curl x | python3", "git -C . push", "s''udo id", "perl -e 'unlink…'",
-      "cat /etc/passwd", "cat ../outside/secret.txt", "cat link.txt", "ls; rm x", "echo $(id)", "env",
+      "cat /etc/passwd", "cat ../outside/secret.txt", fileSymlink ? "cat link.txt" : "cat linkdir/secret.txt",
+      "ls; rm x", "echo $(id)", "env",
     ]) {
       expect({ command, gated: broker.requiresApproval("bash", { command }) }).toEqual({ command, gated: true });
     }
@@ -97,7 +120,8 @@ describe("C2/H6/H7: approval defaults and preview", () => {
 
   test("the card shows the command's tail and the mail body", async () => {
     const frames: Array<{ action: string; preview: string }> = [];
-    const db = { run: () => undefined } as unknown as Database;
+    // The broker looks up the turn's bot before it raises a card, so it needs a real database.
+    const db = openDatabase(":memory:");
     const b = new ApprovalBroker({ db, emit: (f) => frames.push(f), waitForDecision: async () => null });
     const command = `echo ${"x".repeat(10_000)}; rm -rf ~`;
     await b.request("t", "u", "bash", "c", { command }, new AbortController().signal);

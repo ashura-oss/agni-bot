@@ -134,11 +134,17 @@ export async function webSearch(args: WebSearchArgs): Promise<WebSearchResult> {
   const ddg = await searchDuckDuckGo(args.query, count);
   if (ddg) return ddg;
 
-  return { query: args.query, results: [], provider: "none (set AGNI_fcUrl() for self-hosted Firecrawl)" };
+  return { query: args.query, results: [], provider: "none (set AGNI_FIRECRAWL_URL for self-hosted Firecrawl, or AGNI_SEARXNG_URL for SearXNG)" };
 }
+
+/** Summary length for web_fetch when the caller gives no maxChars. */
+export const DEFAULT_FETCH_CHARS = 4_000;
+/** The most a caller may ask web_fetch for; the tool schema uses the same bound. */
+export const MAX_FETCH_CHARS = 20_000;
 
 export interface WebFetchArgs {
   url: string;
+  /** 1 to 20,000; defaults to 4,000. */
   maxChars?: number;
 }
 
@@ -147,6 +153,7 @@ export async function webFetch(args: WebFetchArgs, allowedHost?: (url: URL) => b
   // Firecrawl follows redirects on its side, out of reach of allowedHost, so a
   // host-restricted (routine) fetch always goes through fetchPage.
   const base = allowedHost ? null : firecrawlBase();
+  const maxChars = Math.min(args.maxChars ?? DEFAULT_FETCH_CHARS, MAX_FETCH_CHARS);
   // Same checks as fetchPage, before the URL leaves for a third party.
   const target = new URL(args.url);
   if (target.protocol !== "https:" && target.protocol !== "http:") throw new Error("unsupported URL scheme");
@@ -167,9 +174,7 @@ export async function webFetch(args: WebFetchArgs, allowedHost?: (url: URL) => b
         const payload = await response.json() as { data?: { markdown?: string; metadata?: { title?: string } } };
         const title = payload.data?.metadata?.title ?? null;
         let summary = payload.data?.markdown ?? null;
-        if (args.maxChars && summary && summary.length > args.maxChars) {
-          summary = summary.slice(0, args.maxChars) + "…";
-        }
+        if (summary && summary.length > maxChars) summary = summary.slice(0, maxChars) + "…";
         return { title, summary, url: args.url };
       }
     } catch {
@@ -177,11 +182,10 @@ export async function webFetch(args: WebFetchArgs, allowedHost?: (url: URL) => b
     }
   }
 
-  const page = await fetchPage(args.url, allowedHost);
+  // One character past the limit tells us the page was cut, so the marker is honest.
+  const page = await fetchPage(args.url, allowedHost, maxChars + 1);
   let summary = page.summary ?? null;
-  if (args.maxChars && summary && summary.length > args.maxChars) {
-    summary = summary.slice(0, args.maxChars) + "…";
-  }
+  if (summary && summary.length > maxChars) summary = summary.slice(0, maxChars) + "…";
   return { title: page.title, summary, url: args.url };
 }
 

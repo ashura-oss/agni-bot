@@ -34,9 +34,12 @@ function createAgentRouter(args: Record<string, unknown>): Router {
   let call = 0;
   const fetchMock = (async (): Promise<Response> => {
     call += 1;
+    // A deferred tool must be loaded before it can be called.
     return call === 1
-      ? streamResponse([{ choices: [{ delta: { tool_calls: [{ index: 0, id: "call-1", type: "function", function: { name: "create_agent", arguments: JSON.stringify(args) } }] } }] }])
-      : streamResponse([{ choices: [{ delta: { content: "Done." } }] }]);
+      ? streamResponse([{ choices: [{ delta: { tool_calls: [{ index: 0, id: "call-0", type: "function", function: { name: "load_tools", arguments: JSON.stringify({ names: ["create_agent"] }) } }] } }] }])
+      : call === 2
+        ? streamResponse([{ choices: [{ delta: { tool_calls: [{ index: 0, id: "call-1", type: "function", function: { name: "create_agent", arguments: JSON.stringify(args) } }] } }] }])
+        : streamResponse([{ choices: [{ delta: { content: "Done." } }] }]);
   }) as unknown as typeof fetch;
   return new Router([provider], new HealthTracker(), fetchMock);
 }
@@ -96,7 +99,8 @@ describe("an agent creating its own agent", () => {
     expect((update?.agents as Array<{ id: string }>).some((agent) => agent.id === "friday")).toBe(true);
   });
 
-  test("unknown tools are dropped and a sensible default set is applied", async () => {    db = openDatabase(":memory:");
+  test("an unknown tool name is refused, not dropped: no bot is made and the model is told which name", async () => {
+    db = openDatabase(":memory:");
     const persona = defaultResolvedPersona(db);
     const thread = createThread(db, persona.id);
     const router = createAgentRouter({
@@ -108,10 +112,9 @@ describe("an agent creating its own agent", () => {
       emit: () => undefined, signal: new AbortController().signal,
     });
 
-    const tools = resolvePersona(db, "scout")?.tools ?? [];
-    expect(tools).toContain("web_search");
-    expect(tools).toContain("mail_send");
-    expect(tools).not.toContain("not_a_real_tool");
+    expect(db.query("SELECT 1 FROM agents WHERE id = 'scout'").get()).toBeNull();
+    const result = db.query<{ result: string }, []>("SELECT result FROM tool_calls WHERE tool_name = 'create_agent'").get();
+    expect(result?.result).toContain("not_a_real_tool");
   });
 
   test("a new agent with no tools gets the default set", async () => {

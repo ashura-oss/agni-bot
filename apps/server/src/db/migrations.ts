@@ -1092,4 +1092,60 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE agents ADD COLUMN critic_agent_id TEXT;
     `,
   },
+  {
+    id: 50,
+    name: "approval_rules",
+    sql: `
+      -- "Always allow": a standing rule scoped to exactly one bot, one tool and
+      -- one target (what the target is per tool: stores/approval-rules.ts),
+      -- kept until the owner revokes it. Matching is exact equality on all
+      -- three; a revoked rule (revoked_at set) never matches.
+      CREATE TABLE approval_rules (
+        id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        target TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        revoked_at TEXT,
+        approval_id TEXT                  -- the approval the owner answered "always" on
+      );
+      -- At most one live rule per (bot, tool, target); revoked rows pile up as history.
+      CREATE UNIQUE INDEX uq_approval_rules_active
+        ON approval_rules(agent_id, tool_name, target) WHERE revoked_at IS NULL;
+      -- An approval an active rule answered without asking records which rule.
+      ALTER TABLE approvals ADD COLUMN rule_id TEXT;
+    `,
+  },
+  {
+    id: 51,
+    name: "revoke_shell_rules",
+    sql: `
+      -- Shell commands are never remembered (stores/approval-rules.ts). Retire any
+      -- rule an earlier build stored for a shell tool, so none can ever match.
+      UPDATE approval_rules
+        SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        WHERE tool_name IN ('bash', 'run_privileged') AND revoked_at IS NULL;
+    `,
+  },
+  {
+    id: 52,
+    name: "job_run_once",
+    sql: `
+      -- "Run now" on a paused job: one claim is allowed through, and the claim
+      -- itself clears the flag (stores/jobs.ts), so nothing a handler does can
+      -- leave a paused job able to run again. enabled is never touched.
+      ALTER TABLE jobs ADD COLUMN run_once INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
+  {
+    id: 53,
+    name: "message_kind",
+    sql: `
+      -- A mark only the server can put on a row. A closure note ("this request was
+      -- stopped, here is what it did") is recognised by kind = 'closure' and by nothing
+      -- in its text, so text a model wrote into a system row (a scheduled job, say)
+      -- can never pass for one.
+      ALTER TABLE messages ADD COLUMN kind TEXT;
+    `,
+  },
 ];

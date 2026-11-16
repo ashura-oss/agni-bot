@@ -29,6 +29,8 @@ export interface MessageRow {
   role: string;
   text: string;
   created_at: string;
+  /** Set by the server only (`closure`); never from model text. */
+  kind: string | null;
 }
 
 export interface ThreadListRow extends ThreadRow {
@@ -92,13 +94,13 @@ export function listThreads(db: Database, limit = 20): ThreadRow[] {
     .all(limit);
 }
 
-/** Thread list and latest message in one indexed query (avoids per-thread reads). */
+/** Thread list and latest message in one indexed query (avoids per-thread reads). System rows (instructions, closure notes) are not the owner's words and never the preview. */
 export function listThreadsWithPreview(db: Database, limit = 20): ThreadListRow[] {
   const rows = db
     .query<ThreadRow & { preview_text: string | null }, [number]>(
       `SELECT t.id, t.agent_id, t.title, t.created_at, t.updated_at,
               t.conversation_id, t.closed_at, t.closed_by, t.opened_carry, t.opened_tail,
-              (SELECT m.text FROM messages m WHERE m.thread_id = t.id
+              (SELECT m.text FROM messages m WHERE m.thread_id = t.id AND m.role <> 'system'
                ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS preview_text
        FROM threads t ORDER BY t.updated_at DESC LIMIT ?`,
     )
@@ -160,7 +162,7 @@ export function finishTurn(
 
 export function appendMessage(
   db: Database,
-  params: { threadID: string; turnID?: string; role: string; text: string },
+  params: { threadID: string; turnID?: string; role: string; text: string; kind?: "closure" },
 ): MessageRow {
   const row: MessageRow = {
     id: newID("msg"),
@@ -169,14 +171,16 @@ export function appendMessage(
     role: params.role,
     text: params.text,
     created_at: nowISO(),
+    kind: params.kind ?? null,
   };
-  db.run("INSERT INTO messages (id, thread_id, turn_id, role, text, created_at) VALUES (?, ?, ?, ?, ?, ?)", [
+  db.run("INSERT INTO messages (id, thread_id, turn_id, role, text, created_at, kind) VALUES (?, ?, ?, ?, ?, ?, ?)", [
     row.id,
     row.thread_id,
     row.turn_id,
     row.role,
     row.text,
     row.created_at,
+    row.kind,
   ]);
   return row;
 }
@@ -185,7 +189,7 @@ export function appendMessage(
 export function recentMessages(db: Database, threadID: string, limit: number): MessageRow[] {
   const rows = db
     .query<MessageRow, [string, number]>(
-      `SELECT id, thread_id, turn_id, role, text, created_at
+      `SELECT id, thread_id, turn_id, role, text, created_at, kind
        FROM messages WHERE thread_id = ?
        ORDER BY created_at DESC, rowid DESC
        LIMIT ?`,

@@ -80,16 +80,21 @@ export function searchTranscripts(
       return [];
     }
     if (rows.length === 0) continue;
-    return rows.map((row) => ({
-      id: row.id,
-      channelID: row.channel_id,
-      agentID: row.agent_id,
-      fromType: row.from_type,
-      fromID: row.from_id,
-      text: row.text,
-      createdAt: row.created_at,
-      score: Number((1 / (1 + Math.max(0, row.rank))).toFixed(4)),
-    }));
+    return rows.map((row) => {
+      // bm25() is negative and more negative is better, so the magnitude is the
+      // relevance. s / (1 + s) maps it into 0..1, rising with s.
+      const s = Math.max(0, -row.rank);
+      return {
+        id: row.id,
+        channelID: row.channel_id,
+        agentID: row.agent_id,
+        fromType: row.from_type,
+        fromID: row.from_id,
+        text: row.text,
+        createdAt: row.created_at,
+        score: s / (1 + s),
+      };
+    });
   }
   return [];
 }

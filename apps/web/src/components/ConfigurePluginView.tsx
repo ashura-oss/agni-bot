@@ -5,9 +5,10 @@
  * written into the daemon host's mode-600 plugins.json. The app keeps no copy
  * and never reads them back — this form is empty every time it opens.
  */
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { PluginInfo } from "@agni/client";
 import { useAppModel } from "../state/use-app-model";
+import { useDialog } from "./use-dialog";
 
 export interface PluginCredentials {
   user?: string;
@@ -26,6 +27,8 @@ export function ConfigurePluginView({
   onDismiss: () => void;
 }) {
   const model = useAppModel();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialog(dialogRef, onDismiss);
   const [user, setUser] = useState("");
   const [pass, setPass] = useState("");
   const [key, setKey] = useState("");
@@ -63,7 +66,7 @@ export function ConfigurePluginView({
         if (event.target === event.currentTarget) onDismiss();
       }}
     >
-      <div className="dialog wide" role="dialog" aria-label={`Connect ${plugin.name}`}>
+      <div className="dialog wide" role="dialog" aria-modal="true" ref={dialogRef} aria-label={`Connect ${plugin.name}`}>
         <div>
           <h2>Connect {plugin.name}</h2>
           <p style={{ marginTop: 4 }}>{plugin.description}</p>

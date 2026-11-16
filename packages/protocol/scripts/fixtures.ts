@@ -39,6 +39,8 @@ const CLIENT_FRAMES: ClientFrame[] = [
   { type: "thread.list", limit: 20 },
   { type: "thread.history", threadID: "thr_01hq", limit: 50 },
   { type: "job.list", limit: 50 },
+  { type: "approval.rules.list" },
+  { type: "approval.rule.revoke", id: "rul_01hq" },
   { type: "job.set", jobID: "job_01hq", action: "pause" },
   { type: "task.list", status: "open", limit: 50 },
   { type: "task.update", taskID: "tsk_01hq", action: "snooze", until: "2026-10-17T01:00:00.000Z" },
@@ -241,6 +243,15 @@ const SERVER_FRAMES: ServerFrame[] = [
   { type: "channel.created", seq: 72, channel: { id: "chn_01hq", name: "Launch", type: "group", agentIds: ["ea", "researcher"], createdAt: "2026-10-31T09:00:00.000Z" } },
   { type: "channel.list.ok", seq: 73, channels: [{ id: "chn_01hq", name: "Launch", type: "group", agentIds: ["ea", "researcher"], createdAt: "2026-10-31T09:00:00.000Z" }] },
   { type: "channel.history.ok", seq: 74, channelId: "chn_01hq", messages: [{ id: "chm_01hq", role: "user", text: "plan the launch", createdAt: "2026-10-31T09:01:00.000Z" }] },
+  { type: "approval.closed", seq: 75, requestID: "apr_01hq", kind: "approval", reason: "decided" },
+  {
+    type: "approval.rules.list.ok",
+    seq: 76,
+    rules: [
+      { id: "rul_01hq", agentID: "agni", agentName: "Agni", toolName: "bash", target: "ls -la", createdAt: "2026-10-23T09:00:00.000Z" },
+    ],
+  },
+  { type: "approval.rule.revoke.ok", seq: 77, id: "rul_01hq" },
 ];
 
 /** Every frame must survive its own schema before it is a fixture. */

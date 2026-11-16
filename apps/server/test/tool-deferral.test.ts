@@ -29,8 +29,10 @@ describe("deferred tools", () => {
     expect(small.length).toBeLessThanOrEqual(DEFER_TOOLS_ABOVE);
     expect(deferredTools(registry, small)).toEqual([]);
 
-    const big = [...CORE_TOOLS, "grep", "glob", "read_file", "not_a_tool", "bash", "mail_search"];
-    expect(big.length).toBeGreaterThan(DEFER_TOOLS_ABOVE);
+    // The threshold counts registered tools a bot was given, so use real ones.
+    const real = registry.list().map((tool) => tool.name).filter((name) => !CORE_TOOLS.has(name)).slice(0, DEFER_TOOLS_ABOVE + 1);
+    const big = [...CORE_TOOLS, ...real, "grep", "glob", "read_file", "not_a_tool", "bash", "mail_search"];
+    expect(real.length).toBeGreaterThan(DEFER_TOOLS_ABOVE);
     const deferred = deferredTools(registry, big);
     expect(deferred).toEqual(big.filter((n) => !CORE_TOOLS.has(n) && registry.get(n)));
     expect(deferred).toContain("grep");
@@ -60,7 +62,9 @@ describe("deferred tools", () => {
 
     expect(await handler({ names: ["grep", "nope"] }, ctx)).toEqual({ loaded: ["grep"], unknown: ["nope"] });
     expect([...loaded]).toEqual(["grep"]);
-    await expect(handler({ names: "grep" }, ctx)).rejects.toThrow();
+    await expect(handler({ names: 5 }, ctx)).rejects.toThrow();
+    // One name as a bare string is repaired into a list, like any other list of strings.
+    expect(await handler({ names: "glob" }, ctx)).toEqual({ loaded: ["glob"] });
   });
 });
 

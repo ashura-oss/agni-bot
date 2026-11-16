@@ -7,6 +7,7 @@
  * result you pick is taken to — an agent opens its chat, a message scrolls
  * the transcript to it.
  */
+import { writtenRole } from "../state/display";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, MessageSquare, Search } from "lucide-react";
 import { useAppModel, useAppSnapshot } from "../state/use-app-model";
@@ -38,7 +39,7 @@ export function AgentSwitcherView() {
         kind: "agent",
         id: agent.id,
         title: agent.name,
-        subtitle: agent.role ?? agent.model ?? "Assistant",
+        subtitle: writtenRole(agent.role) || agent.model || "Assistant",
         agentID: agent.id,
       }));
     const messages: Result[] = needle.length === 0
