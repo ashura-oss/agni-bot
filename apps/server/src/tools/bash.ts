@@ -7,6 +7,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
+import { loadCustomProviders, loadProviders } from "../models/providers";
 import { privateTempDir } from "../util/private-temp";
 import { isOutsideScratch, scratchDir } from "./write-file";
 
@@ -84,6 +85,58 @@ interface SecretEnv {
   cleanup: () => void;
 }
 
+/**
+ * Names of environment variables that hold a secret. The server's environment
+ * carries the provider keys (loaded from config.env), and a command the model
+ * writes, such as `env` or `echo $OPENROUTER_API_KEY`, would read them.
+ *
+ * Every provider key variable in `models/providers.ts` ends in `_API_KEY`, so
+ * the suffixes below cover the catalog; `test/shell-env.test.ts` reads that
+ * file and fails if a provider's variable ever stops being covered. Custom
+ * endpoints name their own variable (default `AGNI_CUSTOM_KEY_<n>`): the
+ * prefix is matched here and any other name comes from the provider config.
+ */
+const SECRET_NAME_PATTERNS: RegExp[] = [
+  /(?:^|_)(?:API_KEY|TOKEN|SECRET|PASSWORD)$/i,
+  /(?:^|_)(?:SECRET_ACCESS_KEY|PRIVATE_KEY)$/i,
+  /^AGNI_CUSTOM_KEY_/i,
+];
+/** A key shorter than this is not worth matching by value (a stray "1" or "abc"). */
+const MIN_SECRET_VALUE_LENGTH = 8;
+
+/**
+ * The environment a shell child gets: the parent's, minus secrets.
+ *
+ * Removed: any variable whose name matches `SECRET_NAME_PATTERNS`, the
+ * variable each custom endpoint names in the provider config, and any variable
+ * holding the same value as a configured provider key (a copy under another
+ * name). PATH, HOME/USERPROFILE, SystemRoot, TEMP and everything else stay.
+ *
+ * If the provider config cannot be read the name patterns still apply, so a
+ * broken file never makes the scrub weaker than its default.
+ */
+export function scrubbedShellEnv(env: Record<string, string | undefined> = process.env): Record<string, string> {
+  const secretNames = new Set<string>();
+  const secretValues = new Set<string>();
+  try {
+    for (const entry of loadCustomProviders(env)) secretNames.add(entry.envKey.toUpperCase());
+    for (const provider of loadProviders(env)) {
+      if (provider.apiKey.length >= MIN_SECRET_VALUE_LENGTH) secretValues.add(provider.apiKey);
+    }
+  } catch {
+    // Fall back to the name patterns alone.
+  }
+  const kept: Record<string, string> = {};
+  for (const [name, value] of Object.entries(env)) {
+    if (value === undefined) continue;
+    if (SECRET_NAME_PATTERNS.some((pattern) => pattern.test(name))) continue;
+    if (secretNames.has(name.toUpperCase())) continue;
+    if (value.trim().length >= MIN_SECRET_VALUE_LENGTH && secretValues.has(value.trim())) continue;
+    kept[name] = value;
+  }
+  return kept;
+}
+
 function bashExecutable(): string {
   if (process.platform !== "win32") return "bash";
   // The Windows system32 bash launcher requires WSL. Use the host-native
@@ -127,7 +180,7 @@ function secretEnv(secret: string): SecretEnv {
   writeFileSync(askpass, `#!/bin/sh\ncat ${shellQuote(shellPath(secretPath))}\n`, { mode: 0o700 });
   writeFileSync(sudoWrapper, `#!/bin/sh\nexec /usr/bin/sudo -A "$@"\n`, { mode: 0o700 });
   const env: Record<string, string> = {
-    ...(process.env as Record<string, string>),
+    ...scrubbedShellEnv(),
     PATH: `${dir}${delimiter}${process.env.PATH ?? ""}`,
     SUDO_ASKPASS: shellPath(askpass),
     SSH_ASKPASS: shellPath(askpass),
@@ -183,7 +236,7 @@ export async function runBash(args: BashArgs): Promise<BashResult> {
     let settled = false;
     const child = spawn(executable, ["-c", args.command], {
       cwd,
-      env: secretSetup?.env ?? { ...process.env },
+      env: secretSetup?.env ?? scrubbedShellEnv(),
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     }) as unknown as ChildProcessWithoutNullStreams;
