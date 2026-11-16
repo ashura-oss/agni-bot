@@ -74,20 +74,22 @@ describe("hideRoutineState cuts only the state block, from the turn's last reply
   });
 });
 
-describe("notes stored under earlier wordings are still closure notes", () => {
+describe("notes stored under earlier wordings, with no record, are plain system text now (S2-17)", () => {
   const earlier = [
     "[The owner pressed Stop on my previous request, so I did not finish it. That request is closed: I will not resume it, retry its actions, or ask for its approvals again unless the owner asks for it again in a new message.]",
     "[My previous request was interrupted by a restart and was not completed. That request is closed: I will not resume it, re-run its tool calls, or ask for its approvals again unless the owner asks for it again in a new message.]",
     "[My previous request came from a device that has since been revoked. That request is closed: I will not resume it, retry its actions, or ask for its approvals again.]",
   ];
 
-  test("the model still sees them as the bot's own words, and the summariser still reads them", async () => {
+  test("the words alone are not enough: only a row with the record is a closure note", async () => {
     const { isClosureNote } = await import("../src/agent/closure");
     const { blockTranscript } = await import("../src/agent/rollover");
     for (const note of earlier) {
-      expect(isClosureNote("system", note)).toBe(true);
-      expect(isClosureNote("user", note)).toBe(false);
-      expect(blockTranscript([{ role: "system", text: note }])).toContain("is closed");
+      expect(isClosureNote("system", note)).toBe(false);
+      expect(blockTranscript([{ role: "system", text: note }])).not.toContain("is closed");
+      // With the record they are read as before.
+      expect(isClosureNote("system", note, "closure")).toBe(true);
+      expect(blockTranscript([{ role: "system", text: note, kind: "closure" }])).toContain("is closed");
     }
     expect(isClosureNote("system", "[Check the inbox and report.]")).toBe(false);
   });

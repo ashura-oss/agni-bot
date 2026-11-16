@@ -1,32 +1,28 @@
 /**
- * HITL approval broker. Only actions that can *destroy* state pause the loop:
- * destructive shell, writes outside the scratch tree, sends from the owner's
- * mailbox, and payment-style tools. Everything reversible runs free — reading,
- * research, memory, links, tasks, renames, and handoffs.
- *
- * Known reversible tools are listed in `FREE_TOOLS`: a prompt on every
- * reversible step trains the owner to click Allow without reading. Anything
- * not listed (a new tool, an MCP plugin tool) gates by default — a new
- * reversible tool must be added to `FREE_TOOLS` to run free.
+ * The approval card's mechanics. Whether a call needs the owner is the policy
+ * engine's decision (`policy/engine.ts`); this file only raises the card the
+ * engine asked for, waits for the answer, and writes it down.
  *
  * Approvals are durable: they live in the `approvals` table and are surfaced
  * to the client as `approval.request` frames. The decision is recorded and the
  * loop resumes (or aborts) once the client answers.
  *
  * "Always allow" is a standing rule (`stores/approval-rules.ts`): one bot, one
- * tool, one target, kept until the owner revokes it. Before a card is raised
- * an active matching rule answers instead, and that answer is still recorded as
- * an approval row so the audit trail shows what ran and which rule allowed it.
+ * tool, one target, kept until the owner revokes it. The engine looks rules up
+ * before it asks; a call a rule let through is still an approval row, so the
+ * audit trail shows what ran and which rule allowed it. The card offers
+ * "always" only when the engine said the call may be remembered, which it never
+ * does for a run that has read outside text.
  */
 import type { Database } from "bun:sqlite";
 import { newID, nowISO } from "../util/ids";
+import { redact } from "../util/redact";
 import { clip, entry, escapeUnsafe, quoted } from "./card-text";
+import type { ApprovalCard, RiskKind } from "../policy/types";
+import { isOutsideScratch, resolveWritePath, scratchDir, writeTargetExists } from "../tools/write-file";
+import { addApprovalRule, approvalTarget } from "../stores/approval-rules";
 
 export { clip };
-import { isReadOnlyCommand } from "../tools/bash";
-import { isOutsideScratch, resolveWritePath, scratchDir, writeTargetExists } from "../tools/write-file";
-import { MCP_FREE_TOOLS } from "../plugins/mcp";
-import { addApprovalRule, agentForTurn, approvalTarget, findApprovalRule } from "../stores/approval-rules";
 
 export type Decision = "once" | "always" | "reject";
 
@@ -77,34 +73,39 @@ export interface ApprovalBrokerDeps {
   /** Wait for a decision on a pending approval. */
   waitForDecision: (requestID: string, signal: AbortSignal) => Promise<Decision | null>;
   /**
-   * Why a call's arguments break the tool's schema, or null (the registry's
-   * `validateArgs`). A call that fails never raises a card: the tool refuses
-   * it with an error that names the field, so the owner is not asked about
-   * an action that cannot run.
-   */
-  validate?: (toolName: string, args: Record<string, unknown>) => string | null;
-  /**
    * A line the integration wants the owner to read with the card for this tool
    * (an MCP connector's own warning, say). Appended to the preview.
    */
   approvalNote?: (toolName: string) => string | undefined;
 }
 
-/** Tools that cannot destroy state or reach outside scratch. Everything else asks. */
-const FREE_TOOLS = new Set([
-  "ask", "say", "request_owner_input", "expand", "draft_email", "read_artifact", "scratch_read", "scratch_append",
-  // Only unlocks tools already on the agent's allowlist; each of those still gates on its own.
-  "load_tools",
-  "memory_search", "memory_write", "transcript_search", "links_search", "link_save",
-  "tasks_list", "task_create", "task_update", "task_status", "task_cancel",
-  "remember_fact", "recall_fact", "get_fact", "forget_fact",
-  // Confined to the scratch tree by the tools themselves.
-  "read_file", "grep", "glob",
-  "web_search", "web_fetch", "deep_research", "mail_search", "mail_read", "calendar_list", "drive_search", "drive_read",
-  "skills_list", "skills_load", "skills_resource",
-  "handoff", "delegate_task", "delegate_wait", "rename_agent", "create_agent", "update_agent", "share_thread",
-  "job_schedule", "job_list", "job_cancel", "routine_create", "routine_list", "routine_pause", "routine_delete",
-]);
+/** What the engine knows about the card, beyond the call itself. */
+export interface CardInfo {
+  card: ApprovalCard;
+  /** The bot's name for the card ("Ava read ..."); "A bot" when it is not known. */
+  botName?: string | null;
+  /** The bot whose turn this is: the scope of a rule if the owner says "always". */
+  agentID: string | null;
+}
+
+/** What a card says besides its text: stored with the approval so a replayed card matches the first. */
+export interface CardMeta {
+  tier: number;
+  risk: RiskKind;
+  verb: string;
+  sources: Array<{ kind: string; label: string }>;
+  canRemember: boolean;
+  unnamedDestinations: string[];
+  truncated: boolean;
+}
+
+/** The marks `clip` and `entry` leave where they cut something out. */
+const CUT_MARKS = /\s…\s\d+ chars omitted\s…\s|… \(\+\d+ chars\) …|\nArguments given: /;
+
+/** True when the preview has a part cut out of the middle. The owner must open the full text before allowing it. */
+export function previewIsCut(preview: string): boolean {
+  return CUT_MARKS.test(preview);
+}
 
 export class ApprovalBroker {
   constructor(private readonly deps: ApprovalBrokerDeps) {}
@@ -117,40 +118,25 @@ export class ApprovalBroker {
     callID: string,
     args: Record<string, unknown>,
     signal: AbortSignal,
+    info?: CardInfo,
   ): Promise<Decision | null> {
-    const action = describeAction(toolName, args);
+    const action = redact(describeAction(toolName, args));
     const note = this.deps.approvalNote?.(toolName);
-    const preview = note ? `${previewAction(toolName, args)}\n\n${escapeUnsafe(note)}` : previewAction(toolName, args);
+    const body = previewAction(toolName, args);
+    const lead = info ? cardLead(info.card, info.botName?.trim() || "A bot") : "";
+    const preview = redact(`${lead}${note ? `${body}\n\n${escapeUnsafe(note)}` : body}`);
     const { db } = this.deps;
     const requestID = newID("apr");
-    // The rule's scope: this turn's bot, this tool, this exact target. Without
-    // a bot or a target there is nothing to scope a rule to, so we always ask.
-    const agentID = agentForTurn(db, threadID, turnID);
-    const target = approvalTarget(toolName, args);
-    const scope = agentID && target !== null ? { agentID, target } : null;
-
-    const rule = scope ? findApprovalRule(db, scope.agentID, toolName, scope.target) : null;
-    if (rule) {
-      const when = nowISO();
-      db.run(
-        `INSERT INTO approvals (id, thread_id, turn_id, action, preview, status, decision, call_id, tool_name, created_at, decided_at, rule_id)
-         VALUES (?, ?, ?, ?, ?, 'decided', 'always', ?, ?, ?, ?, ?)`,
-        [
-          requestID, threadID, turnID,
-          `${action} [auto-approved by standing rule ${rule.id}]`,
-          `${preview}
-
-Auto-approved by standing rule ${rule.id}: "Always allow" for ${rule.agentID} / ${rule.toolName}, given ${rule.createdAt}. Revoke the rule to be asked again.`,
-          callID, toolName, when, when, rule.id,
-        ],
-      );
-      return "always";
-    }
+    // The rule's scope: this turn's bot, this tool, this exact target. A card the
+    // engine said may not be remembered never offers "always".
+    const target = info?.card.canRemember && info.agentID ? approvalTarget(toolName, args) : null;
+    const scope = info?.agentID && target !== null ? { agentID: info.agentID, target } : null;
+    const meta = info ? cardMeta(info.card, preview) : null;
 
     db.run(
-      `INSERT INTO approvals (id, thread_id, turn_id, action, preview, status, decision, call_id, tool_name, created_at)
-       VALUES (?, ?, ?, ?, ?, 'pending', NULL, ?, ?, ?)`,
-      [requestID, threadID, turnID, action, preview, callID, toolName, nowISO()],
+      `INSERT INTO approvals (id, thread_id, turn_id, action, preview, status, decision, call_id, tool_name, created_at, card_meta)
+       VALUES (?, ?, ?, ?, ?, 'pending', NULL, ?, ?, ?, ?)`,
+      [requestID, threadID, turnID, action, preview, callID, toolName, nowISO(), meta ? JSON.stringify({ ...meta, canRemember: scope !== null }) : null],
     );
 
     this.deps.emit({ type: "approval.request", requestID, action, preview, buttons: scope ? ["once", "always", "reject"] : ["once", "reject"] });
@@ -161,42 +147,85 @@ Auto-approved by standing rule ${rule.id}: "Always allow" for ${rule.agentID} / 
   }
 
   /**
-   * True only for actions that can destroy state — the owner's rule is "ask me
-   * about destructive things, and nothing else" (2026-10-19). Everything
-   * reversible is free: research, memory, links, tasks, renames, handoffs, and
-   * reads. Renaming in particular is a chat-driven identity change that used to
-   * stop the turn for a click; it no longer does. A tool this switch and
-   * `FREE_TOOLS` do not know gates.
+   * A call a standing rule let through is still an approval row, so the audit
+   * trail shows what ran and which rule allowed it.
    */
-  requiresApproval(toolName: string, args: Record<string, unknown>): boolean {
-    // A call the tool will refuse for its arguments is not worth a card; the
-    // tool's own check turns it into an error the model can fix.
-    if (this.deps?.validate?.(toolName, args)) return false;
-    switch (toolName) {
-      case "bash":
-        return !isReadOnlyCommand(String(args.command ?? ""), typeof args.cwd === "string" ? args.cwd : undefined);
-      case "write_file": {
-        // Writes outside the owner-declared scratch tree gate. Inside scratch,
-        // creating a new file is free; changing one that exists asks, whether
-        // it is replaced (a denied delete must not be doable as an overwrite)
-        // or appended to (an appended script is a changed script). A relative
-        // path means a path under scratch, as it does for the tool itself.
-        const path = typeof args.path === "string" ? args.path : "";
-        if (isOutsideScratch(path, scratchDir())) return true;
-        return writeTargetExists(path);
-      }
-      case "mail_send":
-        // Agni's own mailbox ("agent", also the default when omitted) is
-        // ungated (AGENTS.md amendment 2026-10-17); every other value gates.
-        return !(args.account === undefined || args.account === null || args.account === "agent");
-      case "calendar_create":
-      case "calendar_update":
-        // Same rule: Agni's own calendar is free, the owner's asks.
-        return !(args.account === undefined || args.account === null || args.account === "agent");
-      default:
-        return !FREE_TOOLS.has(toolName) && !MCP_FREE_TOOLS.has(toolName);
-    }
+  recordRuleApproval(
+    threadID: string, turnID: string, toolName: string, callID: string, args: Record<string, unknown>,
+    rule: { id: string; agentID: string; toolName: string; createdAt: string },
+  ): void {
+    const action = redact(describeAction(toolName, args));
+    const note = this.deps.approvalNote?.(toolName);
+    const body = previewAction(toolName, args);
+    const preview = redact(note ? `${body}
+
+${escapeUnsafe(note)}` : body);
+    const when = nowISO();
+    this.deps.db.run(
+      `INSERT INTO approvals (id, thread_id, turn_id, action, preview, status, decision, call_id, tool_name, created_at, decided_at, rule_id)
+       VALUES (?, ?, ?, ?, ?, 'decided', 'always', ?, ?, ?, ?, ?)`,
+      [
+        newID("apr"), threadID, turnID,
+        `${action} [auto-approved by standing rule ${rule.id}]`,
+        `${preview}
+
+Auto-approved by standing rule ${rule.id}: "Always allow" for ${rule.agentID} / ${rule.toolName}, given ${rule.createdAt}. Revoke the rule to be asked again.`,
+        callID, toolName, when, when, rule.id,
+      ],
+    );
   }
+}
+
+function cardMeta(card: ApprovalCard, preview: string): CardMeta {
+  return {
+    tier: card.tier,
+    risk: card.risk,
+    verb: card.verb,
+    sources: card.sources.map((source) => ({ kind: source.kind, label: source.label })),
+    canRemember: card.canRemember,
+    unnamedDestinations: card.unnamedDestinations,
+    truncated: previewIsCut(preview),
+  };
+}
+
+const RISK_LINE: Record<RiskKind, string> = {
+  undoable: "Risk: changes something you can undo",
+  egress: "Risk: sends data out of this app",
+  irreversible: "Risk: cannot be undone",
+  either: "Risk: sends data out of this app, or changes something you cannot undo",
+  command: "Risk: runs a command on this computer",
+};
+
+const SOURCE_LINE: Record<string, (bot: string, label: string) => string> = {
+  web: (bot, label) => `${bot} read a web page earlier in this task: ${label}`,
+  email: (bot, label) => `${bot} read an email earlier in this task: ${label}`,
+  peer: (bot, label) => `${bot} read a reply from ${label} earlier in this task.`,
+  attachment: (bot, label) => `${bot} read an attached file earlier in this task: ${label}`,
+  mcp: (bot, label) => `${bot} read ${label} earlier in this task.`,
+  routine: () => "This task started from saved routine state, not from you.",
+  scheduled: () => "This task started from a scheduled job, not from you.",
+  unknown: (bot) => `${bot} read outside content earlier in this task.`,
+};
+
+/**
+ * The lines above the call on a card that the engine added: where the outside
+ * content came from, how risky the call is, and why there is no "always".
+ * Plain server text; the labels were cleaned when they were taken.
+ */
+function cardLead(card: ApprovalCard, bot: string): string {
+  const lines: string[] = [];
+  const [newest, ...older] = card.sources;
+  if (newest) {
+    const say = SOURCE_LINE[newest.kind] ?? SOURCE_LINE.unknown!;
+    lines.push(`${say(bot, newest.label)}${older.length > 0 ? ` (and ${older.length} more)` : ""}`);
+  }
+  lines.push(RISK_LINE[card.risk]);
+  if (card.unnamedDestinations.length > 0) {
+    lines.push(`Not named by you: ${card.unnamedDestinations.map((destination) => entry(destination, 200)).join(", ")}`);
+    lines.push("This destination is not in your messages or your approved list.");
+  }
+  if (newest) lines.push("\"Always allow\" is off: this task used outside content.");
+  return `${lines.join("\n")}\n\n`;
 }
 
 /** An argument for display. A missing one reads as "(not given)", never "?" or "undefined". */

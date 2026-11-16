@@ -11,7 +11,13 @@
  * through this one module.
  */
 
-const UNSAFE_CHARS = /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb]|[\u{e0000}-\u{e007f}]/gu;
+/**
+ * Characters that draw nothing, or change how what is around them reads: control characters, bidirectional
+ * marks, zero-width and word-joiner characters, the Hangul fillers (U+115F, U+1160, U+3164, U+FFA0, which
+ * render as blank), the combining grapheme joiner (U+034F), the variation selectors (U+FE00-FE0F and
+ * U+E0100-E01EF) and the tag characters.
+ */
+const UNSAFE_CHARS = /[\u0000-\u001f\u007f-\u009f\u00ad\u034f\u061c\u115f\u1160\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\u3164\ufe00-\ufe0f\ufeff\uffa0\ufff9-\ufffb]|[\u{e0000}-\u{e007f}\u{e0100}-\u{e01ef}]/gu;
 const NAMED_ESCAPES: Record<string, string> = { "\n": "\\n", "\r": "\\r", "\t": "\\t" };
 
 /** Show every character that could change how the card reads as a visible escape. `keepLineBreaks` leaves line breaks and tabs alone (the text's own structure). */

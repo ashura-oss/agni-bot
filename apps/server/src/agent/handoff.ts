@@ -22,6 +22,8 @@ import type { TaskTurnSettings, TaskTurnRun, TaskTurnResult } from "./task-loop"
 import { runTaskTurn } from "./task-loop";
 import { recentMessages } from "../stores/threads";
 import { activeSession, delegationSession, ensureConversation, type ConversationRow } from "../stores/conversations";
+import { packTaint } from "../policy/context";
+import type { RunContext, TaintSource } from "../policy/types";
 
 export interface HandoffRequest {
   /** Agent id the work is handed to. */
@@ -56,6 +58,8 @@ export interface HandoffResult {
   stopReason: string;
   /** Depth the child ran at (1 = root, 2 = first delegation). */
   depth: number;
+  /** What the child's run read from outside. The bot that reads the answer carries it. */
+  taint: TaintSource[];
 }
 
 export interface HandoffDeps {
@@ -73,6 +77,12 @@ export interface HandoffDeps {
   guardrail: GuardrailState;
   /** Optional persona override for the child (defaults to the target agent's persona). */
   persona?: ResolvedPersona;
+  /**
+   * The delegating run. The child starts with the outside text it has read and shares its root, so
+   * a "no" from the owner earlier in the chain still holds and a tainted bot cannot launder its
+   * reach through another bot.
+   */
+  run?: RunContext;
 }
 
 /**
@@ -134,6 +144,11 @@ export async function handoff(deps: HandoffDeps, request: HandoffRequest): Promi
     guardrail: child,
     // Preserve guardrail bookkeeping; peer context itself is carried in text.
     handoffSummary: child.handoffSummary,
+    ...(deps.run ? {
+      policy: {
+        taint: packTaint(deps.run), rootTurnID: deps.run.rootTurnID, rootJob: deps.run.rootJob, jobID: deps.run.jobID,
+      },
+    } : {}),
   };
 
   const result = await runTaskTurn(deps.db, deps.router, deps.settings, run);
@@ -143,6 +158,7 @@ export async function handoff(deps: HandoffDeps, request: HandoffRequest): Promi
     text: result.text,
     stopReason: result.stopReason,
     depth: child.depth,
+    taint: result.taint,
   };
 }
 

@@ -352,6 +352,7 @@ export async function summarizeBlock(
   const transcript = blockTranscript(messages);
   try {
     const result = await deps.router.route({
+      purpose: "summary", agentID: conversation.agent_id, kind: "side",
       messages: [
         { role: "system", content: SUMMARY_SYSTEM_PROMPT },
         {

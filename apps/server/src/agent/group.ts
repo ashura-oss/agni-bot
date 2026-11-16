@@ -13,8 +13,9 @@
 import type { Database } from "bun:sqlite";
 import { resolveAgentMention } from "./mentions";
 import { resolvePersona } from "./personas";
-import { DEFAULT_VISIBILITY, redactForCaller } from "./visibility";
+import { MISSING_AGENT_VISIBILITY, redactForCaller } from "./visibility";
 import { channelAgentIDs, type ChannelRow } from "../stores/channels";
+import type { TaintSource } from "../policy/types";
 
 /** Recent group messages a responding bot sees. */
 export const GROUP_HISTORY_MESSAGES = 12;
@@ -53,7 +54,7 @@ export function groupHistory(db: Database, channelID: string, callerAgentID: str
       continue;
     }
     if (row.from_id === callerAgentID) continue;
-    const visibility = resolvePersona(db, row.from_id)?.visibility ?? DEFAULT_VISIBILITY;
+    const visibility = resolvePersona(db, row.from_id)?.visibility ?? MISSING_AGENT_VISIBILITY;
     const seen = redactForCaller(row.text, row.from_id, callerAgentID, visibility);
     const name = row.name?.trim() || row.from_id;
     lines.push(seen.redacted || !seen.text ? `${name}: (replied; private)` : `${name}: ${clip(seen.text)}`);
@@ -70,4 +71,23 @@ export function groupContextBlock(channel: ChannelRow, lines: string[]): string 
 function clip(text: string): string {
   const flat = text.replace(/\s+/g, " ").trim();
   return flat.length > GROUP_LINE_CHARS ? `${flat.slice(0, GROUP_LINE_CHARS)}…` : flat;
+}
+
+/**
+ * Did a bot in this room read outside text before it spoke? The room's recent
+ * messages are data to every bot that reads them, so a bot that reads one a
+ * tainted run wrote carries that taint (S2-06). Returns the source to add, or none.
+ */
+export function groupTaint(db: Database, channelID: string, callerAgentID: string): TaintSource[] {
+  // The same window the bot is shown (`groupHistory`): the last few visible messages of the room.
+  const recent = db
+    .query<{ from_type: string; from_id: string; tainted: number; name: string | null }, [string, number]>(
+      `SELECT cm.from_type, cm.from_id, cm.tainted, a.display_name AS name
+       FROM channel_messages cm LEFT JOIN agents a ON a.id = cm.from_id
+       WHERE cm.channel_id = ? AND cm.internal = 0 AND cm.from_type <> 'system'
+       ORDER BY cm.created_at DESC, cm.rowid DESC LIMIT ?`,
+    )
+    .all(channelID, GROUP_HISTORY_MESSAGES + 1);
+  const row = recent.find((message) => message.from_type === "agent" && message.from_id !== callerAgentID && message.tainted === 1);
+  return row ? [{ kind: "peer", label: (row.name?.trim() || row.from_id).slice(0, 60), at: new Date().toISOString() }] : [];
 }

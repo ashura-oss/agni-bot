@@ -25,6 +25,8 @@ import { createRoutineTools } from "./routines-tool";
 import type { MailAccountResolver } from "../plugins/credentials";
 import { shareThread } from "../share/document";
 import { scheduleTaskReminder } from "../jobs/task-reminders";
+import { ctxTainted } from "../policy/context";
+import { carryNoteTaint } from "../policy/carry";
 
 const objectSchema = (properties: Record<string, unknown>, required: string[]): Record<string, unknown> => ({
   type: "object", properties, required, additionalProperties: false,
@@ -53,7 +55,9 @@ export function buildTaskToolRegistry(db: Database, mailAccounts?: MailAccountRe
     schema: objectSchema({ text: { type: "string", minLength: 1, maxLength: 8_000 }, tags: { type: "array", maxItems: 20, items: stringProp } }, ["text"]), timeoutMs: 2_000,
     handler: async (args, ctx) => {
       if (ctx?.peerInput) return { error: "not saved: this turn started from another agent's message" };
-      return memoryWrite(db, parseObject(args, (v) => ({ text: boundedString(v.text, 8_000), tags: optionalStrings(v.tags) })));
+      const input = parseObject(args, (v) => ({ text: boundedString(v.text, 8_000), tags: optionalStrings(v.tags) }));
+      // A run that read outside text keeps what it writes as outside text, never as a fact about the owner.
+      return memoryWrite(db, ctxTainted(ctx) ? { ...input, untrustedForAgentID: ctx.chain?.currentAgentID ?? "ea" } : input);
     },
   });
   register({
@@ -69,12 +73,16 @@ export function buildTaskToolRegistry(db: Database, mailAccounts?: MailAccountRe
         importance: typeof v.importance === "number" ? v.importance : undefined,
         visibility: v.visibility === undefined ? undefined : boundedString(v.visibility, 16),
       }));
+      // A run that read outside text writes the bot's own note about it (source "untrusted", agent scope).
+      // It is never injected as a fact; the owner can still see and remove it.
+      const outside = ctxTainted(ctx);
       return rememberFact(db, {
         ...input,
-        agentID: input.scope === "agent" ? ctx.chain?.currentAgentID ?? null : null,
+        ...(outside ? { scope: "agent" } : {}),
+        agentID: outside || input.scope === "agent" ? ctx.chain?.currentAgentID ?? null : null,
         // A fact the agent writes on the owner's behalf is the owner's
         // statement, not a tool's output.
-        source: "user",
+        source: outside ? "untrusted" : "user",
       });
     },
   });
@@ -87,11 +95,15 @@ export function buildTaskToolRegistry(db: Database, mailAccounts?: MailAccountRe
         limit: optionalLimit(v.limit),
         scope: v.scope === undefined ? undefined : boundedString(v.scope, 32),
       }));
-      return recallFact(db, {
+      const recalled = recallFact(db, {
         ...input,
         agentID: input.scope === "agent" ? ctx.chain?.currentAgentID ?? null : null,
         callerAgentID: ctx.chain?.currentAgentID ?? null,
+        // The model asked on purpose: it may read its own notes kept from outside text (they are data, not facts), and the run is marked when it does.
+        includeUntrusted: true,
       });
+      carryNoteTaint(ctx.run, recalled.facts, "recall_fact");
+      return recalled;
     },
   });
   register({
@@ -149,7 +161,7 @@ export function buildTaskToolRegistry(db: Database, mailAccounts?: MailAccountRe
     schema: objectSchema({ title: { type: "string", minLength: 1, maxLength: 500 }, dueAt: { type: "string", format: "date-time" }, deadlineAt: { type: "string", format: "date-time" }, reminderAt: { type: "string", format: "date-time" }, labels: { type: "array", maxItems: 20, items: { type: "string", maxLength: 64 } }, repeatRule: { type: "string", enum: ["none", "daily", "weekly", "monthly"] }, priority: { type: "string", enum: ["low", "normal", "high", "urgent"] } }, ["title"]), timeoutMs: 2_000,
     handler: async (args, ctx) => {
       const input = parseObject(args, (v) => ({ title: boundedString(v.title, 500), dueAt: v.dueAt === undefined ? undefined : boundedString(v.dueAt, 80), deadlineAt: v.deadlineAt === undefined ? undefined : boundedString(v.deadlineAt, 80), reminderAt: v.reminderAt === undefined ? undefined : boundedString(v.reminderAt, 80), labels: optionalStrings(v.labels), repeatRule: optionalEnum(v.repeatRule,["none","daily","weekly","monthly"] as const), priority: optionalEnum(v.priority, ["low", "normal", "high", "urgent"] as const), actor: ctx.chain?.currentAgentID ?? "agent" }));
-      if (ctx.peerInput && input.reminderAt) return { error: "not done: a reminder is a durable job, and this turn started from another agent's message" };
+      if ((ctx.peerInput || ctxTainted(ctx)) && input.reminderAt) return { error: "not done: a reminder is a durable job, and this run started from or read text the owner did not write" };
       const task = taskCreate(db,input);
       if (input.reminderAt) scheduleTaskReminder(db,task.id);
       return task;
@@ -160,7 +172,7 @@ export function buildTaskToolRegistry(db: Database, mailAccounts?: MailAccountRe
     schema: objectSchema({ id: stringProp, action: { type: "string", enum: ["done", "reopen", "snooze", "edit"] }, until: { type: "string", format: "date-time" }, title: { type: "string", minLength: 1, maxLength: 500 }, dueAt: { type: ["string", "null"], format: "date-time" }, deadlineAt: { type: ["string", "null"], format: "date-time" }, reminderAt: { type: ["string", "null"], format: "date-time" }, labels: { type: "array", maxItems: 20, items: { type: "string", maxLength: 64 } }, workflowStatus: { type: "string", enum: ["not_started", "in_progress", "ai_review"] }, progressNote: { type: ["string", "null"], maxLength: 1000 }, repeatRule: { type: "string", enum: ["none", "daily", "weekly", "monthly"] }, description: { type: ["string", "null"], maxLength: 10000 }, priority: { type: "string", enum: ["low", "normal", "high", "urgent"] } }, ["id", "action"]), timeoutMs: 2_000,
     handler: async (args, ctx) => {
       const input = parseObject(args, (v) => ({ id: string(v.id), action: enumValue(v.action, ["done", "reopen", "snooze", "edit"] as const), until: v.until === undefined ? undefined : boundedString(v.until, 80), title: v.title === undefined ? undefined : boundedString(v.title,500), dueAt: v.dueAt === undefined ? undefined : v.dueAt === null ? null : boundedString(v.dueAt,80), deadlineAt: v.deadlineAt === undefined ? undefined : v.deadlineAt === null ? null : boundedString(v.deadlineAt,80), reminderAt: v.reminderAt === undefined ? undefined : v.reminderAt === null ? null : boundedString(v.reminderAt,80), labels: optionalStrings(v.labels), workflowStatus: optionalEnum(v.workflowStatus,["not_started","in_progress","ai_review"] as const), progressNote: v.progressNote === undefined ? undefined : v.progressNote === null ? null : boundedString(v.progressNote,1000), repeatRule: optionalEnum(v.repeatRule,["none","daily","weekly","monthly"] as const), description: v.description === undefined ? undefined : v.description === null ? null : boundedString(v.description,10000), priority: optionalEnum(v.priority,["low","normal","high","urgent"] as const), actor: ctx.chain?.currentAgentID ?? "agent" }));
-      if (ctx.peerInput && input.reminderAt !== undefined) return { error: "not done: a reminder is a durable job, and this turn started from another agent's message" };
+      if ((ctx.peerInput || ctxTainted(ctx)) && input.reminderAt !== undefined) return { error: "not done: a reminder is a durable job, and this run started from or read text the owner did not write" };
       const task = taskUpdate(db,input);
       if (task) scheduleTaskReminder(db,task.id);
       return task;

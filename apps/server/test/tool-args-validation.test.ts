@@ -8,6 +8,8 @@ import { openDatabase } from "../src/db";
 import { ApprovalBroker } from "../src/agent/approval-broker";
 import { ToolRegistry } from "../src/tools/registry";
 import { validateArgs } from "../src/tools/validate-args";
+import { decide } from "../src/policy/engine";
+import { policyRig } from "./policy-fixture";
 import { buildTaskToolRegistry } from "../src/tools/task-registry";
 
 const ctx = { threadID: "thr_t", turnID: "trn_t", signal: new AbortController().signal };
@@ -125,27 +127,20 @@ describe("an invalid call never raises an approval card", () => {
   let db: Database | undefined;
   afterEach(() => { db?.close(); db = undefined; });
 
-  test("write_file without a path is rejected by validation, not shown as 'write file: ?'", async () => {
-    db = openDatabase(":memory:");
-    const registry = buildTaskToolRegistry(db);
-    const broker = new ApprovalBroker({
-      db,
-      emit: () => undefined,
-      waitForDecision: async () => null,
-      validate: (name, args) => registry.validateArgs(name, args),
-    });
-    // Outside-scratch-style call with the required path missing: no card.
-    expect(broker.requiresApproval("write_file", { content: "x" })).toBe(false);
-    expect(broker.requiresApproval("bash", {})).toBe(false);
-    expect(broker.requiresApproval("bash", { command: "rm -rf /tmp/x" })).toBe(true);
-    // And the handler refuses it with a tool error that names the field.
-    await expect(registry.get("write_file")!.handler({ content: "x" } as never, ctx)).rejects.toThrow('"path" is required');
-    await expect(registry.get("bash")!.handler({} as never, ctx)).rejects.toThrow('"command" is required');
-  });
-
-  test("a broker with no validator behaves as before", () => {
-    const broker = new ApprovalBroker({ db: null as unknown as Database, emit: () => undefined, waitForDecision: async () => null });
-    expect(broker.requiresApproval("bash", {})).toBe(true);
+  test("write_file without a path is refused by the engine, not shown as 'write file: ?'", async () => {
+    const rig = policyRig();
+    try {
+      const call = (tool: string, args: Record<string, unknown>) => decide(rig.run, { tool, args, callID: "call_x" });
+      // The path is missing: the engine refuses with an error naming the field, so no card is raised.
+      expect(call("write_file", { content: "x" })).toMatchObject({ action: "refuse", code: "invalid_arguments" });
+      expect(call("bash", {})).toMatchObject({ action: "refuse", code: "invalid_arguments" });
+      expect(call("bash", { command: "rm -rf /tmp/x" }).action).toBe("ask");
+      // And the handler still refuses it with a tool error that names the field.
+      await expect(rig.registry.get("write_file")!.handler({ content: "x" } as never, ctx)).rejects.toThrow('"path" is required');
+      await expect(rig.registry.get("bash")!.handler({} as never, ctx)).rejects.toThrow('"command" is required');
+    } finally {
+      rig.close();
+    }
   });
 
   test("approval previews never print a bare question mark for a missing argument", async () => {

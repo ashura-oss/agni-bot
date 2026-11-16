@@ -143,6 +143,7 @@ export function registerTaggerJob(runner: JobRunner, deps: TaggerJobDeps): void 
     let text = "";
     try {
       const result = await deps.router.route({
+        purpose: "tagger", agentID, kind: "side",
         messages: [
           { role: "system", content: TAGGER_SYSTEM_PROMPT },
           {

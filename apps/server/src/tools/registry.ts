@@ -7,6 +7,8 @@
  * Shell/files/Gmail arrive later with their approval flows.
  */
 import { normalizeArgs, validateArgs } from "./validate-args";
+import type { ToolMeta } from "../policy/tool-meta";
+import type { RunContext } from "../policy/types";
 
 export interface ToolContext {
   threadID: string;
@@ -18,6 +20,12 @@ export interface ToolContext {
    * refuse to run in that case.
    */
   peerInput?: boolean;
+  /**
+   * The run this call belongs to: who started it and what outside text it has read.
+   * The policy engine has already judged the call; tools use it for the refusals
+   * that are part of their own contract (a tainted run may not change a schedule).
+   */
+  run?: RunContext;
   /**
    * Agent-to-agent chain metadata. Absent for a root turn; populated for
    * delegated work so tools (notably `handoff`) can refuse or behave
@@ -46,6 +54,8 @@ export interface ToolDefinition<Args = unknown, Result = unknown> {
   schema: unknown;
   timeoutMs: number;
   kind?: ToolKind;
+  /** What the policy engine should know about this tool when it is not in the central table (a connector tool). */
+  meta?: ToolMeta;
   handler: (args: Args, ctx: ToolContext) => Promise<Result>;
 }
 

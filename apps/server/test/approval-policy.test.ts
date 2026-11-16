@@ -9,7 +9,7 @@ import type { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ApprovalBroker } from "../src/agent/approval-broker";
+import { asksWhenClean } from "../src/policy/metadata";
 import { isOutsideScratch, scratchDir } from "../src/tools/write-file";
 
 // Whether a write is "new" depends on what exists, so the tests use their own scratch tree.
@@ -24,12 +24,6 @@ afterAll(() => {
   if (savedScratch === undefined) delete process.env.AGNI_SCRATCH_DIR;
   else process.env.AGNI_SCRATCH_DIR = savedScratch;
   rmSync(scratchRoot, { recursive: true, force: true });
-});
-
-const broker = new ApprovalBroker({
-  db: null as unknown as Database,
-  emit: () => undefined,
-  waitForDecision: async () => null,
 });
 
 describe("approval policy: destructive only", () => {
@@ -60,7 +54,7 @@ describe("approval policy: destructive only", () => {
       ["write_file", { path: "apps/server/src/index.ts", content: "lands under scratch" }],
     ] as Array<[string, Record<string, unknown>]>;
     for (const [tool, args] of free) {
-      expect({ tool, gated: broker.requiresApproval(tool, args) }).toEqual({ tool, gated: false });
+      expect({ tool, gated: asksWhenClean(tool, args) }).toEqual({ tool, gated: false });
     }
   });
 
@@ -79,7 +73,7 @@ describe("approval policy: destructive only", () => {
       ["mail_send", { account: "owner", to: "a@b.c", subject: "hi" }],
     ] as Array<[string, Record<string, unknown>]>;
     for (const [tool, args] of gated) {
-      expect({ tool, gated: broker.requiresApproval(tool, args) }).toEqual({ tool, gated: true });
+      expect({ tool, gated: asksWhenClean(tool, args) }).toEqual({ tool, gated: true });
     }
   });
 

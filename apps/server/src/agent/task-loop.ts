@@ -5,10 +5,21 @@ import type { Database } from "bun:sqlite";
 import type { PeerIntent, ServerFrameBody, StopReason } from "@agni/protocol";
 import { peerEnvelope, stripPeerTags } from "./peer-message";
 import { ApprovalBroker, waitForApprovalDecision } from "./approval-broker";
+import { gateToolCall } from "./tool-gate";
 import { abortReasonOf } from "./abort-reason";
+import { markRun } from "../policy/carry";
+import { createRunContext, isTainted, packTaint, readTaint, unknownTaint } from "../policy/context";
+import { ownerWordsOf, recordOwnerWords } from "../policy/owner-words";
+import { saveTaskTaint } from "../policy/carry";
+import { decide } from "../policy/engine";
+import { policyHooks } from "../policy/hooks";
+import { policyFor, taintFrom } from "../policy/metadata";
+import type { Principal, RunContext, StopCause, TaintSource } from "../policy/types";
+import type { ToolMeta } from "../policy/tool-meta";
+import { redact } from "../util/redact";
+import { groupTaint } from "./group";
 import { ABORTED_MID_CALL, closeRequest, isClosureNote, toolErrorCode } from "./closure";
 import { FormBroker } from "./form-broker";
-import type { Decision } from "./approval-broker";
 import type { Persona, ResolvedPersona } from "./personas";
 import type { ChatMessage, ToolCall } from "../models/client";
 import { Router, RouterBusyError, RouterError } from "../models/router";
@@ -18,24 +29,15 @@ import { newID, nowISO } from "../util/ids";
 import { buildTaskToolRegistry, deferredToolHints, deferredTools, registerLoadTools, taskToolSpecs } from "../tools/task-registry";
 import { teamRoster } from "./personas";
 import { deriveAnchor } from "../context/compiler";
-import { registerHandoffTool } from "../tools/handoff-tool";
-import { registerDelegateTaskTool } from "../tools/delegate-task-tool";
-import { registerAskTool, registerDraftEmailTool } from "../tools/ask-tool";
-import { registerRequestOwnerInputTool } from "../tools/needs-input-tool";
-import { LONG_TOOL_RESULT_JSON_CHARS, registerArtifactTool } from "../tools/artifact-tool";
-import { registerSecureExecTool } from "../tools/secure-exec-tool";
-import { registerSayTool } from "../tools/say-tool";
+import { LONG_TOOL_RESULT_JSON_CHARS } from "../tools/artifact-tool";
 import { criticReview } from "./critic";
-import { SCRATCH_TOOLS, registerScratchTools } from "../tools/scratch-tool";
-import { registerRenameTool } from "../tools/rename-tool";
-import { registerCreateAgentTool } from "../tools/create-agent-tool";
-import { createUpdateAgentTool } from "../tools/update-agent-tool";
+import { SCRATCH_TOOLS } from "../tools/scratch-tool";
+import { registerTurnTools } from "../tools/turn-tools";
 import { recallFact } from "../tools/facts";
 import { asksAboutPast, ownerLedger, retrieveFacts, rewriteForRetrieval, previousBlockTail, TURN_EMBED_TIMEOUT_MS } from "./retrieval";
 import type { MemoryHit } from "../stores/agent-memories";
 import { embedderConfig, type EmbedderConfig } from "./embeddings";
 import { isSmallTalk } from "./gate";
-import { registerExpandTool } from "../tools/expand-tool";
 import { buildDelegationPrefix } from "./prompts";
 import { getThread } from "../stores/threads";
 import { listSummaries } from "../stores/summaries";
@@ -142,6 +144,14 @@ export interface TaskTurnRun {
     /** The channel the owner is watching. */
     parentChannelID: string | null;
   };
+  /** This turn tells a parent bot that work it delegated has finished (a wake). */
+  wake?: boolean;
+  /**
+   * Where the run sits in the policy's picture: the outside text it starts with (what a
+   * parent carried down, or what the finished tasks it is told about read), and the
+   * root it belongs to, so an owner's "no" earlier in the chain still holds.
+   */
+  policy?: { taint?: TaintSource[]; rootTurnID?: string; rootJob?: string | null; jobID?: string | null };
   /** Restrict task tools to this list, intersected with the persona's tools. */
   toolAllowlist?: string[];
   /** Optional output-token budget for bounded background work such as routines. */
@@ -149,7 +159,11 @@ export interface TaskTurnRun {
   /** Optional domain allowlist for web tools. */
   allowedDomains?: string[];
 }
-export interface TaskTurnResult { turnID: string; text: string; stopReason: StopReason }
+export interface TaskTurnResult {
+  turnID: string; text: string; stopReason: StopReason;
+  /** The outside text this run read, for the bot that handed it the work. */
+  taint: TaintSource[];
+}
 
 /**
  * No per-turn tool-call or output-token budget (owner decision, 2026-10-27). A
@@ -327,7 +341,7 @@ export async function runTaskTurn(db: Database, router: Router, settings: TaskTu
 async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTurnSettings, run: TaskTurnRun): Promise<TaskTurnResult> {
   const { threadID, persona } = run;
   const now = nowISO();
-  const existing = db.query("SELECT turn_id, state, message_log, summary, step_count, token_count FROM agent_sessions WHERE thread_id = ?").get(threadID) as { turn_id: string; state: string; message_log: string; summary: string | null; step_count: number; token_count: number } | null;
+  const existing = db.query("SELECT turn_id, state, message_log, summary, step_count, token_count, taint FROM agent_sessions WHERE thread_id = ?").get(threadID) as { turn_id: string; state: string; message_log: string; summary: string | null; step_count: number; token_count: number; taint: string | null } | null;
   // A session parked on a question is resumed, not restarted: the answer
   // continues the same conversation.
   const recovering =
@@ -460,9 +474,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
     db,
     emit: (frame) => run.emit(frame as ServerFrameBody),
     waitForDecision: (requestID, signal) => waitForApprovalDecision(db, requestID, signal),
-    // A call the tool will refuse for its arguments raises no card, and an MCP
-    // connector's own claim about a tool rides with the card as information.
-    validate: (name, args) => registry.validateArgs(name, args),
+    // An MCP connector's own claim about a tool rides with the card as information.
     approvalNote: mcpApprovalNote,
   });
   const controller = new AbortController();
@@ -484,72 +496,69 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
        summary=excluded.summary, step_count=excluded.step_count, token_count=excluded.token_count,
        max_steps=excluded.max_steps, max_tokens=excluded.max_tokens, updated_at=excluded.updated_at`,
     // 0 = no limit; the columns predate removing the budgets.
-    [threadID, turnID, JSON.stringify(messages), summary, stepCount, tokenCount, 0, 0, now, now],
+    [threadID, turnID, redact(JSON.stringify(messages)), summary, stepCount, tokenCount, 0, 0, now, now],
   );
 
   runningTurns.set(threadID, { turnID, controller });
-  // The handoff tool needs the live emit/signal/guardrail; register it per
-  // turn so it can spawn a delegated child in the same thread. It is added
-  // after the controller exists so its signal wiring is live.
-  registerHandoffTool(registry, {
-    db, router, settings, emit: run.emit, signal: controller.signal,
-    threadID, channelID: run.channelID, currentAgentID: persona.id,
-    conversationID: run.conversationID, guardrail,
-  });
-  // The agent can put a question to the owner, and can put an email draft up
-  // for approval. Both wait for the owner, so both are registered per turn.
-  registerAskTool(registry, { db, broker: formBroker });
-  registerDraftEmailTool(registry, { db, broker: formBroker, review: criticReview(db, router, settings.firstTokenTimeoutMs, persona) });
-  // DEL-001: the async sibling of handoff. It returns as soon as the task is
-  // queued; the specialist runs in a background session with only the brief.
-  registerDelegateTaskTool(registry, {
-    db, emit: run.emit, currentAgentID: persona.id, channelID: run.channelID, parentTurnID: turnID,
-    parentThreadID: threadID, chainID: guardrail.chainID,
-  });
-  // DEL-006: a delegated task can ask the owner a question and wait. The
-  // tool is only registered for a delegated turn, and the turn stops with
-  // `needs_input` once the question is asked.
   let needsInput = false;
-  if (run.delegation) {
-    registerScratchTools(registry, { db, taskID: run.delegation.taskID, agentID: persona.id });
-    registerRequestOwnerInputTool(registry, {
-      db,
-      emit: run.emit,
-      task: {
-        id: run.delegation.taskID,
-        ownerAgentID: run.delegation.ownerAgentID,
-        parentAgentID: run.delegation.parentAgentID,
-        parentChannelID: run.delegation.parentChannelID,
-      },
-      onNeedsInput: () => { needsInput = true; },
-    });
-  }
-  // Separate progress bubbles, and a one-time password prompt that never
-  // reaches the model. Both are per-turn because they need the live emit.
-  registerSayTool(registry, {
-    db, emit: run.emit, threadID, turnID, channelID: run.channelID, persona,
+  registerTurnTools(registry, {
+    db, router, settings, emit: run.emit, signal: controller.signal, threadID, turnID,
+    channelID: run.channelID, conversationID: run.conversationID, persona, guardrail, formBroker,
+    review: criticReview(db, router, settings.firstTokenTimeoutMs, persona),
+    delegation: run.delegation,
+    onNeedsInput: () => { needsInput = true; },
   });
-  registerSecureExecTool(registry, {
-    emit: run.emit, threadID, conversationID: run.conversationID,
-  });
-  // Renaming is an action, not a sentence: this persists the new name and
-  // pushes `agent.updated` so every client's roster follows in the same turn.
-  registerRenameTool(registry, { db, emit: run.emit, currentAgentID: persona.id });
-  // DEL-004: the full result of a delegated task, read through the same
-  // visibility filter as everything else.
-  registerArtifactTool(registry, { db, currentAgentID: persona.id });
-  // ASM-005: a reference is a pointer; this is how the model follows it.
-  registerExpandTool(registry, { db, currentAgentID: persona.id });
-  // Redefining an agent is an action too: the owner's words become the
-  // agent's role and prompt, durably.
-  registry.register(createUpdateAgentTool({ db, emit: run.emit }));
-  registerCreateAgentTool(registry, { db, emit: run.emit });
   // Large toolsets send core schemas only; the rest are listed by name and
   // loaded on demand. Computed after per-turn registration so those tools have descriptions.
   const deferred = deferredTools(registry, effectiveTools);
   const loadedTools = new Set<string>();
   if (deferred.length > 0) registerLoadTools(registry, deferred, loadedTools);
   const callableTools = deferred.length > 0 ? [...effectiveTools, "load_tools"] : effectiveTools;
+  // S2-03: who is running and what outside text it has read. Every tool call is judged against it.
+  const principal = principalOf(run);
+  const runCtx = createRunContext({
+    db, bot: persona.id, botName: persona.name, threadID, turnID,
+    jobID: run.policy?.jobID ?? null,
+    // A delegated child shares its parent's root (which may be a chat turn, not a job); any other job is its own root.
+    rootJob: run.policy?.rootTurnID ? (run.policy.rootJob ?? null) : (run.policy?.jobID ?? null),
+    rootTurnID: run.policy?.rootTurnID ?? turnID,
+    principal,
+    capabilities: callableTools,
+    registry,
+    isUnloaded: (name) => deferred.includes(name) && !loadedTools.has(name),
+    // The owner's own words, for "send only where the owner said": what the owner typed in this thread (kept in its
+    // own table), this message when the owner sent it, and the owner's part of a routine. Never the thread's rows or a
+    // session's log: a peer's brief, a routine's prompt, a group block, a wake and the model's own words are in those.
+    ownerText: [
+      ...(principal.kind === "owner" || principal.kind === "job" || principal.kind === "wake" ? ownerWordsOf(db, threadID) : []),
+      ...(principal.kind === "owner" ? [run.text] : []),
+      ...(run.queryText ? [run.queryText] : []),
+    ],
+    unattended: Boolean(run.untrustedInput) && !peerSourced,
+    allowedDomains: run.allowedDomains,
+    taint: [
+      ...(run.policy?.taint ?? []),
+      // A run another bot started is tainted unless the sender said it had read nothing outside (an empty list).
+      ...(principal.kind === "peer" && run.policy?.taint === undefined ? [unknownTaint(`a brief from ${run.peer?.from ?? "another bot"}, which did not say what it had read`)] : []),
+      // A session that comes back from a restart has read what it had read, or something unknown if nothing was saved.
+      ...(recovering ? restoredTaint(existing?.taint ?? null) : []),
+      ...(principal.kind === "routine" ? [{ kind: "routine" as const, label: "saved routine state", at: nowISO() }] : []),
+      ...(run.attachmentIDs?.length ? [{ kind: "attachment" as const, label: attachmentLabel(db, inputMessage.id), at: nowISO() }] : []),
+      ...(run.groupContext !== undefined && run.channelID ? groupTaint(db, run.channelID, persona.id) : []),
+    ],
+  });
+  // What this run reads is saved with its session (and its task) the moment it is read: a restart or a crash cannot lose it.
+  const saveTaint = (sources: readonly TaintSource[]): void => {
+    try {
+      db.run("UPDATE agent_sessions SET taint = ? WHERE thread_id = ? AND turn_id = ?", [JSON.stringify(sources), threadID, turnID]);
+      if (run.delegation?.taskID) saveTaskTaint(db, run.delegation.taskID, sources);
+    } catch (error) {
+      log.warn(`turn ${turnID}: could not save what the run has read: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+  saveTaint(runCtx.taint.sources);
+  runCtx.onTaint = saveTaint;
+  if (principal.kind === "owner") recordOwnerWords(db, threadID, run.text);
   const delegationPrefix = buildDelegationPrefix({
     persona,
     facts,
@@ -588,6 +597,8 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   // already been published as its own message.
   let answerText = "";
   let stopReason: StopReason = "end";
+  // The policy ended the run: the owner's switch, the spend caps, or too many tries at something refused.
+  let runStop: { cause: StopCause; message: string } | null = null;
   let cancelReason: string | undefined;
   // Every step's usage is summed: each step re-sends the prompt, and the ledger must show what the turn cost.
   let usage: TurnUsage | undefined;
@@ -625,6 +636,8 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
     const row = appendChannelMessage(db, {
       channelID: run.channelID, fromType: "agent", fromID: persona.id, text: displayText, turnID, uiHint, peerInfluenced: peerInput,
     });
+    // A bot that reads this room carries what this run read (S2-06).
+    if (isTainted(runCtx)) db.run("UPDATE channel_messages SET tainted = 1 WHERE id = ?", [row.id]);
     const agent = db.query<{ display_name: string; avatar_color: string }, [string]>(
       "SELECT display_name, avatar_color FROM agents WHERE id = ?",
     ).get(persona.id);
@@ -637,6 +650,9 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   try {
     while (true) {
       if (controller.signal.aborted) { stopReason = timedOut ? "timeout" : "cancelled"; break; }
+      // The owner's switch and the spend caps hold at every step, before another model call is paid for.
+      const halted = haltedBeforeStep(runCtx);
+      if (halted) { runStop = halted; break; }
       // Root turn/depth guardrail: refuse a chain that has spun past its budget
       // before spending another model call on it.
       guardrail = stepGuardrail(guardrail, guardrail.depth > 1);
@@ -652,6 +668,10 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
       const tools = taskToolSpecs(registry, callableTools.filter((name) => !deferred.includes(name) || loadedTools.has(name)), "static");
       const stepMessages = await withAttachmentContent(db, requestMessages);
       const routeStep = (maxTokens: number | undefined) => router.route({
+        // Who this call is for, so the ledger counts it once under the right bot, job and root.
+        purpose: "chat", kind: "turn", agentID: persona.id,
+        ...(runCtx.jobID ? { jobID: runCtx.jobID } : {}),
+        ...(runCtx.rootJob ? { rootJobID: runCtx.rootJob } : {}),
         messages: stepMessages,
         signal: controller.signal,
         firstTokenTimeoutMs: settings.firstTokenTimeoutMs,
@@ -721,22 +741,30 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
       persistSession(db, threadID, turnID, "running", messages, summary, stepCount, tokenCount);
       let stepProgressed = false;
       const toolHooks: ToolHooks = {
-        isUnloaded: (name) => deferred.includes(name) && !loadedTools.has(name),
         hold: () => timer.hold(),
         ownerWaitMs: settings.ownerWaitMs ?? OWNER_WAIT_CEILING_MS,
         unattended: Boolean(run.untrustedInput) && !peerSourced,
+        run: runCtx,
+        peerInput,
+        allowedDomains: run.allowedDomains,
       };
       // Several read-only lookups in one step start together; the loop below
       // still consumes them in order, so guards and message order are unchanged.
       // Only the first calls of a response run; the rest are answered, not started.
       const started = startParallelReads(result.toolCalls.slice(0, MAX_TOOL_CALLS_PER_RESPONSE), recentCalls, stepCount, DUPLICATE_WINDOW,
-        (call) => broker.requiresApproval(call.function.name, callArguments(call.function.arguments)),
-        (call) => executeTool(db, threadID, turnID, call, callableTools, registry, broker, controller.signal, run.emit, () => undefined, persona, guardrail, toolHooks, peerInput, run.allowedDomains));
+        // The same engine answers here as in `executeTool`: a call that would need the owner, or is refused, is not started early.
+        (call) => decide(runCtx, { tool: call.function.name, args: callArguments(call.function.arguments), callID: call.id }, { record: false }).action !== "run",
+        (call) => executeTool(db, threadID, turnID, call, registry, broker, controller.signal, run.emit, () => undefined, persona, guardrail, toolHooks));
       for (const [position, call] of result.toolCalls.entries()) {
         // Stop (or the turn timeout) ends the step: every call still owed a
         // result gets one, and none of them runs or raises an approval card.
         if (controller.signal.aborted) {
           messages.push({ role: "tool", toolCallID: call.id, content: JSON.stringify({ skipped: true, reason: "cancelled" }) });
+          continue;
+        }
+        if (runStop) {
+          // The policy ended the run on an earlier call of this step; the rest are answered, not run.
+          messages.push({ role: "tool", toolCallID: call.id, content: JSON.stringify({ skipped: true, reason: runStop.message }) });
           continue;
         }
         if (position >= MAX_TOOL_CALLS_PER_RESPONSE) {
@@ -768,7 +796,8 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
           continue;
         }
         recentCalls.set(signature, stepCount);
-        const callResult = await (started.get(call.id) ?? executeTool(db, threadID, turnID, call, callableTools, registry, broker, controller.signal, run.emit, (state) => persistSession(db, threadID, turnID, state, messages, summary, stepCount, tokenCount), persona, guardrail, toolHooks, peerInput, run.allowedDomains));
+        const callResult = await (started.get(call.id) ?? executeTool(db, threadID, turnID, call, registry, broker, controller.signal, run.emit, (state) => persistSession(db, threadID, turnID, state, messages, summary, stepCount, tokenCount), persona, guardrail, toolHooks));
+        if (callResult.stop) runStop = callResult.stop;
         let content = callResult.content;
         if (looking && offRoadSteps === OFF_ROAD_NUDGE_AT && !offRoadNudged && !acted) {
           offRoadNudged = true;
@@ -798,6 +827,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
         stopReason = "needs_input";
         break;
       }
+      if (runStop) break;
       // Stopped mid-step: the top of the loop names the stop reason.
       if (controller.signal.aborted) continue;
       // A step that only calls tools is normal — some models narrate nothing
@@ -877,6 +907,13 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
     }
   }
 
+  if (runStop && stopReason === "end") {
+    // Not an error and not the owner's Stop: the policy ended the run, and the owner is told why in plain words.
+    stopReason = runStop.cause === "budget" ? "budget" : runStop.cause === "pause" ? "cancelled" : "error";
+    answerText = runStop.message;
+    messages.push({ role: "assistant", content: answerText });
+    publish(answerText);
+  }
   if (run.channelID && run.groupContext === undefined) compactChannelHistory(db, router, run.channelID, persona.id, peerInput).catch((error) => log.warn("channel compaction failed", error));
   // Cards this turn raised and nobody answered are dead now: expire them so a
   // late click does nothing and a reconnect does not draw them again.
@@ -903,7 +940,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
     state: stopReason === "needs_input" ? "waiting" : "idle",
     ...(run.delegation?.taskID ? { taskId: run.delegation.taskID } : {}),
   });
-  return { turnID, text: answerText, stopReason };
+  return { turnID, text: answerText, stopReason, taint: packTaint(runCtx) };
 }
 
 /** Did every provider turn the step down because of the max_tokens we sent? */
@@ -1096,14 +1133,18 @@ export function startParallelReads<T>(
 
 /** What a tool call needs from the turn around it. */
 interface ToolHooks {
-  /** A deferred tool the model has not loaded yet. */
-  isUnloaded: (name: string) => boolean;
   /** Stop the turn's clock while the call waits on the owner; the result ends the wait. */
   hold: () => () => void;
   /** The longest the owner is waited for before the card expires. */
   ownerWaitMs: number;
   /** An unattended routine run: refusals that blame "another agent's message" say what this is instead. */
   unattended?: boolean;
+  /** Who is running and what outside text it has read. Every call is judged against it. */
+  run: RunContext;
+  /** The turn began from text the owner did not write (kept for the display rules and the tools' own refusals). */
+  peerInput: boolean;
+  /** A routine's domain list for web tools. */
+  allowedDomains?: string[];
 }
 
 /** The error the loop raises when the abort or the call's own time limit cuts a tool call in the middle. */
@@ -1111,12 +1152,20 @@ class AbortedMidCall extends Error {
   constructor() { super("tool timed out or was cancelled"); }
 }
 
-async function executeTool(  db: Database, threadID: string, turnID: string, call: ToolCall, allowlist: string[],
+interface ToolOutcome {
+  content: string;
+  awaiting: boolean;
+  /** The policy ended the whole run on this call. */
+  stop?: { cause: StopCause; message: string };
+}
+
+async function executeTool(
+  db: Database, threadID: string, turnID: string, call: ToolCall,
   registry: ReturnType<typeof buildTaskToolRegistry>, broker: ApprovalBroker, signal: AbortSignal,
   emit: (frame: ServerFrameBody) => void,
   setState: (state: string) => void,
-  persona: Persona, guardrail: GuardrailState, hooks: ToolHooks, peerInput?: boolean, allowedDomains?: string[],
-): Promise<{ content: string; awaiting: boolean }> {
+  persona: Persona, guardrail: GuardrailState, hooks: ToolHooks,
+): Promise<ToolOutcome> {
   const tool = registry.get(call.function.name);
   let args: Record<string, unknown> = {};
   try { args = JSON.parse(call.function.arguments) as Record<string, unknown>; } catch { /* handled below */ }
@@ -1127,74 +1176,23 @@ async function executeTool(  db: Database, threadID: string, turnID: string, cal
   }
   const rowID = newID("tcl");
   const startedAt = Date.now();
-  db.run("INSERT INTO tool_calls (id, thread_id, turn_id, call_id, tool_name, args, result, ok, error, created_at) VALUES (?, ?, ?, ?, ?, ?, NULL, 0, NULL, ?)", [rowID, threadID, turnID, call.id, call.function.name, JSON.stringify(args), nowISO()]);
+  db.run("INSERT INTO tool_calls (id, thread_id, turn_id, call_id, tool_name, args, result, ok, error, created_at) VALUES (?, ?, ?, ?, ?, ?, NULL, 0, NULL, ?)", [rowID, threadID, turnID, call.id, call.function.name, redact(JSON.stringify(args)), nowISO()]);
   // Surface the tool call as an activity strip so the UI can render nested
   // work (delegated turns, deep research) without guessing from tokens.
-  emit({ type: "tool.start", callID: call.id, name: call.function.name, preview: describePreview(call.function.name, args) });
+  emit({ type: "tool.start", callID: call.id, name: call.function.name, preview: redact(describePreview(call.function.name, args)) });
   const storeResult = (content: string, ok: boolean, error: string | null): void => {
-    db.run("UPDATE tool_calls SET result = ?, ok = ?, error = ?, duration_ms = ? WHERE id = ?", [content, ok ? 1 : 0, error, Date.now() - startedAt, rowID]);
+    db.run("UPDATE tool_calls SET result = ?, ok = ?, error = ?, duration_ms = ? WHERE id = ?", [redact(content), ok ? 1 : 0, error, Date.now() - startedAt, rowID]);
   };
-  if (!tool || !allowlist.includes(call.function.name)) {
-    const content = JSON.stringify({ error: `Tool is not available to this persona: ${call.function.name}` });
-    storeResult(content, false, "tool_not_allowed");
-    emit({ type: "tool.end", callID: call.id, ok: false, preview: `not available to ${persona.id}` });
-    return { content, awaiting: false };
-  }
-  // Its schema was never sent, so the model is guessing at the arguments.
-  if (hooks.isUnloaded(call.function.name)) {
-    const content = JSON.stringify({ error: `${call.function.name} is not loaded yet. Call load_tools with {"names":["${call.function.name}"]} first, then call it again.` });
-    storeResult(content, false, "tool_not_loaded");
-    emit({ type: "tool.end", callID: call.id, ok: false, preview: "not loaded" });
-    return { content, awaiting: false };
-  }
-  if (allowedDomains && (call.function.name === "web_fetch" || call.function.name === "web_search")) {
-    if (call.function.name === "web_fetch") {
-      if (typeof args.url !== "string" || !domainAllowed(args.url, allowedDomains)) {
-        const content = JSON.stringify({ error: "domain is not allowed" });
-        storeResult(content, false, "domain_not_allowed");
-        emit({ type: "tool.end", callID: call.id, ok: false, preview: "domain not allowed" });
-        return { content, awaiting: false };
-      }
-    } else if (allowedDomains.length === 0) {
-      const content = JSON.stringify({ error: "domain is not allowed" });
-      storeResult(content, false, "domain_not_allowed");
-      emit({ type: "tool.end", callID: call.id, ok: false, preview: "domain not allowed" });
-      return { content, awaiting: false };
-    }
-  }
-  if (broker.requiresApproval(tool.name, args)) {
-    // Stopped already: no new card for a dead turn.
-    if (signal.aborted) {
-      const content = JSON.stringify({ skipped: true, reason: "cancelled" });
-      storeResult(content, false, "cancelled");
-      emit({ type: "tool.end", callID: call.id, ok: false, preview: "cancelled" });
-      return { content, awaiting: false };
-    }
-    setState("awaiting_approval");
-    // The owner's time to decide is not the turn's.
-    const release = hooks.hold();
-    let decision: Decision | null;
-    const waitSignal = AbortSignal.any([signal, AbortSignal.timeout(hooks.ownerWaitMs)]);
-    try {
-      decision = await broker.request(threadID, turnID, tool.name, call.id, args, waitSignal);
-    } finally {
-      release();
-    }
-    setState("running");
-    // Nobody answered in time (the turn itself was not stopped): expire the card.
-    if (!decision && !signal.aborted && waitSignal.aborted) {
-      expireApprovalForCall(db, turnID, call.id, "expired", emit);
-      const content = JSON.stringify({ error: "Not approved: nobody answered in time, so the action was not run." });
-      storeResult(content, false, "approval_expired");
-      emit({ type: "tool.end", callID: call.id, ok: false, preview: "expired" });
-      return { content, awaiting: true };
-    }
-    if (!decision || decision === "reject") {
-      const content = JSON.stringify({ error: decision ? "User denied this action." : "Approval was cancelled." });
-      storeResult(content, false, "approval_rejected");
-      emit({ type: "tool.end", callID: call.id, ok: false, preview: decision ? "denied" : "cancelled" });
-      return { content, awaiting: true };
-    }
+  // One gate for every call: capability, schema, resources, budget, what the run has read, stored rules, the owner.
+  const gate = await gateToolCall(
+    { db, broker, emit, setState, hold: hooks.hold, ownerWaitMs: hooks.ownerWaitMs },
+    hooks.run, { tool: call.function.name, args, callID: call.id }, signal,
+  );
+  if (!gate.go || !tool) {
+    const content = gate.go ? JSON.stringify({ error: `Tool is not available to this persona: ${call.function.name}` }) : gate.content;
+    storeResult(content, false, gate.go ? "tool_not_allowed" : gate.code);
+    emit({ type: "tool.end", callID: call.id, ok: false, preview: gate.go ? "not available" : gate.preview });
+    return gate.go ? { content, awaiting: false } : { content, awaiting: gate.awaiting, ...(gate.stop ? { stop: gate.stop } : {}) };
   }
   // `run_privileged` waits on the owner inside the call (a password prompt or
   // the system dialog), so the turn's clock stops for it as it does for an
@@ -1210,12 +1208,14 @@ async function executeTool(  db: Database, threadID: string, turnID: string, cal
     const parsed = JSON.parse(call.function.arguments) as unknown;
     const timeout = AbortSignal.timeout(tool.timeoutMs);
     const combined = AbortSignal.any([signal, timeout]);
+    const allowedDomains = hooks.allowedDomains;
     const result = await Promise.race([
       tool.handler(parsed as never, {
         threadID,
         turnID,
         signal: combined,
-        peerInput,
+        peerInput: hooks.peerInput,
+        run: hooks.run,
         chain: {
           depth: guardrail.depth,
           rootAgentID: guardrail.rootAgentID,
@@ -1237,6 +1237,8 @@ async function executeTool(  db: Database, threadID: string, turnID: string, cal
     const content = LONG_RESULT_TOOLS.has(call.function.name)
       ? fitToolResult(safeResult, MAX_LONG_TOOL_RESULT_CHARS, LONG_RESULT_TEXT_CHARS)
       : fitToolResult(safeResult);
+    // What the model has just read is outside text if the tool says so: the run is marked from here on.
+    noteTaint(hooks.run, tool, args, result);
     storeResult(content, true, null);
     emit({ type: "tool.end", callID: call.id, ok: true, preview: toolPreview(result) });
     return { content, awaiting: false };
@@ -1244,6 +1246,8 @@ async function executeTool(  db: Database, threadID: string, turnID: string, cal
     const message = error instanceof Error ? error.message : String(error);
     const content = JSON.stringify({ error: truncate(message, 500) });
     // The abort's own error has its own code; a tool's message that equals a loop code is prefixed (see closure.ts).
+    // What the tool threw reaches the model; an abort cut it off before anything came back.
+    if (!(error instanceof AbortedMidCall)) noteTaint(hooks.run, tool, args, { error: message });
     storeResult(content, false, error instanceof AbortedMidCall ? ABORTED_MID_CALL : toolErrorCode(message));
     emit({ type: "tool.end", callID: call.id, ok: false, preview: truncate(message, 120) });
     return { content, awaiting: false };
@@ -1251,6 +1255,49 @@ async function executeTool(  db: Database, threadID: string, turnID: string, cal
     clearTimeout(ownerWaitCeiling);
     releaseOwnerWait?.();
   }
+}
+
+/** Mark the run when a tool brought outside text into it, and write the change down. A failed audit row never un-marks the run. */
+function noteTaint(run: RunContext, tool: { name: string; meta?: ToolMeta }, args: Record<string, unknown>, result: unknown): void {
+  // An error result reaches the model like any other: an outside reader's failure text can carry the page, the mail or the
+  // server's own words, so it marks the run too.
+  const source = taintFrom(policyFor(tool.name, tool.meta), tool.name, args, result, nowISO());
+  if (source) markRun(run, source);
+}
+
+/** What a resumed session had read. No record, or one that cannot be read, is tainted. */
+function restoredTaint(raw: string | null): TaintSource[] {
+  if (raw === null) return readTaint(undefined, "a session restored with no record of what it had read");
+  try {
+    return readTaint(JSON.parse(raw), "a session restored with no record of what it had read");
+  } catch {
+    return readTaint(undefined, "a session restored with no record of what it had read");
+  }
+}
+
+/** Who started this run, in the policy's terms. */
+function principalOf(run: TaskTurnRun): Principal {
+  if (run.peer || run.delegation) return { kind: "peer", ...(run.peer?.from ? { from: run.peer.from } : {}) };
+  if (run.untrustedInput) return { kind: "routine" };
+  if (run.wake) return { kind: "wake" };
+  if (run.inputRole === "system") return { kind: "job" };
+  return { kind: "owner" };
+}
+
+/** The attached files' names for the card ("notes.pdf"), or a plain phrase when there are none to name. */
+function attachmentLabel(db: Database, messageID: string): string {
+  const names = messageAttachments(db, messageID).map((file) => file.name).filter(Boolean);
+  if (names.length === 0) return "an attached file";
+  return truncate(names.slice(0, 3).join(", ") + (names.length > 3 ? `, and ${names.length - 3} more` : ""), 100);
+}
+
+/** The owner's switch or a spend cap, checked before the next model call. */
+function haltedBeforeStep(run: RunContext): { cause: StopCause; message: string } | null {
+  const paused = policyHooks.isRunPaused(run);
+  if (paused) return { cause: "pause", message: paused.message };
+  const budget = policyHooks.checkBudget(run);
+  if (!budget.ok) return { cause: "budget", message: budget.message };
+  return null;
 }
 
 /**
@@ -1300,7 +1347,7 @@ function assistantMessage(content: string, reasoning?: string): ChatMessage {
 }
 
 function persistSession(db: Database, threadID: string, turnID: string, state: string, messages: ChatMessage[], summary: string | null, steps: number, tokens: number): void {
-  db.run("UPDATE agent_sessions SET state=?, message_log=?, summary=?, step_count=?, token_count=?, updated_at=? WHERE thread_id=? AND turn_id=?", [state, JSON.stringify(messages), summary, steps, tokens, nowISO(), threadID, turnID]);
+  db.run("UPDATE agent_sessions SET state=?, message_log=?, summary=?, step_count=?, token_count=?, updated_at=? WHERE thread_id=? AND turn_id=?", [state, redact(JSON.stringify(messages)), summary, steps, tokens, nowISO(), threadID, turnID]);
 }
 
 /** The note a cut user message ends with. Matched on the way back in, so a cut message is not cut twice. */

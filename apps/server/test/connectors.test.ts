@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { z } from "zod";
-import { ApprovalBroker } from "../src/agent/approval-broker";
+import { asksWhenClean } from "../src/policy/metadata";
 import { createGoogleTools } from "../src/tools/google";
 import { McpHub, MCP_FREE_TOOLS, mcpApprovalNote } from "../src/plugins/mcp";
 import { PluginService } from "../src/plugins/service";
@@ -59,13 +59,12 @@ describe("calendar tools", () => {
   });
 
   test("gating mirrors mail_send", () => {
-    const broker = new ApprovalBroker({} as any);
     for (const name of ["calendar_create", "calendar_update"]) {
-      expect(broker.requiresApproval(name, {})).toBe(false);
-      expect(broker.requiresApproval(name, { account: "agent" })).toBe(false);
-      expect(broker.requiresApproval(name, { account: "owner" })).toBe(true);
+      expect(asksWhenClean(name, {})).toBe(false);
+      expect(asksWhenClean(name, { account: "agent" })).toBe(false);
+      expect(asksWhenClean(name, { account: "owner" })).toBe(true);
     }
-    for (const name of ["calendar_list", "drive_search", "drive_read"]) expect(broker.requiresApproval(name, { account: "owner" })).toBe(false);
+    for (const name of ["calendar_list", "drive_search", "drive_read"]) expect(asksWhenClean(name, { account: "owner" })).toBe(false);
   });
 });
 
@@ -108,9 +107,8 @@ describe("MCP hub", () => {
     expect(await hub.connect("notion", "http://unused", undefined, await server())).toBe(3);
     const names = hub.tools().map((t) => t.name).sort();
     expect(names).toEqual(["mcp_notion_create_page", "mcp_notion_delete_everything", "mcp_notion_search"]);
-    const broker = new ApprovalBroker({} as any);
     for (const name of names) {
-      expect(broker.requiresApproval(name, {})).toBe(true);
+      expect(asksWhenClean(name, {})).toBe(true);
       expect(MCP_FREE_TOOLS.has(name)).toBe(false);
     }
     const out = await hub.tools().find((t) => t.name === "mcp_notion_search")!.handler({ q: "x" }, ctx);
@@ -122,10 +120,9 @@ describe("MCP hub", () => {
   test("only a tool the owner marked trusted runs free, and a lying hint on another tool does not", async () => {
     const hub = new McpHub();
     await hub.connect("notion", "http://unused", undefined, await server(), ["search"]);
-    const broker = new ApprovalBroker({} as any);
-    expect(broker.requiresApproval("mcp_notion_search", {})).toBe(false);
-    expect(broker.requiresApproval("mcp_notion_delete_everything", {})).toBe(true);
-    expect(broker.requiresApproval("mcp_notion_create_page", {})).toBe(true);
+    expect(asksWhenClean("mcp_notion_search", {})).toBe(false);
+    expect(asksWhenClean("mcp_notion_delete_everything", {})).toBe(true);
+    expect(asksWhenClean("mcp_notion_create_page", {})).toBe(true);
     await hub.disconnect("notion");
     expect(MCP_FREE_TOOLS.has("mcp_notion_search")).toBe(false);
   });
@@ -133,7 +130,7 @@ describe("MCP hub", () => {
   test("a trusted tool is still held to the catalog: read=approval means ask, an unknown plugin asks", async () => {
     const hub = new McpHub();
     await hub.connect("not-in-catalog", "http://unused", undefined, await server(), ["search"]);
-    expect(new ApprovalBroker({} as any).requiresApproval("mcp_not_in_catalog_search", {})).toBe(true);
+    expect(asksWhenClean("mcp_not_in_catalog_search", {})).toBe(true);
     await hub.disconnect("not-in-catalog");
   });
 

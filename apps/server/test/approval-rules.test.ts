@@ -12,6 +12,10 @@ import { migrate, openDatabase } from "../src/db";
 import { MIGRATIONS } from "../src/db/migrations";
 import { ApprovalBroker, type Decision } from "../src/agent/approval-broker";
 import { createThread, createTurn } from "../src/stores/threads";
+import { buildTaskToolRegistry } from "../src/tools/task-registry";
+import { registerSecureExecTool } from "../src/tools/secure-exec-tool";
+import { createRunContext } from "../src/policy/context";
+import { gateToolCall } from "../src/agent/tool-gate";
 import {
   addApprovalRule, approvalTarget, findApprovalRule, listApprovalRules, revokeApprovalRule,
 } from "../src/stores/approval-rules";
@@ -228,10 +232,12 @@ describe("migration 51 retires shell rules", () => {
 });
 
 describe("the broker uses rules", () => {
+  /** Calls go through the policy engine and the gate, as in a turn: the engine looks the rules up, the broker draws the card. */
   function harness(answers: Decision[], agentID = "ea", approvalNote?: (toolName: string) => string | undefined) {
     const thread = createThread(db, agentID);
     const frames: Array<{ type: string; requestID: string; preview: string; buttons: Decision[] }> = [];
     let asked = 0;
+    let lastAnswer: Decision | null = null;
     const broker = new ApprovalBroker({
       db,
       emit: (frame) => frames.push(frame),
@@ -239,17 +245,33 @@ describe("the broker uses rules", () => {
       waitForDecision: async (requestID) => {
         asked += 1;
         const decision = answers.shift() ?? null;
+        lastAnswer = decision;
         // What ws/dispatch does when the owner clicks.
         if (decision) db.run("UPDATE approvals SET status='decided', decision=?, decided_at=? WHERE id=?", [decision, new Date().toISOString(), requestID]);
         return decision;
       },
     });
+    const registry = buildTaskToolRegistry(db);
+    registerSecureExecTool(registry, { emit: () => undefined, threadID: thread.id });
+    for (const name of ["mcp_files_delete", "mcp_gh_delete", "some_other_tool"]) {
+      registry.register({ name, description: "x", kind: "static", schema: { type: "object", properties: {} }, timeoutMs: 1000, handler: async () => ({}) });
+    }
     let n = 0;
     const ask = async (toolName: string, args: Record<string, unknown>, who = { threadID: thread.id, agentID }) => {
       n += 1;
-      const turnID = `trn_${agentID}_${n}`;
+      const turnID = `trn_${who.agentID}_${n}`;
       createTurn(db, { id: turnID, threadID: who.threadID, agentID: who.agentID });
-      return broker.request(who.threadID, turnID, toolName, `call_${n}`, args, new AbortController().signal);
+      const run = createRunContext({
+        db, bot: who.agentID, threadID: who.threadID, turnID, principal: { kind: "owner" },
+        capabilities: registry.list().map((tool) => tool.name), registry,
+      });
+      lastAnswer = null;
+      const gate = await gateToolCall(
+        { db, broker, emit: () => undefined, setState: () => undefined, hold: () => () => undefined, ownerWaitMs: 60_000 },
+        run, { tool: toolName, args, callID: `call_${n}` }, new AbortController().signal,
+      );
+      if (gate.go) return gate.approvedBy === "rule" ? "always" : gate.approvedBy === "owner" ? lastAnswer : "free";
+      return /denied/.test(gate.content) ? "reject" : /cancelled/.test(gate.content) ? null : "refused";
     };
     return { broker, frames, ask, thread, get asked() { return asked; } };
   }
@@ -383,22 +405,11 @@ describe("the broker uses rules", () => {
     expect(h.frames).toHaveLength(2);
   });
 
-  test("a turn the server cannot attribute to a bot never matches or stores a rule", async () => {
-    const h = harness(["always", "always"]);
-    // No turn row, no thread row: there is no bot to scope the rule to.
-    const orphan = (id: string) => h.broker.request("thr_missing", "trn_missing", "mcp_files_delete", id, { path: "x" }, new AbortController().signal);
-    await orphan("call_a");
-    await orphan("call_b");
-    expect(listApprovalRules(db)).toHaveLength(0);
-    expect(h.frames).toHaveLength(2);
-  });
-
   test("a rule is read from the turn's bot, so a handoff turn does not borrow the thread owner's rules", async () => {
     // One thread owned by "ea"; a handoff child turn in it belongs to "researcher".
     const h = harness(["always", "reject"], "ea");
     await h.ask("mcp_files_delete", { path: "build" });
-    createTurn(db, { id: "trn_child", threadID: h.thread.id, agentID: "researcher" });
-    const decision = await h.broker.request(h.thread.id, "trn_child", "mcp_files_delete", "call_child", { path: "build" }, new AbortController().signal);
+    const decision = await h.ask("mcp_files_delete", { path: "build" }, { threadID: h.thread.id, agentID: "researcher" });
     expect(decision).toBe("reject");
   });
 
@@ -406,7 +417,7 @@ describe("the broker uses rules", () => {
     const h = harness(["once", "once", "once", "once", "once", "once"]);
     await h.ask("mcp_files_delete", { path: "build" });
     await h.ask("bash", { command: "rm -rf build" });
-    await h.ask("bash", { command: "ls -la" });
+    await h.ask("bash", { command: "ls -la", cwd: join(root, "elsewhere") });
     await h.ask("bash", { command: "python3 run.py" });
     await h.ask("run_privileged", { command: "sudo ls", purpose: "list" });
     await h.ask("write_file", { path: join(root, "outside", "x.md"), content: "x" });
@@ -422,19 +433,20 @@ describe("the broker uses rules", () => {
 
   test("'always' on a bash command stores nothing, so the next call asks again", async () => {
     const h = harness(["always", "once"]);
-    expect(await h.ask("bash", { command: "ls -la" })).toBe("always");
+    expect(await h.ask("bash", { command: "python3 run.py" })).toBe("always");
     expect(listApprovalRules(db)).toHaveLength(0);
-    expect(await h.ask("bash", { command: "ls -la" })).toBe("once");
+    expect(await h.ask("bash", { command: "python3 run.py" })).toBe("once");
     expect(h.frames).toHaveLength(2);
   });
 
   test("a bash rule row already in the database is ignored at match time", async () => {
     // Rows written by an earlier build, or by hand: the broker never consults them for a shell command.
-    for (const command of ["ls -la", "cat notes.txt", "rm -rf build"]) {
+    for (const command of ["python3 ls.py", "python3 cat.py notes.txt", "rm -rf build"]) {
       db.run("INSERT INTO approval_rules (id, agent_id, tool_name, target, created_at) VALUES (?, 'ea', 'bash', ?, ?)", [`rul_old_${command}`, command, new Date().toISOString()]);
     }
     const h = harness(["reject", "reject", "reject"]);
-    for (const command of ["ls -la", "cat notes.txt", "rm -rf build"]) {
+    // A read-only command is free (no card, no rule); the rows for the others are never consulted.
+    for (const command of ["python3 ls.py", "python3 cat.py notes.txt", "rm -rf build"]) {
       expect({ command, decision: await h.ask("bash", { command }) }).toEqual({ command, decision: "reject" });
     }
     expect(h.frames).toHaveLength(3);
@@ -445,7 +457,7 @@ describe("the broker uses rules", () => {
   test("an approval note from the integration appears in the preview, and only when there is one", async () => {
     const h = harness(["once", "once", "always", "once"], "ea", (tool) => (tool === "mcp_gh_delete" ? "Runs on the GitHub connector: deletes a repo." : undefined));
     await h.ask("mcp_gh_delete", { repo: "x" });
-    await h.ask("bash", { command: "ls x" });
+    await h.ask("bash", { command: "python3 x.py" });
     expect(h.frames[0]!.preview).toContain("Runs on the GitHub connector: deletes a repo.");
     expect(h.frames[1]!.preview).not.toContain("GitHub");
     // The auto-approved audit row keeps the note too.

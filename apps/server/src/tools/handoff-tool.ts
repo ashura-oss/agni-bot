@@ -20,10 +20,11 @@ import type { Router } from "../models/router";
 import type { GuardrailState } from "../agent/guardrails";
 import { handoff, type HandoffDeps, type HandoffRequest } from "../agent/handoff";
 import { assertTeammate, getPersona, resolvePersona } from "../agent/personas";
-import { DEFAULT_VISIBILITY, redactResultForCaller } from "../agent/visibility";
+import { MISSING_AGENT_VISIBILITY, redactResultForCaller } from "../agent/visibility";
 import { appendChannelMessage, ensureDMChannel } from "../stores/channels";
 import { checkPeerRequest, fingerprintPeerRequest } from "../stores/peer-chains";
 import { stripPeerTags } from "../agent/peer-message";
+import { carryTaint } from "../policy/carry";
 
 const objectSchema = (properties: Record<string, unknown>, required: string[]): Record<string, unknown> => ({
   type: "object", properties, required, additionalProperties: false,
@@ -168,8 +169,11 @@ export function registerHandoffTool(registry: ToolRegistry, deps: HandoffToolDep
         threadID: deps.threadID,
         conversationID: deps.conversationID,
         guardrail: deps.guardrail,
+        run: ctx.run,
       };
       const result = await handoff(handoffDeps, request);
+      // What the specialist read from outside marks this run too, whatever the visibility lets through.
+      carryTaint(ctx.run, nameOf(result.agentID), result.taint, "handoff");
       // Not posted to the delegating agent's channel: the answer belongs to
       // its synthesis. It is posted to the specialist's own DM instead, so a
       // direct chat with that agent reads like a conversation — the brief was
@@ -180,7 +184,7 @@ export function registerHandoffTool(registry: ToolRegistry, deps: HandoffToolDep
       // The one place the specialist's words cross into another agent's
       // context, so the one place visibility is applied. A private agent
       // gives the caller a receipt, not its answer.
-      const visibility = resolvePersona(deps.db, toAgentID)?.visibility ?? DEFAULT_VISIBILITY;
+      const visibility = resolvePersona(deps.db, toAgentID)?.visibility ?? MISSING_AGENT_VISIBILITY;
       // The answer is the deliverable of work this caller asked for: a
       // `summary` bot's comes back in full up to RESULT_MAX_CHARS.
       const visible = redactResultForCaller(result.text, toAgentID, deps.currentAgentID, visibility);
