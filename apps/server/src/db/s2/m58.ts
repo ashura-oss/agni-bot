@@ -14,9 +14,9 @@ import type { Migration } from "../migrations";
  *    resumes after a restart comes back as tainted as it was (and tainted if the record is missing).
  *  - `owner_words`: what the owner typed in a thread, kept apart from the rows of the thread itself,
  *    so "the owner named this address" cannot be satisfied by text a routine, a peer or a log left behind.
- *  - `approvals.card_meta`: what the card said besides its text (tier, kind
- *    of risk, sources, whether "always" was offered), so a card replayed after
- *    a reconnect is the same card.
+ *
+ * `approvals.card_meta` (what the card said besides its text) is added by migration 57; this one
+ * does not add it again.
  */
 export const migration: Migration | null = {
   id: 58,
@@ -37,7 +37,6 @@ export const migration: Migration | null = {
     CREATE INDEX idx_run_denials_run ON run_denials(run_key, resource_kind);
     ALTER TABLE tasks ADD COLUMN taint TEXT;
     ALTER TABLE channel_messages ADD COLUMN tainted INTEGER NOT NULL DEFAULT 0;
-    ALTER TABLE approvals ADD COLUMN card_meta TEXT;
     ALTER TABLE agent_sessions ADD COLUMN taint TEXT;
     CREATE TABLE owner_words (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

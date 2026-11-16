@@ -175,8 +175,8 @@ describe("tainted runs (S2-03, S2-04, S2-05)", () => {
   });
 
   test("the owner's approved-destinations list counts as named", () => {
-    rig.db.run("CREATE TABLE IF NOT EXISTS policy_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
-    rig.db.run("INSERT INTO policy_settings (key, value) VALUES ('approved_destinations', ?)", [JSON.stringify(["*@corp.example", "partner.example"])]);
+    // The table is migration 55's; its rows carry an updated_at.
+    rig.db.run("INSERT INTO policy_settings (key, value, updated_at) VALUES ('approved_destinations', ?, ?)", [JSON.stringify(["*@corp.example", "partner.example"]), new Date().toISOString()]);
     const run = tainted(rig.another());
     const mail = act(run, "mail_send", { to: ["x@corp.example"], subject: "s", body: "b" });
     expect(mail.action === "ask" && mail.card.unnamedDestinations).toEqual([]);

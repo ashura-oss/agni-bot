@@ -36,30 +36,31 @@ describe("P0 migration aggregation", () => {
   });
 
   test("buildMigrations drops nulls and sorts by id", () => {
-    // Ids 59 and 64 are the spare slots, so they stay free whichever sprint fills its own.
-    const merged = buildMigrations([fake(1), fake(2)], [null, fake(64), null], [fake(59)]);
-    expect(merged.map((entry) => entry.id)).toEqual([1, 2, 59, 64]);
+    // Test-local lists: none of these go near the real list, so filling a spare slot cannot break them.
+    const merged = buildMigrations([fake(1), fake(2)], [null, fake(9064), null], [fake(9059)]);
+    expect(merged.map((entry) => entry.id)).toEqual([1, 2, 9059, 9064]);
   });
 
   test("buildMigrations refuses a duplicate id", () => {
-    expect(() => buildMigrations([fake(1), fake(59)], [fake(59)])).toThrow(/duplicate migration id 59/);
+    expect(() => buildMigrations([fake(1), fake(9059)], [fake(9059)])).toThrow(/duplicate migration id 9059/);
   });
 });
 
 describe("P0 CLI schema check", () => {
-  test("a database with 64 applied but 59 missing is refused, naming the missing id", () => {
+  test("a database with a later migration applied but an earlier one missing is refused, naming the missing id", () => {
     const path = tempDB();
     openDatabase(path).close(); // applies the real list
-    const list = buildMigrations(MIGRATIONS, [fake(59)], [fake(64)]);
+    // Ids far above the real range, so a sprint that fills a spare slot never collides with this test.
+    const list = buildMigrations(MIGRATIONS, [fake(9001), fake(9002)]);
 
     const seeded = new Database(path);
-    seeded.run("INSERT INTO schema_migrations (id, name, applied_at) VALUES (64, 'fake_64', 'test')");
+    seeded.run("INSERT INTO schema_migrations (id, name, applied_at) VALUES (9002, 'fake_9002', 'test')");
     seeded.close();
 
-    expect(() => openDatabaseForCLI(path, list)).toThrow(/missing migration.*\b59\b/);
+    expect(() => openDatabaseForCLI(path, list)).toThrow(/missing migration.*\b9001\b/);
 
     const fixed = new Database(path);
-    fixed.run("INSERT INTO schema_migrations (id, name, applied_at) VALUES (59, 'fake_59', 'test')");
+    fixed.run("INSERT INTO schema_migrations (id, name, applied_at) VALUES (9001, 'fake_9001', 'test')");
     fixed.close();
     openDatabaseForCLI(path, list).close();
   });
