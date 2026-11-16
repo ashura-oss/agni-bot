@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { buildConversationHistory } from "../../src/ws/history";
 import { describe, expect } from "bun:test";
 import { scenarioTest, gate, say, textOf, useScenarios, type Scenario } from "./harness";
 
@@ -109,10 +110,14 @@ describe("P1 restart closes the interrupted request in the model's context", () 
     expect(oldAt).toBeGreaterThanOrEqual(0);
     // The old request is closed before the new one: a note from the assistant sits between them.
     expect(order[oldAt + 1]).toMatch(/^assistant: .*interrupted by a restart and was not completed/);
+    expect(order[oldAt + 1]).toMatch(/will not resume it, re-run its tool calls, or ask for its approvals again/i);
     expect(newAt).toBeGreaterThan(oldAt + 1);
     // The unfinished tool call is not part of what the model is shown, and nothing re-ran it.
     expect(request.messages.some((message) => (message.tool_calls ?? []).length > 0)).toBe(false);
     expect(existsSync(touched)).toBe(false);
+    // The note is for the model: the owner's conversation history does not show it as a bot reply.
+    const conversationID = s.get<{ conversation_id: string }>("SELECT conversation_id FROM threads WHERE id = ?", first.threadID)!.conversation_id;
+    expect(buildConversationHistory(s.db, conversationID, 200).map((message) => message.text).join(" ")).not.toMatch(/was not completed/);
     const log2 = JSON.parse(s.get<{ message_log: string }>("SELECT message_log FROM agent_sessions WHERE thread_id = ?", first.threadID)!.message_log) as Array<{ toolCalls?: unknown[] }>;
     expect(log2.some((message) => (message.toolCalls ?? []).some((c) => (c as { id: string }).id === "call_old_bash"))).toBe(false);
   });

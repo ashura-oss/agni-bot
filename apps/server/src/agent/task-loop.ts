@@ -5,6 +5,7 @@ import type { Database } from "bun:sqlite";
 import type { PeerIntent, ServerFrameBody, StopReason } from "@agni/protocol";
 import { peerEnvelope, stripPeerTags } from "./peer-message";
 import { ApprovalBroker, waitForApprovalDecision } from "./approval-broker";
+import { closeRequest, isClosureNote } from "./closure";
 import { FormBroker } from "./form-broker";
 import type { Decision } from "./approval-broker";
 import type { Persona, ResolvedPersona } from "./personas";
@@ -251,7 +252,9 @@ export function isThreadActive(threadID: string): boolean {
 }
 
 /** The turn running in a thread, so an interrupt can stop it. */
-const runningTurns = new Map<string, { turnID: string; controller: AbortController }>();
+const runningTurns = new Map<string, { turnID: string; controller: AbortController; cancelReason?: string }>();
+/** The cancel reason of a turn the owner's next message took over from: that request is not closed, the message continues it. */
+const SUPERSEDED = "the owner sent a new message";
 
 /**
  * Stop the turn running in a thread. The owner interrupting with a new
@@ -261,6 +264,7 @@ const runningTurns = new Map<string, { turnID: string; controller: AbortControll
 export function cancelThreadTurn(threadID: string, reason = "interrupted"): boolean {
   const running = runningTurns.get(threadID);
   if (!running) return false;
+  running.cancelReason = reason;
   try {
     running.controller.abort();
   } catch {
@@ -286,7 +290,7 @@ export async function runTaskTurn(db: Database, router: Router, settings: TaskTu
     // The owner interrupted: the running turn stops and this one takes
     // over. Waiting for the old turn to unwind keeps the two from writing
     // into the same block at the same time.
-    cancelThreadTurn(threadID, "the owner sent a new message");
+    cancelThreadTurn(threadID, SUPERSEDED);
     await waitForThreadIdle(threadID);
     if (activeThreads.has(threadID)) {
       throw new Error("a task turn is already active or awaiting approval for this thread");
@@ -329,8 +333,9 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   } else {
     createTurn(db, { id: turnID, threadID, agentID: persona.id });
     messages = recentMessages(db, threadID, MAX_HISTORY_MESSAGES)
-      .filter((message) => message.role === "user" || message.role === "assistant")
-      .map((message) => ({ role: message.role as "user" | "assistant", content: message.text, attachmentIDs: messageAttachments(db, message.id).map((file) => file.id) }));
+      // A closure note is stored as a system row (the owner's history leaves it out) but the model reads it as its own words.
+      .filter((message) => message.role === "user" || message.role === "assistant" || isClosureNote(message.role, message.text))
+      .map((message) => ({ role: (message.role === "system" ? "assistant" : message.role) as "user" | "assistant", content: message.text, attachmentIDs: messageAttachments(db, message.id).map((file) => file.id) }));
   }
   const inputRole = run.inputRole ?? "user";
   const inputText = run.inputText ?? run.text;
@@ -560,6 +565,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   // already been published as its own message.
   let answerText = "";
   let stopReason: StopReason = "end";
+  let cancelReason: string | undefined;
   // Every step's usage is summed: each step re-sends the prompt, and the ledger must show what the turn cost.
   let usage: TurnUsage | undefined;
   // Duplicate-step guard: toolName + args signature -> last step it ran on.
@@ -841,7 +847,10 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   } finally {
     timer.clear();
     run.signal.removeEventListener("abort", abort);
-    if (runningTurns.get(threadID)?.turnID === turnID) runningTurns.delete(threadID);
+    if (runningTurns.get(threadID)?.turnID === turnID) {
+      cancelReason = runningTurns.get(threadID)?.cancelReason;
+      runningTurns.delete(threadID);
+    }
   }
 
   if (run.channelID && run.groupContext === undefined) void compactChannelHistory(db, router, run.channelID, persona.id, peerInput);
@@ -849,6 +858,8 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   // late click does nothing and a reconnect does not draw them again.
   expirePendingForTurn(db, turnID, stopReason === "cancelled" ? "cancelled" : "expired", run.emit);
   finishTurn(db, { id: turnID, stopReason, ...usage });
+  // A request the owner stopped is closed for the model too; one their next message took over from is not.
+  if (stopReason === "cancelled" && cancelReason !== SUPERSEDED) closeRequest(db, { threadID, turnID, reason: "stopped" });
   touchThread(db, threadID);
   // A turn waiting for the owner's answer is not a failed turn: the session
   // is parked, and the resume picks it up.

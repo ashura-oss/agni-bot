@@ -14,17 +14,10 @@ import type { ServerFrameBody } from "@agni/protocol";
 import { log } from "../log";
 import { appendChannelMessage, ensureDMChannel } from "../stores/channels";
 import { canonicalAgentID } from "../agent/personas";
-import { appendMessage } from "../stores/threads";
+import { closeRequest } from "../agent/closure";
 import { nowISO } from "../util/ids";
 
 export const INTERRUPTED_NOTICE = "This reply was interrupted by a restart.";
-
-/**
- * What the model reads in the thread where the dead turn's request is still
- * unanswered. Without it the next turn sees that request as open, answers it
- * as well as the new message, and runs its tool calls again.
- */
-export const INTERRUPTED_REQUEST_NOTE = "[This request was interrupted by a restart and was not completed.]";
 
 /**
  * The session log of a dead turn without the tool calls that never got a
@@ -70,7 +63,7 @@ export function recoverInterruptedTurns(db: Database, emit: (body: ServerFrameBo
       const log = db.query<{ message_log: string }, [string]>("SELECT message_log FROM agent_sessions WHERE thread_id = ?").get(thread_id)?.message_log;
       if (log !== undefined) db.run("UPDATE agent_sessions SET message_log = ? WHERE thread_id = ?", [withoutUnfinishedCalls(log), thread_id]);
       // The request stays in the thread; close it there too, so the next turn answers only what comes next.
-      appendMessage(db, { threadID: thread_id, turnID: turn_id, role: "assistant", text: INTERRUPTED_REQUEST_NOTE });
+      closeRequest(db, { threadID: thread_id, turnID: turn_id, reason: "interrupted" });
     }
     db.run("UPDATE agent_sessions SET state = 'failed', updated_at = ? WHERE state IN ('running', 'awaiting_approval')", [now]);
     // No turn can be running at boot, whether or not it had a session row.
