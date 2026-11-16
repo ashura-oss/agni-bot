@@ -21,6 +21,7 @@ import {
   type AgentInfo,
   type ApprovalRow,
   type ApprovalRuleInfo,
+  safeLine,
   type ChatMessage,
   type ClientFrame,
   type ChatGPTConnection,
@@ -288,6 +289,13 @@ export class AppModel {
    * error names no card, so it is only pinned to one when exactly one answer is outstanding.
    */
   private answered = new Set<string>();
+  /**
+   * Counts connection attempts (one per hello). A card is stamped with the count when it
+   * arrives, so after a restart the cards the new process re-sent can be told from the
+   * ones left over from the old one.
+   */
+  private connectionEpoch = 0;
+  private cardEpoch = new Map<string, number>();
 
   private connection: AgniConnection | null = null;
   private pendingPairing: { settings: ServerSettings; token: string } | null = null;
@@ -1598,6 +1606,9 @@ export class AppModel {
               this.notifyUser("Agni cannot connect", event.state.reason);
             }
             break;
+          case "handshaking":
+            this.connectionEpoch += 1;
+            break;
           case "waiting":
             this.stopHealthPolling();
             break;
@@ -1617,7 +1628,23 @@ export class AppModel {
         this.publish();
         return;
 
-      case "durableReloadRequired":
+      case "durableReloadRequired": {
+        // The daemon could not replay (it restarted, or its log moved on): what a turn was in the
+        // middle of is gone with it. Forget the running turn and the cards of the old process;
+        // the cards the new one re-sent after this connection's hello are kept.
+        const current = new Set([...this.cardEpoch].filter(([, epoch]) => epoch === this.connectionEpoch).map(([id]) => id));
+        // Tokens still queued for the next animation frame belong to the turn that just died;
+        // applied after the reset they would bring its bubble, and the Stop button, back.
+        if (this.tokenTimer !== null) {
+          if (this.tokenIsFrame) cancelAnimationFrame(this.tokenTimer as number);
+          else clearTimeout(this.tokenTimer as ReturnType<typeof setTimeout>);
+          this.tokenTimer = null;
+        }
+        this.tokenQueue = [];
+        // "Working" and "waiting" were the old process's word; it sends no presence on connect.
+        this.agentStates = {};
+        this.conversation.resetLive({ keepCards: current });
+        for (const id of [...this.cardEpoch.keys()]) if (!current.has(id)) this.cardEpoch.delete(id);
         this.conversation.note(
           notice(
             "info",
@@ -1629,6 +1656,7 @@ export class AppModel {
         this.reloadConversation();
         this.publish();
         return;
+      }
 
       case "lastSeq":
         this.settings = { ...this.settings, lastSeq: event.seq };
@@ -2051,6 +2079,9 @@ export class AppModel {
     }
 
     if (frame.type === "agents.update" && frame.mentions) this.mentionAgents = frame.mentions;
+    if (frame.type === "approval.request" || frame.type === "form.request" || frame.type === "secret.request") {
+      this.cardEpoch.set(frame.requestID, this.connectionEpoch);
+    }
     // A card the daemon closed must not have a late answer re-sent for it on reconnect.
     if (frame.type === "approval.closed") {
       this.unsent.delete(frame.requestID);
@@ -2215,6 +2246,16 @@ export class AppModel {
 
   // MARK: notifications
 
+  /**
+   * The bot behind a card. The frames name none, so a card replayed after a reload falls back
+   * to the one bot the daemon says is waiting for the owner, when there is exactly one.
+   */
+  cardRequesterName(agentID: string | null | undefined): string | null {
+    if (agentID) return this.requesterName(agentID);
+    const waiting = Object.entries(this.agentStates).filter(([, state]) => state === "waiting");
+    return waiting.length === 1 ? this.requesterName(waiting[0]![0]) : null;
+  }
+
   /** The display name of the bot that asked for something, or null when no bot is known. */
   requesterName(agentID: string | null | undefined): string | null {
     if (!agentID) return null;
@@ -2235,7 +2276,10 @@ export class AppModel {
     }
   }
 
-  private notifyUser(title: string, body: string, sound = false, threadID?: string): void {
+  private notifyUser(rawTitle: string, rawBody: string, sound = false, threadID?: string): void {
+    // A toast or system notification repeats what a bot wrote (a command, a question): show it escaped.
+    const title = safeLine(rawTitle, 200);
+    const body = safeLine(rawBody, 400);
     this.showToast(notice("info", title, body, threadID ?? null));
     if (!this.preferences.notifications) return;
     this.notifier.post(title, body, sound, threadID, (id) => this.openThreadFromNotification(id));

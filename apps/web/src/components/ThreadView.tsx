@@ -8,6 +8,8 @@ import { Hand, KeyRound, Mail, MessageCircleQuestion } from "lucide-react";
 import {
   decisionTitle,
   format,
+  safeLine,
+  safeText,
   type AgentInfo,
   type ApprovalRow,
   type ChatMessage,
@@ -254,7 +256,7 @@ function PendingInbox() {
         <ApprovalCard
           key={approval.id}
           approval={approval}
-          requester={model.requesterName(approval.agentID)}
+          requester={model.cardRequesterName(approval.agentID)}
           onAnswer={(decision) => model.answer(approval, decision)}
         />
       ))}
@@ -291,8 +293,8 @@ function ApprovalCard({
         <span className="spacer" />
         <span className="card-heading-id">{approval.id}</span>
       </div>
-      <div className="approval-action">{approval.action}</div>
-      {approval.preview.length > 0 ? <div className="approval-preview">{approval.preview}</div> : null}
+      <div className="approval-action">{safeLine(approval.action, 320)}</div>
+      {approval.preview.length > 0 ? <div className="approval-preview">{safeText(approval.preview, 4000)}</div> : null}
       <div className="card-actions">
         {approval.decisions.map((decision) => (
           <button
@@ -332,7 +334,7 @@ function FormCard({ form, onAnswer }: { form: FormRow; onAnswer: (option: string
     <div className="form-card">
       <div className="card-heading">
         <MessageCircleQuestion size={12} color="var(--amber)" />
-        {form.question}
+        {safeLine(form.question, 600)}
       </div>
       {form.options.length > 0 ? (
         <>
@@ -348,7 +350,7 @@ function FormCard({ form, onAnswer }: { form: FormRow; onAnswer: (option: string
                 <span className="form-option-key" aria-hidden="true">
                   {String.fromCharCode(65 + index)}
                 </span>
-                <span className="form-option-label">{option}</span>
+                <span className="form-option-label">{safeLine(option, 200)}</span>
               </button>
             ))}
           </div>
@@ -391,19 +393,19 @@ function EmailDraftCard({ form, onAnswer }: { form: FormRow; onAnswer: (option: 
         {email.from ? (
           <div className="email-field">
             <span className="email-field-label">From</span>
-            <span className="email-field-value">{email.from}</span>
+            <span className="email-field-value">{safeLine(email.from, 320)}</span>
           </div>
         ) : null}
         <div className="email-field">
           <span className="email-field-label">To</span>
-          <span className="email-field-value">{email.to}</span>
+          <span className="email-field-value">{safeLine(email.to, 320)}</span>
         </div>
         <div className="email-field">
           <span className="email-field-label">Subject</span>
-          <span className="email-field-value">{email.subject}</span>
+          <span className="email-field-value">{safeLine(email.subject, 320)}</span>
         </div>
       </div>
-      <div className="email-body">{email.body}</div>
+      <div className="email-body">{safeText(email.body, 20000)}</div>
       <div className="card-actions">
         <button type="button" className="btn small" onClick={() => onAnswer("Discard")}>
           Discard
@@ -441,11 +443,11 @@ function SecretCard({
     <div className="secret-card">
       <div className="card-heading">
         <KeyRound size={12} color="var(--ember)" />
-        {secret.purpose}
+        {safeLine(secret.purpose, 320)}
         <span className="spacer" />
         <span className="card-heading-id">{secret.id}</span>
       </div>
-      <div className="secret-command">{secret.command}</div>
+      <div className="secret-command">{safeLine(secret.command, 600)}</div>
       <div className="secret-row">
         <input
           className="secret-input"

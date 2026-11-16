@@ -10,7 +10,7 @@ import type { RoutineInfo, RoutineRunInfo } from "@agni/protocol";
 import { useAppModel, useAppSnapshot } from "../state/use-app-model";
 import { AgentAvatar, PresenceDot } from "./bits";
 import { AddProviderView } from "./AddProviderView";
-import { providerLabel } from "../state/display";
+import { jobKindLabel, plainJobResult, providerLabel } from "../state/display";
 
 export function InspectorView() {
   const model = useAppModel();
@@ -22,8 +22,11 @@ export function InspectorView() {
   const completed = snapshot.tasks.filter((task) => task.status === "done").slice(0, 5);
   // The daemon's own housekeeping jobs (tagger, backups, ...) are not the owner's to manage.
   const jobs = ownerJobs(snapshot.jobs);
-  const recurring = jobs.filter((job) => job.routine !== undefined || job.everyMs !== undefined);
-  const scheduled = jobs.filter((job) => job.routine === undefined && job.everyMs === undefined);
+  // A fixed order (by name): the daemon lists jobs by state and next run, so rows would otherwise
+  // trade places under the cursor whenever one runs, and a second click would hit another job.
+  const byName = (a: JobInfo, b: JobInfo) => jobName(a).localeCompare(jobName(b), undefined, { sensitivity: "base" }) || a.id.localeCompare(b.id);
+  const recurring = jobs.filter((job) => job.routine !== undefined || job.everyMs !== undefined || job.dailyAt !== undefined || job.kind === "brief").sort(byName);
+  const scheduled = jobs.filter((job) => !(job.routine !== undefined || job.everyMs !== undefined || job.dailyAt !== undefined || job.kind === "brief")).sort(byName);
 
   return (
     <aside className="inspector">
@@ -39,12 +42,11 @@ export function InspectorView() {
           </div>
         </div>
         <Row label="Model" value={agent?.model ?? "routed by the daemon"} />
-        <Row label="Lane" value="task — tools, no step cap" />
+        <Row label="Lane" value="task — tools; up to 48 steps per chain (24 when delegated), 25 tool calls per reply" />
         <Row
           label="Tools"
           value={agent?.tools && agent.tools.length > 0 ? agent.tools.join(", ") : "none in this lane"}
         />
-        {snapshot.conversation.threadID ? <Row label="Thread" value={snapshot.conversation.threadID} /> : null}
       </section>
 
       <section className="inspector-section">
@@ -384,6 +386,10 @@ function humanCadence(cron: string, timezone: string): string {
  * click until the job's state moves (the daemon answers the click at once with
  * the job still queued, so that first report does not count).
  */
+function jobName(job: JobInfo): string {
+  return job.routine?.name ?? (job.title && job.title.length > 0 ? job.title : jobKindLabel(job.kind));
+}
+
 function useRunNow(job: JobInfo): { busy: boolean; start: () => void } {
   const model = useAppModel();
   const refusals = useAppSnapshot().runRefusals;
@@ -443,10 +449,10 @@ function PlainRoutineRow({ job }: { job: JobInfo }) {
   return (
     <div className="routine-row">
       <div className="routine-main">
-        <div className="routine-title">{job.title && job.title.length > 0 ? job.title : job.kind}</div>
+        <div className="routine-title">{jobName(job)}</div>
         <div className="routine-meta">{timing}</div>
         {job.lastResult && job.lastResult.length > 0 ? (
-          <div className="routine-meta tertiary">{format.preview(job.lastResult, 90)}</div>
+          <div className="routine-meta tertiary">{format.preview(plainJobResult(job.lastResult), 90)}</div>
         ) : null}
         {job.state === "failed" ? (
           <div className="routine-meta warning-text">Failed after {job.attempts} attempts</div>
@@ -457,7 +463,7 @@ function PlainRoutineRow({ job }: { job: JobInfo }) {
         type="button"
         className="icon-btn"
         title={run.busy ? "Running now" : "Run now"}
-        aria-label={`Run ${job.title ?? job.kind} now`}
+        aria-label={`Run ${jobName(job)} now`}
         disabled={run.busy}
         onClick={run.start}
       >
@@ -467,7 +473,7 @@ function PlainRoutineRow({ job }: { job: JobInfo }) {
         type="checkbox"
         className="toggle"
         checked={job.enabled}
-        aria-label={`${job.title ?? job.kind} routine`}
+        aria-label={`${jobName(job)} routine`}
         title={job.enabled ? "Pause this routine" : "Resume this routine"}
         onChange={(event) => model.setRoutine(job, event.target.checked)}
       />

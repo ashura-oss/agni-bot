@@ -4,7 +4,7 @@
  * waved through, and take any of them back.
  */
 import { useEffect, useRef } from "react";
-import { format } from "@agni/client";
+import { format, safeLine } from "@agni/client";
 import { useAppModel, useAppSnapshot } from "../state/use-app-model";
 
 export function ApprovalRulesView() {
@@ -56,16 +56,16 @@ export function ApprovalRulesView() {
   return (
     <ul className="rule-list" aria-label="Always allow rules" ref={list}>
       {rules.map((rule) => {
-        const bot = rule.agentName ?? `${rule.agentID} (removed)`;
+        const bot = safeLine(rule.agentName ?? `${rule.agentID} (removed)`, 80);
         const when = format.parseISO(rule.createdAt);
         return (
           <li key={rule.id} className="rule-row">
             <div className="rule-main">
               <div className="rule-title">
                 <span className="rule-bot">{bot}</span>
-                <span className="rule-tool">{rule.toolName}</span>
+                <span className="rule-tool">{safeLine(rule.toolName, 80)}</span>
               </div>
-              <div className="rule-target">{rule.target}</div>
+              <div className="rule-target">{safeLine(rule.target, 320)}</div>
               {when ? <div className="settings-note">Allowed {format.stamp(when)}</div> : null}
             </div>
             <button

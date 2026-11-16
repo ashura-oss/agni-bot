@@ -111,3 +111,31 @@ export function failureOf(text: string): Failure | null {
 export function previewLine(raw: string): string {
   return failureOf(raw)?.summary ?? plainPreview(raw);
 }
+
+/** True on Apple platforms, where the command key is the shortcut modifier. */
+function isApplePlatform(): boolean {
+  const platform = typeof navigator === "undefined" ? "" : `${navigator.platform} ${navigator.userAgent}`;
+  return /Mac|iPhone|iPad/u.test(platform);
+}
+
+/** The shortcut as this computer writes it: "⌘." on a Mac, "Ctrl+." elsewhere. */
+export function shortcutLabel(key: string): string {
+  return isApplePlatform() ? `\u2318${key}` : `Ctrl+${key}`;
+}
+
+const JOB_KIND_LABELS: Record<string, string> = {
+  "task.reminder": "Task reminder",
+  turn: "Background task",
+  routine: "Routine",
+  brief: "Morning brief",
+};
+
+/** A job kind as a person would say it, for a job that has no title of its own. */
+export function jobKindLabel(kind: string): string {
+  return JOB_KIND_LABELS[kind] ?? kind.replace(/[._]+/gu, " ").replace(/^./u, (first) => first.toUpperCase());
+}
+
+/** A job's last result without the daemon's bookkeeping prefix ("thread thr_...: "). */
+export function plainJobResult(result: string): string {
+  return result.replace(/^thread\s+\S+:\s*/u, "");
+}
