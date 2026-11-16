@@ -67,8 +67,9 @@ describe(".github/workflows/security.yml", () => {
     expect(String(bun?.with?.["bun-version"])).toMatch(/^\d+\.\d+\.\d+$/);
   });
 
-  test("it runs the gates strictly, so a missing tool fails instead of passing silently", () => {
-    expect(text).toMatch(/check:security\s+--\s+--strict/);
+  test("it runs the gates strictly (the default), so a missing tool fails instead of passing silently", () => {
+    expect(text).toMatch(/run:\s*bun run check:security\s*$/m);
+    expect(text).not.toMatch(/--allow-missing/);
   });
 
   test("it does not push, publish or deploy", () => {

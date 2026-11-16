@@ -17,13 +17,14 @@
  *      wrapper such as ["wsl","semgrep"] or a test double)
  *   2. $AGNI_TOOLS_DIR, default ~/.agni-tools/bin
  *   3. PATH
- * A missing tool is reported as "not installed" with install instructions;
- * the run still exits 0 unless --strict is given. A finding, or a tool that
- * crashes, always exits non-zero.
+ * A missing tool is reported as "not installed" with install instructions and
+ * FAILS the run: a gate that was not run is not a pass. `--allow-missing` is the
+ * opt-out, for a machine that knowingly lacks some tools. A finding, or a tool
+ * that crashes, always exits non-zero.
  *
  *   bun run check:security
- *   bun run check:security -- --strict          missing tools fail the run
- *   bun run check:security -- --offline         skip checks that need the network
+ *   bun run check:security -- --allow-missing   a missing tool is reported but does not fail the run
+ *   bun run check:security -- --offline         skip checks that need the network (deliberate: not a failure)
  *   bun run check:security -- --only semgrep,audit
  *   bun run check:security -- --audit-level moderate
  *
@@ -35,7 +36,8 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 export type ToolId = "gitleaks" | "semgrep" | "osv-scanner" | "zizmor";
-export type Status = "pass" | "fail" | "skipped" | "error";
+/** `skipped`: left out on purpose (--offline). `missing`: its tool is not installed. */
+export type Status = "pass" | "fail" | "skipped" | "missing" | "error";
 export type AuditLevel = "low" | "moderate" | "high" | "critical";
 
 export interface Tool {
@@ -229,15 +231,15 @@ export function parseZizmor(json: string): Finding[] {
 
 // ---------------------------------------------------------------- report
 
-export function exitCodeFor(results: CheckResult[], strict: boolean): number {
+export function exitCodeFor(results: CheckResult[], allowMissing: boolean): number {
   for (const result of results) {
     if (result.status === "fail" || result.status === "error") return 1;
-    if (result.status === "skipped" && strict) return 1;
+    if (result.status === "missing" && !allowMissing) return 1;
   }
   return 0;
 }
 
-const LABEL: Record<Status, string> = { pass: "PASS ", fail: "FAIL ", skipped: "SKIP ", error: "ERROR" };
+const LABEL: Record<Status, string> = { pass: "PASS ", fail: "FAIL ", skipped: "SKIP ", missing: "MISS ", error: "ERROR" };
 
 export function formatReport(results: CheckResult[]): string {
   const out: string[] = [];
@@ -246,7 +248,7 @@ export function formatReport(results: CheckResult[]): string {
     for (const line of result.lines) out.push(`        ${line}`);
   }
   const count = (status: Status) => results.filter((result) => result.status === status).length;
-  out.push("", `${count("pass")} passed, ${count("fail")} failed, ${count("error")} errored, ${count("skipped")} skipped`);
+  out.push("", `${count("pass")} passed, ${count("fail")} failed, ${count("error")} errored, ${count("missing")} missing, ${count("skipped")} skipped`);
   return out.join("\n");
 }
 
@@ -269,7 +271,7 @@ const SEMGREP_TARGETS = ["apps/server/src"];
 
 export interface RunOptions {
   root: string;
-  strict: boolean;
+  allowMissing: boolean;
   offline: boolean;
   auditLevel: AuditLevel;
   only?: string[];
@@ -297,7 +299,7 @@ export async function runChecks(options: RunOptions): Promise<CheckResult[]> {
     if (!selected.includes(id)) continue;
     const title = TITLES[id];
     const done = (status: Status, lines: string[] = []) => results.push({ id, title, status, lines });
-    const missing = (tool: Tool) => done("skipped", [`not installed: ${tool.name}`, `looked at $${tool.envVar}, $AGNI_TOOLS_DIR (default ~/.agni-tools/bin), then PATH`, `install: ${tool.install}`]);
+    const missing = (tool: Tool) => done("missing", [`not installed: ${tool.name}`, `looked at $${tool.envVar}, $AGNI_TOOLS_DIR (default ~/.agni-tools/bin), then PATH`, `install: ${tool.install}`]);
     try {
       switch (id) {
         case "gitleaks-tree":
@@ -424,21 +426,21 @@ function realRunner(env: Record<string, string | undefined>): Runner {
 
 function usage(): string {
   return [
-    "usage: bun run check:security -- [--strict] [--offline] [--only a,b] [--audit-level low|moderate|high|critical] [--list]",
+    "usage: bun run check:security -- [--allow-missing] [--offline] [--only a,b] [--audit-level low|moderate|high|critical] [--list]",
     `checks: ${CHECK_IDS.join(", ")}`,
-    "external tools are found at $<TOOL>_BIN, $AGNI_TOOLS_DIR (default ~/.agni-tools/bin), then PATH; a missing tool is skipped, and fails only with --strict",
+    "external tools are found at $<TOOL>_BIN, $AGNI_TOOLS_DIR (default ~/.agni-tools/bin), then PATH; a missing tool fails the run unless --allow-missing is given",
   ].join("\n");
 }
 
 export async function main(argv: string[], env: Record<string, string | undefined> = process.env): Promise<number> {
-  let strict = false;
+  let allowMissing = false;
   let offline = false;
   let only: string[] | undefined;
   let auditLevel: AuditLevel = "high";
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!;
     const value = (name: string): string | undefined => (arg === name ? argv[++i] : arg.startsWith(`${name}=`) ? arg.slice(name.length + 1) : undefined);
-    if (arg === "--strict") strict = true;
+    if (arg === "--allow-missing") allowMissing = true;
     else if (arg === "--offline") offline = true;
     else if (arg === "--help" || arg === "-h") { console.log(usage()); return 0; }
     else if (arg === "--list") {
@@ -455,7 +457,7 @@ export async function main(argv: string[], env: Record<string, string | undefine
   let results: CheckResult[];
   try {
     results = await runChecks({
-      root, strict, offline, auditLevel, only,
+      root, allowMissing, offline, auditLevel, only,
       run: realRunner(env),
       which: (name) => Bun.which(name, { PATH: env.PATH ?? "" }),
       exists: existsSync,
@@ -467,7 +469,7 @@ export async function main(argv: string[], env: Record<string, string | undefine
     return 2;
   }
   console.log(formatReport(results));
-  return exitCodeFor(results, strict);
+  return exitCodeFor(results, allowMissing);
 }
 
 if (import.meta.main) {

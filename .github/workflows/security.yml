@@ -73,5 +73,5 @@ jobs:
         run: bun run test:scripts
 
       - name: Run the security gates
-        # --strict: a tool that is missing fails the run instead of being skipped.
-        run: bun run check:security -- --strict
+        # Strict by default: a tool that is missing fails the run instead of being skipped.
+        run: bun run check:security

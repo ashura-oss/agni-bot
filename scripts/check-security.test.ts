@@ -138,9 +138,20 @@ describe("exit codes and report", () => {
   const fail: CheckResult = { id: "c", title: "C", status: "fail", lines: ["1 finding"] };
   const error: CheckResult = { id: "d", title: "D", status: "error", lines: ["tool crashed"] };
 
-  test("missing tools only fail with --strict", () => {
+  const missing: CheckResult = { id: "e", title: "E", status: "missing", lines: ["not installed: gitleaks"] };
+
+  test("a missing tool fails the run unless missing tools are allowed", () => {
+    expect(exitCodeFor([pass, missing], false)).toBe(1);
+    expect(exitCodeFor([pass, missing], true)).toBe(0);
+  });
+
+  test("a check skipped on purpose (--offline) is not a missing tool", () => {
     expect(exitCodeFor([pass, skipped], false)).toBe(0);
-    expect(exitCodeFor([pass, skipped], true)).toBe(1);
+  });
+
+  test("allowing missing tools never hides a finding or a crash", () => {
+    expect(exitCodeFor([missing, fail], true)).toBe(1);
+    expect(exitCodeFor([missing, error], true)).toBe(1);
   });
 
   test("findings and tool errors always fail", () => {
@@ -155,15 +166,15 @@ describe("exit codes and report", () => {
 });
 
 describe("runChecks with a fake runner", () => {
-  const base = { root: "C:\\r", strict: false, offline: false, auditLevel: "high" as const, which: noWhich, exists: noExist, home: "/h", env: {} };
+  const base = { root: "C:\\r", allowMissing: false, offline: false, auditLevel: "high" as const, which: noWhich, exists: noExist, home: "/h", env: {} };
 
-  test("a missing external tool is skipped with install instructions and the runner is never called", async () => {
+  test("a missing external tool is reported as missing with install instructions and the runner is never called", async () => {
     const calls: string[][] = [];
     const run: Runner = async (cmd) => (calls.push(cmd), { code: 0, stdout: "", stderr: "" });
     const results = await runChecks({ ...base, only: ["gitleaks-tree", "semgrep", "osv", "zizmor"], run });
     expect(calls).toEqual([]);
     for (const r of results) {
-      expect(r.status).toBe("skipped");
+      expect(r.status).toBe("missing");
       expect(r.lines.join("\n")).toMatch(/not installed/i);
       expect(r.lines.join("\n")).toMatch(/install/i);
     }
@@ -266,15 +277,19 @@ describe("the script end to end", () => {
     return { code: proc.exitCode ?? -1, out: proc.stdout.toString() + proc.stderr.toString() };
   }
 
-  test("with no external tools it says so, installs nothing, and passes unless --strict", () => {
+  test("with no external tools it says so, installs nothing, and fails unless --allow-missing", () => {
     const empty = tempDir("nopath");
     try {
       const env = { PATH: empty, AGNI_TOOLS_DIR: empty, USERPROFILE: empty, HOME: empty, SystemRoot: process.env.SystemRoot ?? "" };
-      const lenient = runScript(["--offline", "--only", "gitleaks-tree,gitleaks-history,semgrep,osv,zizmor"], env);
+      const only = ["--offline", "--only", "gitleaks-tree,gitleaks-history,semgrep,osv,zizmor"];
+      const strict = runScript(only, env);
+      expect(strict.out).toMatch(/not installed/i);
+      expect(strict.code).toBe(1);
+      const lenient = runScript([...only, "--allow-missing"], env);
       expect(lenient.out).toMatch(/not installed/i);
       expect(lenient.code).toBe(0);
-      const strict = runScript(["--offline", "--strict", "--only", "gitleaks-tree,semgrep"], env);
-      expect(strict.code).toBe(1);
+      // The old opt-in flag is gone: strict is the default, and an argument nobody reads must not look like it works.
+      expect(runScript([...only, "--strict"], env).code).toBe(2);
     } finally {
       rmSync(empty, { recursive: true, force: true });
     }
