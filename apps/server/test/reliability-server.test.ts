@@ -184,7 +184,11 @@ describe("H36 + H32 reconnect", () => {
     const first = await Client.open(url, token);
     first.send({ type: "msg.send", channelId: "main", text: "clean up please" });
     const approval = await first.waitFor((frame) => frame.type === "approval.request");
-    // Closing the socket stops the turn; its card is dead, so it must not come back.
+    // A turn outlives its socket, so closing it no longer ends the turn. Stopping the turn does:
+    // its card is dead, so it must expire and must not come back.
+    const started = await first.waitFor((frame) => frame.type === "turn.start");
+    first.send({ type: "msg.cancel", turnID: String(started.turnID) });
+    await first.waitFor((frame) => frame.type === "turn.end");
     first.ws.close();
     for (let waited = 0; waited < 3_000; waited += 25) {
       if (db.query<{ status: string }, [string]>("SELECT status FROM approvals WHERE id = ?").get(String(approval.requestID))?.status !== "pending") break;

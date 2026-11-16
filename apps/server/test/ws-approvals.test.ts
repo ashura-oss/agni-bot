@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createThread } from "../src/stores/threads";
 import { createForm } from "../src/stores/forms";
-import { sseToolCall, startHarness, toolThenText, waitFor, type Harness, type TestClient } from "./ws-harness";
+import { sseToolCall, startHarness, toolThenText, toolsThenText, waitFor, type Harness, type TestClient } from "./ws-harness";
 
 /**
  * S1-05 (dispatch side): approval and question cards mean what they say. Only
@@ -23,7 +23,10 @@ async function skipOnboarding(client: TestClient): Promise<void> {
 
 /** A turn that stops at an approval card: a shell command the gate will not run unasked. */
 async function turnWaitingOnApproval(): Promise<{ first: TestClient; second: TestClient; requestID: string; turnID: string; threadID: string }> {
-  harness = await startHarness({ fetch: toolThenText(() => sseToolCall("bash", { command: "rm -rf /tmp/agni-test-nothing" }), "stopped") });
+  // bash is a deferred tool: it must be loaded before it can be called.
+  harness = await startHarness({
+    fetch: toolsThenText([() => sseToolCall("load_tools", { names: ["bash"] }), () => sseToolCall("bash", { command: "rm -rf /tmp/agni-test-nothing" })], "stopped"),
+  });
   const first = await harness.connect({ device: "phone" });
   const second = await harness.connect({ device: "laptop" });
   await skipOnboarding(first);
