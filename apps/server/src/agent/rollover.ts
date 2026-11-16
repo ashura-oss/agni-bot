@@ -344,8 +344,8 @@ export async function summarizeBlock(
   // S1-33: the whole block, oldest first — not its last 40 messages. The size
   // is bounded in `blockTranscript`, so a long block costs one call, not more.
   const messages = db
-    .query<{ role: string; text: string }, [string]>(
-      "SELECT role, text FROM messages WHERE thread_id = ? ORDER BY created_at ASC, rowid ASC",
+    .query<{ role: string; text: string; kind: string | null }, [string]>(
+      "SELECT role, text, kind FROM messages WHERE thread_id = ? ORDER BY created_at ASC, rowid ASC",
     )
     .all(block.id);
   if (messages.length === 0) return null;
@@ -411,11 +411,11 @@ const SUMMARY_MESSAGE_CHARS = 1_200;
  * budget goes to the start and two thirds to the end, and the cut says how
  * many messages it dropped.
  */
-export function blockTranscript(messages: Array<{ role: string; text: string }>): string {
+export function blockTranscript(messages: Array<{ role: string; text: string; kind?: string | null }>): string {
   // System rows hold what the server fed a turn: a routine's instruction with its saved state, a peer's brief,
   // wake text. That is untrusted text and not part of the conversation, so the summariser never reads it;
   // only the fixed closure notes (which say a request was closed) go in.
-  const lines = messages.filter((message) => message.role !== "system" || isClosureNote(message.role, message.text)).map((message, index) => `${index}: ${message.role}: ${capMessage(message.text)}`);
+  const lines = messages.filter((message) => message.role !== "system" || isClosureNote(message.role, message.text, message.kind)).map((message, index) => `${index}: ${message.role}: ${capMessage(message.text)}`);
   const size = (list: string[]): number => list.reduce((sum, line) => sum + line.length + 1, 0);
   if (size(lines) <= SUMMARY_INPUT_CHARS) return lines.join("\n");
   const head: string[] = [];

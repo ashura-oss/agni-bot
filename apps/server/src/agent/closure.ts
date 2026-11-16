@@ -39,14 +39,29 @@ const EARLIER_WORDINGS = [
   "[My previous request came from a device that has since been revoked. That request is closed: I will not resume it, retry its actions, or ask for its approvals again.]",
 ];
 
-const CLOSURE_NOTES: readonly string[] = [STOPPED_REQUEST_NOTE, INTERRUPTED_REQUEST_NOTE, REVOKED_REQUEST_NOTE, ...EARLIER_WORDINGS];
+/** Notes in their fixed wording, with no record: written before rows carried a kind, so they are recognised by their text. */
+const LEGACY_NOTES: ReadonlySet<string> = new Set([STOPPED_REQUEST_NOTE, INTERRUPTED_REQUEST_NOTE, REVOKED_REQUEST_NOTE, ...EARLIER_WORDINGS]);
 
 /**
- * True for a stored row that is one of these notes, alone or followed by the record of what the
- * request had done (and not, say, a scheduled job's instruction).
+ * True for a stored row that is a closure note: one `closeRequest` wrote (it marks the row, and the mark
+ * cannot come from model text), or one of the fixed notes from before the mark existed. A system row whose
+ * text only looks like a note with a record, such as a scheduled job's instruction, is not one.
  */
-export function isClosureNote(role: string, text: string): boolean {
-  return role === "system" && CLOSURE_NOTES.some((note) => text === note || text.startsWith(`${note}\n[Record`));
+export function isClosureNote(role: string, text: string, kind?: string | null): boolean {
+  return role === "system" && (kind === "closure" || LEGACY_NOTES.has(text));
+}
+
+/**
+ * Error codes the loop stores on a tool call. A tool's own failure message is stored as its text, so one that
+ * happens to equal a code is stored with a prefix instead: no tool can make its error read as one of these.
+ */
+export const ABORTED_MID_CALL = "aborted_mid_call";
+const LOOP_ERROR_CODES: ReadonlySet<string> = new Set([
+  "approval_rejected", "approval_expired", "tool_not_allowed", "domain_not_allowed", "tool_not_loaded",
+  "cancelled", "interrupted_before_result", ABORTED_MID_CALL, "tool timed out or was cancelled",
+]);
+export function toolErrorCode(message: string): string {
+  return LOOP_ERROR_CODES.has(message) ? `tool_error: ${message}` : message;
 }
 
 /** Most calls a note lists; the rest are counted. */
@@ -81,7 +96,7 @@ interface RecordedCall {
 type Bucket = "done" | "unknown" | "failed" | "denied" | "notRun";
 
 /** Errors stored when the abort cut a call in the middle: the call may well have gone through. */
-const CUT_ERRORS: readonly string[] = ["tool timed out or was cancelled", "interrupted_before_result"];
+const CUT_ERRORS: readonly string[] = [ABORTED_MID_CALL, "tool timed out or was cancelled", "interrupted_before_result"];
 
 function bucketOf(row: RecordedCall): { bucket: Bucket; outcome: string } {
   if (row.error !== null && CUT_ERRORS.includes(row.error)) return { bucket: "unknown", outcome: "outcome unknown" };
@@ -147,6 +162,7 @@ export function closeRequest(db: Database, params: { threadID: string; turnID?: 
     threadID: params.threadID,
     ...(params.turnID ? { turnID: params.turnID } : {}),
     role: "system",
+    kind: "closure",
     text: params.turnID ? `${base}\n${recordOf(db, params.turnID)}` : base,
   });
 }

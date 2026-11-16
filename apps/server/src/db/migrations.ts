@@ -1137,4 +1137,15 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE jobs ADD COLUMN run_once INTEGER NOT NULL DEFAULT 0;
     `,
   },
+  {
+    id: 53,
+    name: "message_kind",
+    sql: `
+      -- A mark only the server can put on a row. A closure note ("this request was
+      -- stopped, here is what it did") is recognised by kind = 'closure' and by nothing
+      -- in its text, so text a model wrote into a system row (a scheduled job, say)
+      -- can never pass for one.
+      ALTER TABLE messages ADD COLUMN kind TEXT;
+    `,
+  },
 ];
