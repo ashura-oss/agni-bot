@@ -237,6 +237,73 @@ describe("migrate", () => {
   });
 });
 
+describe("the database's own backups", () => {
+  /** A backup the way the daily job takes one: a compact copy of the live database. It holds the plaintext tokens. */
+  function plantBackup(name: string): string {
+    const dir = join(home, "data", "backups");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, name);
+    writer!.run(`VACUUM INTO '${file.replaceAll("'", "''")}'`);
+    return file;
+  }
+
+  test("old backups that hold plugin tokens are deleted, one fresh backup is taken after the VACUUM, and the output says so", async () => {
+    buildHome();
+    const olderBackup = plantBackup("agni-20260101.db");
+    const newerBackup = plantBackup("agni-20260102.db");
+    writeFileSync(join(home, "data", "backups", "notes.txt"), "not a database backup: left alone");
+    expect(readFileSync(olderBackup).includes(C.dbAccess)).toBe(true); // the fixture backup really holds a canary token
+    expect(readFileSync(newerBackup).includes(C.dbRefresh)).toBe(true);
+
+    const vault = await unlockVault({ home, create: true });
+    const notes: string[] = [];
+    const db = new Database(join(home, "data", "agni.sqlite"), { readwrite: true });
+    try {
+      await runVaultMigrations(vault, { home, db, report: (message) => notes.push(message) });
+    } finally {
+      db.close();
+    }
+
+    expect(existsSync(olderBackup)).toBe(false);
+    expect(existsSync(newerBackup)).toBe(false);
+    expect(readFileSync(join(home, "data", "backups", "notes.txt"), "utf8")).toContain("left alone");
+    const backups = readdirSync(join(home, "data", "backups")).filter((name) => /^agni-\d{8}\.db$/.test(name));
+    expect(backups).toHaveLength(1);
+    // The fresh one is a working database that holds the references, not the tokens.
+    const fresh = new Database(join(home, "data", "backups", backups[0]!), { readonly: true });
+    expect(fresh.query<{ tokens: string | null; token_ref: string | null }, []>("SELECT tokens, token_ref FROM plugin_connections WHERE id = 'plc_calendar'").get()).toEqual({
+      tokens: null,
+      token_ref: "plugin-token/plc_calendar",
+    });
+    fresh.close();
+    expect(plaintextHits()).toEqual([]); // not in the backups folder either
+    expect(notes.join("\n")).toMatch(/backup/i);
+    expect(notes.join("\n")).toContain("agni-20260101.db");
+  });
+
+  test("a migration that moved no tokens leaves the backups alone", async () => {
+    buildHome();
+    const vault = await unlockVault({ home, create: true });
+    await migrate(vault);
+    // A backup taken after the migration holds references only, and a second run has no tokens to move.
+    plantBackup("agni-20260103.db");
+    const dir = join(home, "data", "backups");
+    const names = readdirSync(dir).sort();
+    expect(names).toHaveLength(2); // the one the first run took, and this one
+    const before = names.map((name) => hashOf(join(dir, name)));
+    const notes: string[] = [];
+    const db = new Database(join(home, "data", "agni.sqlite"), { readwrite: true });
+    try {
+      await runVaultMigrations(vault, { home, db, report: (message) => notes.push(message) });
+    } finally {
+      db.close();
+    }
+    expect(readdirSync(dir).sort()).toEqual(names);
+    expect(names.map((name) => hashOf(join(dir, name)))).toEqual(before);
+    expect(notes).toEqual([]);
+  });
+});
+
 describe("then serve: every credential reads back through the code that uses it", () => {
   test("after a restart (vault locked and unlocked from disk)", async () => {
     const rows = buildHome();

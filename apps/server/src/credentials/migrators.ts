@@ -17,8 +17,9 @@
  * Each returns how many secrets (or rows, or files) it moved.
  */
 import type { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { backupDirectory, runBackup } from "../jobs/backup";
 import { log } from "../log";
 import { VaultError, type Vault, type VaultMigrationContext } from "../secrets/types";
 import {
@@ -236,6 +237,9 @@ export function migratePluginTokens(vault: Vault, context: VaultMigrationContext
     pending.push({ id: row.id, tokens: row.tokens, name });
   }
   if (pending.length === 0) return 0;
+  // The tokens are in the vault now. The daily backups of the database were taken while they were still plaintext
+  // in the column, so they go before the rows change: a crash after this still leaves rows to migrate on the next run.
+  const deleted = deleteDatabaseBackups(db);
   const previous = db.query<{ secure_delete: number }, []>("PRAGMA secure_delete").get()?.secure_delete ?? 0;
   db.exec("PRAGMA secure_delete = ON");
   try {
@@ -247,7 +251,35 @@ export function migratePluginTokens(vault: Vault, context: VaultMigrationContext
     db.exec(`PRAGMA secure_delete = ${previous ? "ON" : "OFF"}`);
   }
   purgeDatabaseResidue(db);
+  retakeBackup(db, deleted, context);
   return pending.length;
+}
+
+/** The daily backups (`agni-YYYYMMDD.db`) of this database. Anything else in the folder is not ours to touch. */
+function deleteDatabaseBackups(db: Database): string[] {
+  const dir = backupDirectory(db);
+  let names: string[];
+  try {
+    names = readdirSync(dir).filter((name) => /^agni-\d{8}\.db$/.test(name));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+  for (const name of names) unlinkSync(join(dir, name));
+  return names;
+}
+
+/** After the compaction, so the new copy holds references and no old token bytes; one copy, so recovery is still possible. */
+function retakeBackup(db: Database, deleted: string[], context: VaultMigrationContext): void {
+  let taken: string | null = null;
+  try {
+    taken = runBackup(db);
+  } catch (error) {
+    log.warn(`The fresh database backup could not be taken: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (deleted.length === 0 && !taken) return;
+  const removed = deleted.length > 0 ? `deleted ${deleted.length} old database backup(s) that held the plugin tokens in plaintext (${deleted.join(", ")})` : "no old database backups to delete";
+  context.report?.(`plugin-tokens: ${removed}; ${taken ? `took one fresh backup (${taken}), which holds references only` : "no fresh backup was taken (the next daily backup will make one)"}.`);
 }
 
 /** Make the database file itself free of the old column values: checkpoint the log away, then rewrite the file compactly. */

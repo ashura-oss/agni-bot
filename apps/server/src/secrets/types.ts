@@ -176,4 +176,6 @@ export interface VaultMigrationContext {
   backupDir: string;
   /** Present when the database is open (the server start path), absent for a bare CLI call. */
   db?: import("bun:sqlite").Database;
+  /** Tell the person running the migration something that changed beyond the counts (a backup deleted, say). The CLI prints it. */
+  report?: (message: string) => void;
 }

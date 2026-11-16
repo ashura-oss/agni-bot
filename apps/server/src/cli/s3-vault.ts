@@ -102,7 +102,7 @@ async function migrate(): Promise<void> {
   }
   const home = agniHome();
   try {
-    const results = await runVaultMigrations(vault, { home, db });
+    const results = await runVaultMigrations(vault, { home, db, report: (message) => console.log(message) });
     for (const { name, count } of results) console.log(`${name}: ${count} moved`);
     // Only after every migrator finished: from now on credentials come from the vault.
     setEnvFileValues(join(home, "config.env"), { AGNI_SECRETS_MODE: "vault" });

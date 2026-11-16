@@ -15,10 +15,15 @@ export interface BackupOptions { dir?: string; keep?: number }
 
 const isMemory = (db: Database) => !db.filename || db.filename === ":memory:";
 
+/** Where this database's backups go: `AGNI_BACKUP_DIR`, else `backups` beside the database file. */
+export function backupDirectory(db: Database): string {
+  return Bun.env.AGNI_BACKUP_DIR?.trim() || join(dirname(db.filename), "backups");
+}
+
 /** Write today's backup unless it exists, then prune. Returns the path, or null when skipped. */
 export function runBackup(db: Database, opts: BackupOptions = {}, now: Date = new Date()): string | null {
   if (isMemory(db)) return null;
-  const dir = opts.dir ?? (Bun.env.AGNI_BACKUP_DIR?.trim() || join(dirname(db.filename), "backups"));
+  const dir = opts.dir ?? backupDirectory(db);
   const keep = opts.keep ?? (Number.parseInt(Bun.env.AGNI_BACKUP_KEEP ?? "", 10) || 7);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
