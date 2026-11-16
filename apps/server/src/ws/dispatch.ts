@@ -87,7 +87,7 @@ import { buildConversationHistory, stopReasonsByTurn } from "./history";
 import { replayButtons } from "./approval-replay";
 import { looksLikeNameAnswer } from "./name-answer";
 import { DAY_NAMES } from "../jobs/schedule";
-import { cancelTurn, cancelTurnsForDevice, isServerStopping, registerTurn, unregisterTurn } from "./turn-registry";
+import { cancelTurn, cancelTurnsForDevice, runningTurnIn, isServerStopping, registerTurn, unregisterTurn } from "./turn-registry";
 import { activateAppearanceProfile, deleteAppearanceProfile, listAppearanceProfiles, saveAppearanceProfile } from "../stores/appearance";
 import { getRoutineByJobID, listRuns, updateRoutineState } from "../stores/routines";
 import { normalizeAllowedDomains } from "../routines/egress";
@@ -1295,7 +1295,11 @@ function handleConversationHistory(
     return sendError(deps, session, "unknown_conversation", `no conversation ${frame.conversationID}`);
   }
   const messages = buildConversationHistory(deps.db, frame.conversationID, frame.limit ?? 200);
-  deps.reply({ type: "conversation.history.ok", conversationID: frame.conversationID, messages });
+  // A reload mid-turn needs to know a turn is running without waiting for its next frame.
+  const threads = deps.db.query<{ id: string; agent_id: string }, [string]>("SELECT id, agent_id FROM threads WHERE conversation_id = ?").all(frame.conversationID);
+  const live = runningTurnIn(threads.map((thread) => thread.id));
+  const runningTurn = live ? { ...live, agentID: threads.find((thread) => thread.id === live.threadID)!.agent_id } : undefined;
+  deps.reply({ type: "conversation.history.ok", conversationID: frame.conversationID, messages, ...(runningTurn ? { runningTurn } : {}) });
 }
 
 /**
