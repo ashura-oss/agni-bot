@@ -42,10 +42,11 @@ describe("S1-10 create then delegate in the same turn", () => {
   });
 });
 
-describe("S1-22 wake turns do not schedule jobs", () => {
-  // Owner decision: a wake carries another bot's untrusted output, so job_schedule stays
-  // refused there (allowing it would let one injection persist). The owner's own turn may.
-  scenarioTest("a wake turn's job_schedule is refused clearly and creates nothing; an owner turn's succeeds", async () => {
+describe("S2-06 wake turns schedule jobs when nothing outside was read", () => {
+  // Sprint 1 refused job_schedule in every wake turn, because a wake carries another bot's output. Sprint 2 replaces that
+  // with the taint rule: a wake that heard of work which read nothing outside text may schedule; one that did may not
+  // (policy-narrowing.test.ts covers that side). Here the researcher read nothing, so the wake may.
+  scenarioTest("a wake turn that read nothing outside may schedule a job, like an owner turn", async () => {
     const s = await scenarios.start();
     const wakeFollowUp = "Check on the warehouse report tomorrow morning (from the wake).";
     const ownerFollowUp = "Check on the warehouse report tomorrow morning (from the owner).";
@@ -75,12 +76,11 @@ describe("S1-22 wake turns do not schedule jobs", () => {
     for (let tick = 0; tick < 4 && !wakeRan(); tick += 1) await s.runner().tick();
     expect(wakeRan(), "the wake turn never reached job_schedule").toBe(true);
 
-    const refusal = toolResult(s.model.requests.at(-1)!, "call_wake_schedule") as Record<string, unknown>;
-    expect(typeof refusal.error, "the wake's job_schedule must be refused with a message the model can read").toBe("string");
-    expect(String(refusal.error)).toMatch(/another agent/i);
-    expect(scheduled(wakeFollowUp), "a job was created from a wake turn").toBeNull();
+    const wakeResult = toolResult(s.model.requests.at(-1)!, "call_wake_schedule") as Record<string, unknown>;
+    expect(wakeResult.error, "job_schedule was refused in a wake turn that read nothing outside").toBeUndefined();
+    expect(scheduled(wakeFollowUp), "the wake's scheduled job was not created").not.toBeNull();
 
-    // The same call from an owner turn works.
+    // The owner's turn works too.
     s.model.queue(
       loadTools("job_schedule"),
       call("job_schedule", { text: ownerFollowUp, at: when }, "call_owner_schedule"),

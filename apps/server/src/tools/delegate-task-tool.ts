@@ -9,7 +9,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { PEER_INTENTS, PeerIntentSchema, type PeerIntent, type ServerFrameBody } from "@agni/protocol";
-import type { ToolRegistry } from "./registry";
+import type { ToolContext, ToolRegistry } from "./registry";
 import { assertTeammate, canonicalAgentID, resolvePersona } from "../agent/personas";
 import { DEFAULT_VISIBILITY, RESULT_MAX_CHARS, redactStoredForCaller, type Visibility } from "../agent/visibility";
 import {
@@ -28,6 +28,10 @@ import { appendChannelMessage } from "../stores/channels";
 import { MAX_DEPTH } from "../agent/guardrails";
 import { listTaskNotes } from "../stores/task-notes";
 import { getArtifact } from "../stores/artifacts";
+import { isTainted, packTaint } from "../policy/context";
+import { carryTaint, taskTaint } from "../policy/carry";
+import { denialScope } from "../policy/denials";
+import { MAX_CONCURRENT_DELEGATIONS } from "../policy/limits";
 
 const objectSchema = (properties: Record<string, unknown>, required: string[]): Record<string, unknown> => ({
   type: "object", properties, required, additionalProperties: false,
@@ -47,6 +51,31 @@ export interface DelegateTaskToolDeps {
   /** The parent thread, so the answer to a question can go back to it. */
   parentThreadID?: string;
   chainID?: string;
+}
+
+/** The bot's name for a card or a note: its display name, or its id. */
+function botName(db: Database, agentID: string | null | undefined): string {
+  if (!agentID) return "another bot";
+  return db.query<{ display_name: string | null }, [string]>("SELECT display_name FROM agents WHERE id = ?").get(agentID)?.display_name?.trim() || agentID;
+}
+
+/**
+ * The run that reads a finished task's result takes on what the task's run read from outside text,
+ * unless the result is withheld from it (a private bot hands back a receipt, not words).
+ */
+function carryFromTask(ctx: ToolContext, db: Database, task: TaskRow, view: Record<string, unknown>): void {
+  if (view.resultRedacted === true) return;
+  if (task.delegate_state !== "done" && task.delegate_state !== "failed") return;
+  carryTaint(ctx.run, botName(db, task.owner_agent_id), taskTaint(db, task.id), "delegate_task");
+}
+
+/** Delegations queued or running under one root run. */
+function activeDelegations(db: Database, rootKey: string): number {
+  return db.query<{ n: number }, [string]>(
+    `SELECT COUNT(*) AS n FROM jobs
+     WHERE kind = 'turn' AND state IN ('queued', 'running')
+       AND json_extract(payload, '$.delegationTaskID') IS NOT NULL AND json_extract(payload, '$.rootKey') = ?`,
+  ).get(rootKey)?.n ?? 0;
 }
 
 export function registerDelegateTaskTool(registry: ToolRegistry, deps: DelegateTaskToolDeps): void {
@@ -129,8 +158,10 @@ export function registerDelegateTaskTool(registry: ToolRegistry, deps: DelegateT
         const repeated = check === "retry";
         if (args.mode === "wait") {
           const waited = await waitForDelegation(deps.db, existing.id, waitBudget(args.timeoutMs), ctx.signal);
+          const view = taskView(waited.task, deps);
+          carryFromTask(ctx, deps.db, waited.task, view);
           return {
-            ...taskView(waited.task, deps),
+            ...view,
             jobID: existing.job_id,
             duplicate: true,
             repeated,
@@ -148,6 +179,12 @@ export function registerDelegateTaskTool(registry: ToolRegistry, deps: DelegateT
         };
       }
       if (check === "retry") return { repeated: true, note: "That exact request was already sent in this chain. Say something new, or stop." };
+      // At most a few at once under one root: a bot that fans out without limit runs up the bill before anyone can stop it.
+      const rootKey = ctx.run ? denialScope(ctx.run) : (deps.parentTurnID ?? chainID);
+      const running = activeDelegations(deps.db, rootKey);
+      if (running >= MAX_CONCURRENT_DELEGATIONS) {
+        throw new Error(`not done: ${running} delegations are already running for this task, and ${MAX_CONCURRENT_DELEGATIONS} is the most at once. Wait for one to finish with delegate_wait, or do part of the work yourself.`);
+      }
       brief.chainID = chainID;
       const task = createDelegationTask(deps.db, {
         ownerAgentID: toAgentID,
@@ -178,6 +215,10 @@ export function registerDelegateTaskTool(registry: ToolRegistry, deps: DelegateT
           notify: true,
           delegationTaskID: task.id,
           depth: depth + 1,
+          // What this run has read goes with the brief, and the child shares this run's root (S2-06).
+          ...(ctx.run && isTainted(ctx.run) ? { taint: packTaint(ctx.run) } : {}),
+          ...(ctx.run ? { rootTurnID: ctx.run.rootTurnID, rootJob: ctx.run.rootJob } : {}),
+          rootKey,
         },
       });
       setDelegationJob(deps.db, task.id, job.id);
@@ -192,8 +233,10 @@ export function registerDelegateTaskTool(registry: ToolRegistry, deps: DelegateT
 
       if (args.mode === "wait") {
         const waited = await waitForDelegation(deps.db, task.id, waitBudget(args.timeoutMs), ctx.signal);
+        const view = taskView(waited.task, deps);
+        carryFromTask(ctx, deps.db, waited.task, view);
         return {
-          ...taskView(waited.task, deps),
+          ...view,
           jobID: job.id,
           waitTimedOut: waited.timedOut,
           message: waited.timedOut
@@ -338,11 +381,13 @@ function registerTaskStatusTool(registry: ToolRegistry, deps: DelegateTaskToolDe
     kind: "static",
     timeoutMs: 5_000,
     schema: objectSchema({ taskID: stringProp }, ["taskID"]),
-    handler: async (args: Record<string, unknown>) => {
+    handler: async (args: Record<string, unknown>, ctx) => {
       const taskID = String(args.taskID ?? "").trim();
       const task = getTask(deps.db, taskID);
       if (!task) throw new Error(`no task ${taskID}`);
-      return taskView(task, deps);
+      const view = taskView(task, deps);
+      carryFromTask(ctx, deps.db, task, view);
+      return view;
     },
   });
 }
@@ -364,7 +409,9 @@ function registerDelegateWaitTool(registry: ToolRegistry, deps: DelegateTaskTool
     handler: async (args: Record<string, unknown>, ctx) => {
       const taskID = String(args.taskID ?? "").trim();
       const waited = await waitForDelegation(deps.db, taskID, waitBudget(args.timeoutMs), ctx.signal);
-      return { ...taskView(waited.task, deps), waitTimedOut: waited.timedOut };
+      const view = taskView(waited.task, deps);
+      carryFromTask(ctx, deps.db, waited.task, view);
+      return { ...view, waitTimedOut: waited.timedOut };
     },
   });
 }

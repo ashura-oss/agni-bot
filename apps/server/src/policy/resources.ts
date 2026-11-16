@@ -117,7 +117,9 @@ export function commandPaths(command: string, cwd: string): string[] {
     const isPathLike = /[\\/.~*?]/.test(word);
     if (index === 0 && !isPathLike) continue; // the program name
     const expanded = word === "~" ? home : word.startsWith("~/") || word.startsWith("~\\") ? resolve(home, word.slice(2)) : word;
-    keys.add(foldPath(resolve(cwd, expanded)));
+    const absolute = resolve(cwd, expanded);
+    // A word with a pattern in it cannot be followed to a real file; any other is resolved the way a file tool resolves it, links included.
+    keys.add(/[*?[]/.test(word) ? foldPath(absolute) : pathKey(absolute));
   }
   return [...keys];
 }

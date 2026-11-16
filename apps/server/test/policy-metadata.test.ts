@@ -51,7 +51,7 @@ describe("tool metadata", () => {
   });
 
   test("the tools that change bots, schedules and routines are protected", () => {
-    for (const name of ["create_agent", "update_agent", "rename_agent", "job_schedule", "job_cancel", "routine_create", "routine_pause", "routine_delete"]) {
+    for (const name of ["create_agent", "update_agent", "rename_agent", "forget_fact", "job_schedule", "job_cancel", "routine_create", "routine_pause", "routine_delete"]) {
       expect({ name, protectedWrite: policyFor(name)!.protectedWrite }).toEqual({ name, protectedWrite: true });
     }
     expect(policyFor("memory_write")!.protectedWrite).toBeUndefined();

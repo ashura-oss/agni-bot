@@ -59,17 +59,6 @@ export function pageLabel(url: unknown): string {
 }
 
 const fromWeb = (label: TaintedBy["label"]): TaintedBy => ({ kind: "web", label });
-const fromBot = (): TaintedBy => ({ kind: "peer", label: (_args, result) => botLabel(result) });
-
-function botLabel(result: unknown): string {
-  if (typeof result === "object" && result !== null) {
-    const record = result as Record<string, unknown>;
-    const name = record.agentName ?? record.agentID ?? record.ownerAgentID ?? record.agent;
-    if (typeof name === "string" && name.trim()) return clean(name, 60);
-  }
-  return "another bot";
-}
-
 const isOwnAccount = (args: Args): boolean => args.account === undefined || args.account === null || args.account === "agent";
 
 /** A write to a file: a new file in scratch is free; changing one that exists asks; outside scratch is out of the sandbox. */
@@ -135,7 +124,8 @@ export const TOOL_POLICY: Readonly<Record<string, ToolPolicy>> = {
   scratch_read: readOnly(["private-reader"]),
   memory_write: local(),
   remember_fact: local(),
-  forget_fact: local(),
+  // Forgetting what the owner told the bot is a change a page must not be able to cause.
+  forget_fact: local({ protectedWrite: true }),
   task_create: local(),
   task_update: local(),
   task_cancel: local(),
@@ -183,12 +173,13 @@ export const TOOL_POLICY: Readonly<Record<string, ToolPolicy>> = {
   calendar_create: { classes: ["effector"], tier: 2, assess: assessSend, resources: recipientResources },
   calendar_update: { classes: ["effector"], tier: 2, assess: assessSend, resources: recipientResources },
 
-  // Other bots. What they hand back is another bot's text and carries its taint.
-  handoff: local({ classes: ["effector", "untrusted-reader"], taintedBy: fromBot() }),
-  delegate_task: local({ classes: ["effector", "untrusted-reader"], taintedBy: fromBot() }),
-  delegate_wait: readOnly(["untrusted-reader"], { taintedBy: fromBot() }),
-  task_status: readOnly(["untrusted-reader"], { taintedBy: fromBot() }),
-  read_artifact: readOnly(["untrusted-reader", "private-reader"], { taintedBy: fromBot() }),
+  // Other bots. What they hand back is another bot's text: it marks the run that reads it only when that bot's own run had read
+  // outside text, so these tools carry the taint themselves (policy/carry.ts) instead of marking by name.
+  handoff: local({ classes: ["effector", "untrusted-reader"] }),
+  delegate_task: local({ classes: ["effector", "untrusted-reader"] }),
+  delegate_wait: readOnly(["untrusted-reader"]),
+  task_status: readOnly(["untrusted-reader"]),
+  read_artifact: readOnly(["untrusted-reader", "private-reader"]),
 
   // Changing the bots, schedules and routines: never from a run that has read outside text.
   create_agent: local({ protectedWrite: true }),

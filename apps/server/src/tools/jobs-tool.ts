@@ -18,6 +18,8 @@ import {
 } from "../stores/jobs";
 import { canonicalAgentID } from "../agent/personas";
 import { describeSchedule, nextDailyRun, parseDay, parseWallClock } from "../jobs/schedule";
+import { isPeerPrincipal, isTainted } from "../policy/context";
+import { MAX_SELF_SCHEDULED_JOBS } from "../policy/limits";
 
 export interface JobScheduleArgs {
   /** The prompt the scheduled run executes. */
@@ -63,6 +65,28 @@ export interface ScheduledJobView {
 
 const MIN_EVERY_MINUTES = 5;
 
+/** Jobs this bot put on its own clock that are still queued or running. Jobs the owner or a routine made are not counted. */
+function selfScheduledCount(db: Database, callerAgentID: string): number {
+  return listJobs(db, { limit: 1_000 }).filter((row) => {
+    if (row.kind !== "turn") return false;
+    const payload = parsePayload(row.payload);
+    return payload.scheduledBy === "bot" && canonicalAgentID(String(payload.agentID ?? "ea")) === canonicalAgentID(callerAgentID);
+  }).length;
+}
+
+/**
+ * Why this call may not schedule work, or null when it may. A run that read outside text may not
+ * (what a page asks for must not become a standing job); a bot's brief from another bot and a
+ * routine's saved state may not either. A wake or a scheduled job that read nothing outside may,
+ * as the owner's own turn may.
+ */
+function schedulingRefusal(ctx: ToolContext): string | null {
+  if (!ctx.run) return ctx.peerInput ? "not done: this turn started from another agent's message" : null;
+  if (isPeerPrincipal(ctx.run)) return "not done: this turn started from another agent's message";
+  if (isTainted(ctx.run)) return "not done: this run read outside content, so it may not schedule work. Tell the owner what you wanted to schedule and ask them to confirm it.";
+  return null;
+}
+
 export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: string): JobScheduleResult {
   const requested = args.agentID?.trim();
   if (requested && canonicalAgentID(requested) !== canonicalAgentID(callerAgentID)) {
@@ -70,6 +94,10 @@ export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: 
   }
   const text = args.text.trim();
   if (!text) throw new Error("a scheduled job needs something to do");
+  const mine = selfScheduledCount(db, callerAgentID);
+  if (mine >= MAX_SELF_SCHEDULED_JOBS) {
+    throw new Error(`you already have ${mine} scheduled jobs, which is the most a bot may keep. Cancel one with job_cancel before scheduling another.`);
+  }
   const choices = [args.at, args.dailyAt, args.everyMinutes].filter((value) => value !== undefined && value !== null);
   if (choices.length === 0) throw new Error("say when it should run: `at` (one-off), `dailyAt` (a clock time), or `everyMinutes`");
   if (choices.length > 1) throw new Error("pick one: `at`, `dailyAt` or `everyMinutes`");
@@ -79,6 +107,8 @@ export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: 
     agentID: callerAgentID,
     // C4: scheduled text is model-authored, so it runs as non-owner input.
     inputRole: "system",
+    // Counted against the bot's own allowance (S2-09).
+    scheduledBy: "bot",
     notify: args.notify !== false,
   };
 
@@ -204,7 +234,8 @@ export function createJobTools(db: Database): ToolDefinition<unknown, unknown>[]
       }, ["text"]),
       timeoutMs: 3_000,
       handler: async (args, ctx) => {
-        if (ctx.peerInput) return { error: "not done: this turn started from another agent's message" };
+        const refusal = schedulingRefusal(ctx);
+        if (refusal) return { error: refusal };
         const input = (args ?? {}) as Record<string, unknown>;
         return scheduleJob(db, {
           text: String(input.text ?? ""),

@@ -12,6 +12,7 @@ import { getArtifact } from "../stores/artifacts";
 import { canonicalAgentID, resolvePersona } from "../agent/personas";
 import { getTask } from "../stores/tasks";
 import { DEFAULT_VISIBILITY, redactForCaller } from "../agent/visibility";
+import { carryTaint, taskTaint } from "../policy/carry";
 
 export interface ArtifactToolDeps {
   db: Database;
@@ -51,7 +52,7 @@ export function registerArtifactTool(registry: ToolRegistry, deps: ArtifactToolD
       offset: { type: "integer", minimum: 0, description: "Character to start reading at. Default 0." },
       limit: { type: "integer", minimum: 1, maximum: ARTIFACT_PAGE_CHARS, description: "How many characters to return. Default and most: 4000." },
     }, ["artifactRef"]),
-    handler: async (args) => {
+    handler: async (args, ctx) => {
       const input = (args ?? {}) as Record<string, unknown>;
       const ref = String(input.artifactRef ?? "").trim();
       if (!ref) throw new Error("artifactRef is required");
@@ -76,6 +77,8 @@ export function registerArtifactTool(registry: ToolRegistry, deps: ArtifactToolD
         visibility: visible.mode,
       };
       if (visible.text === null) return { ...envelope, text: null };
+      // The words are another bot's: what its run read from outside marks the run that reads them.
+      carryTaint(ctx.run, resolvePersona(deps.db, artifact.agent_id)?.name ?? artifact.agent_id, taskTaint(deps.db, artifact.task_id), "read_artifact");
       const total = visible.text.length;
       // What the answer needs besides the text, counted with the widest numbers it can hold.
       const fixed = JSON.stringify({ ...envelope, text: "", totalChars: total, offset, nextOffset: total }).length;

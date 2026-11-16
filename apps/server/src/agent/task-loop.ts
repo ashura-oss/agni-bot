@@ -516,7 +516,9 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   const principal = principalOf(run);
   const runCtx = createRunContext({
     db, bot: persona.id, botName: persona.name, threadID, turnID,
-    jobID: run.policy?.jobID ?? null, rootJob: run.policy?.rootJob ?? run.policy?.jobID ?? null,
+    jobID: run.policy?.jobID ?? null,
+    // A delegated child shares its parent's root (which may be a chat turn, not a job); any other job is its own root.
+    rootJob: run.policy?.rootTurnID ? (run.policy.rootJob ?? null) : (run.policy?.jobID ?? null),
     rootTurnID: run.policy?.rootTurnID ?? turnID,
     principal,
     capabilities: callableTools,

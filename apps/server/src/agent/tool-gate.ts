@@ -98,7 +98,7 @@ async function askOwner(
   const waitSignal = AbortSignal.any([signal, AbortSignal.timeout(deps.ownerWaitMs)]);
   let answer: Awaited<ReturnType<ApprovalBroker["request"]>>;
   try {
-    answer = await deps.broker.request(run.threadID, run.turnID, input.tool, input.callID, input.args, waitSignal, { card, agentID: run.bot });
+    answer = await deps.broker.request(run.threadID, run.turnID, input.tool, input.callID, input.args, waitSignal, { card, agentID: run.bot, botName: run.services.botName });
   } finally {
     release();
   }

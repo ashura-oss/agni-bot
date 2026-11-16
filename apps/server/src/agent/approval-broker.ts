@@ -82,6 +82,8 @@ export interface ApprovalBrokerDeps {
 /** What the engine knows about the card, beyond the call itself. */
 export interface CardInfo {
   card: ApprovalCard;
+  /** The bot's name for the card ("Ava read ..."); "A bot" when it is not known. */
+  botName?: string | null;
   /** The bot whose turn this is: the scope of a rule if the owner says "always". */
   agentID: string | null;
 }
@@ -121,7 +123,7 @@ export class ApprovalBroker {
     const action = redact(describeAction(toolName, args));
     const note = this.deps.approvalNote?.(toolName);
     const body = previewAction(toolName, args);
-    const lead = info ? cardLead(info.card) : "";
+    const lead = info ? cardLead(info.card, info.botName?.trim() || "A bot") : "";
     const preview = redact(`${lead}${note ? `${body}\n\n${escapeUnsafe(note)}` : body}`);
     const { db } = this.deps;
     const requestID = newID("apr");
@@ -194,15 +196,15 @@ const RISK_LINE: Record<RiskKind, string> = {
   command: "Risk: runs a command on this computer",
 };
 
-const SOURCE_LINE: Record<string, (label: string) => string> = {
-  web: (label) => `read a web page earlier in this task: ${label}`,
-  email: (label) => `read an email earlier in this task: ${label}`,
-  peer: (label) => `read a reply from ${label} earlier in this task.`,
-  attachment: (label) => `read an attached file earlier in this task: ${label}`,
-  mcp: (label) => `read ${label} earlier in this task.`,
-  routine: () => "started this task from saved routine state, not from you.",
-  scheduled: () => "started this task from a scheduled job, not from you.",
-  unknown: () => "read outside content earlier in this task.",
+const SOURCE_LINE: Record<string, (bot: string, label: string) => string> = {
+  web: (bot, label) => `${bot} read a web page earlier in this task: ${label}`,
+  email: (bot, label) => `${bot} read an email earlier in this task: ${label}`,
+  peer: (bot, label) => `${bot} read a reply from ${label} earlier in this task.`,
+  attachment: (bot, label) => `${bot} read an attached file earlier in this task: ${label}`,
+  mcp: (bot, label) => `${bot} read ${label} earlier in this task.`,
+  routine: () => "This task started from saved routine state, not from you.",
+  scheduled: () => "This task started from a scheduled job, not from you.",
+  unknown: (bot) => `${bot} read outside content earlier in this task.`,
 };
 
 /**
@@ -210,16 +212,16 @@ const SOURCE_LINE: Record<string, (label: string) => string> = {
  * content came from, how risky the call is, and why there is no "always".
  * Plain server text; the labels were cleaned when they were taken.
  */
-function cardLead(card: ApprovalCard): string {
+function cardLead(card: ApprovalCard, bot: string): string {
   const lines: string[] = [];
   const [newest, ...older] = card.sources;
   if (newest) {
     const say = SOURCE_LINE[newest.kind] ?? SOURCE_LINE.unknown!;
-    lines.push(`The bot ${say(newest.label)}${older.length > 0 ? ` (and ${older.length} more)` : ""}`);
+    lines.push(`${say(bot, newest.label)}${older.length > 0 ? ` (and ${older.length} more)` : ""}`);
   }
   lines.push(RISK_LINE[card.risk]);
   if (card.unnamedDestinations.length > 0) {
-    lines.push(`To: ${card.unnamedDestinations.map((destination) => entry(destination, 200)).join(", ")}`);
+    lines.push(`Not named by you: ${card.unnamedDestinations.map((destination) => entry(destination, 200)).join(", ")}`);
     lines.push("This destination is not in your messages or your approved list.");
   }
   if (newest) lines.push("\"Always allow\" is off: this task used outside content.");

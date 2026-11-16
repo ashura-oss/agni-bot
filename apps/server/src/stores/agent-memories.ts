@@ -347,6 +347,8 @@ export function searchAgentMemories(
     agentID?: string | null;
     callerAgentID?: string | null;
     limit?: number;
+    /** Include notes kept from outside text. Off for anything that goes into a prompt. */
+    includeUntrusted?: boolean;
   },
 ): MemoryHit[] {
   const query = input.query.trim();
@@ -364,7 +366,7 @@ export function searchAgentMemories(
     table: "agent_memories_fts",
     columns: MEMORY_COLUMNS.split(", ").map((column) => `m.${column}`).join(", "),
     join: "JOIN agent_memories m ON m.rowid = agent_memories_fts.rowid",
-    filter: memoryFilter(scope, agentID, caller),
+    filter: memoryFilter(scope, agentID, caller, input.includeUntrusted),
     query,
     limit: limit * 4,
   });
@@ -393,9 +395,15 @@ interface SqlFilter {
   values: string[];
 }
 
-/** The caller-filter, shared by the list and the search. */
-function memoryFilter(scope: string | undefined, agentID: string | null, caller: string | null): SqlFilter {
+/**
+ * The caller-filter, shared by the list and the search. A note a run kept
+ * from outside text (`source = 'untrusted'`, S2-05) is left out unless the
+ * reader asks for it: whatever is injected into a prompt must not carry it as
+ * a fact. The model's own explicit recall may ask.
+ */
+function memoryFilter(scope: string | undefined, agentID: string | null, caller: string | null, includeUntrusted = false): SqlFilter {
   const clauses = [LIVE_SQL_M, "m.archived_at IS NULL"];
+  if (!includeUntrusted) clauses.push("m.source <> 'untrusted'");
   const values: string[] = [];
   if (scope === "agent") {
     clauses.push("m.scope = 'agent'", "m.agent_id = ?");
@@ -500,6 +508,7 @@ export function searchMemoriesByVector(
     agentID?: string | null;
     callerAgentID?: string | null;
     limit?: number;
+    includeUntrusted?: boolean;
   },
 ): MemoryHit[] {
   // No scope: everything the caller may read (the turn's own retrieval).
@@ -511,7 +520,7 @@ export function searchMemoriesByVector(
   if (scope === "agent" && caller && caller !== agentID) return [];
   const limit = Math.min(50, Math.max(1, Math.floor(input.limit ?? 10)));
 
-  const filter = memoryFilter(scope, agentID, caller);
+  const filter = memoryFilter(scope, agentID, caller, input.includeUntrusted);
   // H27: rank the newest embedded rows (bounded), not an arbitrary sample.
   const rows = db
     .query<AgentMemoryRow & { embedding: Uint8Array | null }, (string | number)[]>(
@@ -661,6 +670,8 @@ export function listAgentMemories(
     callerAgentID?: string | null;
     /** B11: the pinned set — by salience, then use, not by the last edit. */
     pinned?: boolean;
+    /** Leave out notes kept from outside text (S2-05). The owner's own lists show them. */
+    excludeUntrusted?: boolean;
   } = {},
 ): AgentMemoryRow[] {
   const scope = input.scope ?? "agent";
@@ -693,6 +704,7 @@ export function listAgentMemories(
   // Visibility: a private row is for its owner alone.
   clauses.push("(visibility <> 'private' OR COALESCE(agent_id, 'ea') = ?)");
   params.push(caller ?? "");
+  if (input.excludeUntrusted) clauses.push("source <> 'untrusted'");
   if (query) {
     clauses.push("(content || ' ' || COALESCE(tags, '')) LIKE ? ESCAPE '\\'");
     params.push(`%${query.replace(/[\\%_]/g, "\\$&")}%`);

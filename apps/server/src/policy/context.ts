@@ -54,7 +54,8 @@ export function createRunContext(input: RunContextInput): RunContext {
     threadID: input.threadID,
     turnID: input.turnID,
     jobID: input.jobID ?? null,
-    rootJob: input.rootJob ?? input.jobID ?? null,
+    // A job that nobody delegated from is its own root; a delegated child shares its parent's (which may be no job at all).
+    rootJob: input.rootJob !== undefined ? input.rootJob : input.jobID ?? null,
     rootTurnID: input.rootTurnID ?? input.turnID,
     principal: { ...input.principal },
     effectiveCapabilities: new Set(input.capabilities),
@@ -93,6 +94,11 @@ export function mergeTaint(run: Pick<RunContext, "taint">, sources: readonly Tai
  */
 export function isPeerPrincipal(run: Pick<RunContext, "principal">): boolean {
   return run.principal.kind === "peer" || run.principal.kind === "routine";
+}
+
+/** Is the run a tool call belongs to marked? False when the call has no run (a direct call in a test). */
+export function ctxTainted(ctx: { run?: Pick<RunContext, "taint"> }): boolean {
+  return ctx.run !== undefined && isTainted(ctx.run);
 }
 
 /** Newest source first, for the card. */

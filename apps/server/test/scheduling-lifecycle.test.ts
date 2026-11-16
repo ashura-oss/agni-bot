@@ -452,7 +452,7 @@ describe("S1-23: a scheduled reply reaches the owner's chat", () => {
 });
 
 describe("S1-22: wake turns", () => {
-  test("a wake turn keeps the peer-input gate on job_schedule (a deliberate refusal)", async () => {
+  test("a call with no run behind it keeps the peer-input gate on job_schedule", async () => {
     db = openDatabase(":memory:");
     const [schedule] = createJobTools(db);
     const handler = schedule!.handler as unknown as (args: unknown, ctx: unknown) => Promise<unknown>;

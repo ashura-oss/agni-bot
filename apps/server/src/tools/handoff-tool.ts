@@ -24,6 +24,7 @@ import { DEFAULT_VISIBILITY, redactResultForCaller } from "../agent/visibility";
 import { appendChannelMessage, ensureDMChannel } from "../stores/channels";
 import { checkPeerRequest, fingerprintPeerRequest } from "../stores/peer-chains";
 import { stripPeerTags } from "../agent/peer-message";
+import { carryTaint } from "../policy/carry";
 
 const objectSchema = (properties: Record<string, unknown>, required: string[]): Record<string, unknown> => ({
   type: "object", properties, required, additionalProperties: false,
@@ -168,8 +169,11 @@ export function registerHandoffTool(registry: ToolRegistry, deps: HandoffToolDep
         threadID: deps.threadID,
         conversationID: deps.conversationID,
         guardrail: deps.guardrail,
+        run: ctx.run,
       };
       const result = await handoff(handoffDeps, request);
+      // What the specialist read from outside marks this run too, whatever the visibility lets through.
+      carryTaint(ctx.run, nameOf(result.agentID), result.taint, "handoff");
       // Not posted to the delegating agent's channel: the answer belongs to
       // its synthesis. It is posted to the specialist's own DM instead, so a
       // direct chat with that agent reads like a conversation — the brief was

@@ -18,6 +18,9 @@ import { canonicalAgentID, defaultResolvedPersona, getPersona, resolvePersona, t
 import { DEFAULT_VISIBILITY, RESULT_MAX_CHARS, redactResultForCaller } from "../agent/visibility";
 import { rootGuardrail } from "../agent/guardrails";
 import { asksWhenClean } from "../policy/metadata";
+import { unpackTaint } from "../policy/context";
+import { saveTaskTaint, taskTaint } from "../policy/carry";
+import type { TaintSource } from "../policy/types";
 import type { Router } from "../models/router";
 import { getThread } from "../stores/threads";
 import { ensureDMChannel } from "../stores/channels";
@@ -94,7 +97,16 @@ export interface TurnJobPayload {
     agentID: string;
     summary: string;
     redacted: boolean;
+    /** What that task's run read from outside text (S2-06). Empty for a task that read nothing. */
+    taint?: unknown;
   }>;
+  /** What the run that queued this job had read from outside text, for a delegated child (S2-06). */
+  taint?: unknown;
+  /** The run this job belongs to: set on a delegated child so a refusal earlier in the chain still holds. */
+  rootTurnID?: string;
+  rootJob?: string | null;
+  /** The run a delegation counts against (see `delegate_task`'s cap on running delegations). */
+  rootKey?: string;
   /** The channel the turn's result belongs to. */
   channelID?: string;
   /** How the request is written to the durable log. */
@@ -187,7 +199,7 @@ export function registerTurnJob(runner: JobRunner, deps: TurnJobDeps): void {
     const startedAt = nowISO();
     let result: Awaited<ReturnType<typeof runTurn>>;
     try {
-      result = await runTurn(deps, payload, persona, threadID, conversation, text, job.attempts > 1);
+      result = await runTurn(deps, payload, persona, threadID, conversation, text, job.attempts > 1, job.id);
     } catch (error) {
       // S1-12: a cancelled task ends here, whatever the aborted turn threw.
       if (delegationTaskID && isDelegationCancelled(deps.db, delegationTaskID)) return { result: "cancelled" };
@@ -197,6 +209,8 @@ export function registerTurnJob(runner: JobRunner, deps: TurnJobDeps): void {
     // S1-12: the owner cancelled while the child ran. The cancelled state, not
     // this turn's outcome, is the task's truth: no result, no wake, no notify.
     if (delegationTaskID && isDelegationCancelled(deps.db, delegationTaskID)) return { result: "cancelled" };
+    // What this task's run read from outside text stays with the task, for the bot that reads its result.
+    if (delegationTaskID) saveTaskTaint(deps.db, delegationTaskID, result.taint);
 
     // S1-13: a scheduled run whose gated action was denied or never approved did
     // not do that work. Never record it as done, whatever the model then said.
@@ -483,6 +497,17 @@ export function buildWakeText(results: Array<{ taskID: string; agentID: string; 
   ].join("\n");
 }
 
+/** A wake is told about finished tasks; if one of them read outside text, so has the bot that reads it. */
+function wakeTaint(db: Database, results: TurnJobPayload["results"]): TaintSource[] {
+  const out: TaintSource[] = [];
+  for (const item of results ?? []) {
+    if (unpackTaint(item.taint).length === 0) continue;
+    const name = resolvePersona(db, item.agentID)?.name ?? item.agentID;
+    out.push({ kind: "peer", label: name.slice(0, 60), tool: "wake", at: nowISO() });
+  }
+  return out;
+}
+
 function buildWakeLogText(results: Array<{ taskID: string; agentID: string; summary: string; redacted: boolean }>): string {
   const lines = results.map((result) => result.redacted
     ? `- Task ${result.taskID} (${result.agentID}) finished. Its result is private to that agent; open its chat to read it.`
@@ -517,6 +542,8 @@ function wakeParent(deps: TurnJobDeps, taskID: string, summary: string, parentDe
     agentID: owner,
     summary: visible.text ?? "",
     redacted: visible.redacted,
+    // A private bot's result is a receipt: nothing it read reaches the parent in words.
+    taint: visible.redacted ? [] : taskTaint(deps.db, task.id),
   };
   claimResultDelivery(deps.db, task.id, () => {
     const existing = findQueuedJobByPayloadKey(deps.db, "turn", wakeKey);
@@ -565,7 +592,8 @@ async function runTurn(
   conversation: ConversationRow | undefined,
   text: string,
   retry = false,
-): Promise<{ turnID: string; text: string; stopReason: string }> {
+  jobID?: string,
+): Promise<{ turnID: string; text: string; stopReason: string; taint: TaintSource[] }> {
   const controller = new AbortController();
   const delegationTaskID = payload.delegationTaskID?.trim() || null;
   const task = delegationTaskID ? getTask(deps.db, delegationTaskID) : null;
@@ -585,6 +613,13 @@ async function runTurn(
       carrySummary: conversation?.summary ?? null,
       // H23: the depth travels in the payload, so a delegated job does not restart at 1.
       guardrail: { ...rootGuardrail(persona.id, payload.chainID), depth: Math.max(1, Math.trunc(payload.depth ?? 1)) },
+      ...(payload.wakeKey ? { wake: true } : {}),
+      policy: {
+        // The brief's taint rides down; a wake starts with the taint of the results it is told about.
+        taint: [...unpackTaint(payload.taint), ...wakeTaint(deps.db, payload.results)],
+        ...(payload.rootTurnID ? { rootTurnID: payload.rootTurnID, rootJob: payload.rootJob ?? null } : {}),
+        jobID: jobID ?? null,
+      },
       facts: payload.facts,
       ...(channelID ? { channelID } : {}),
       ...(payload.inputRole ? { inputRole: payload.inputRole } : {}),
@@ -602,7 +637,7 @@ async function runTurn(
           }
         : {}),
     });
-    return { turnID: result.turnID, text: result.text, stopReason: result.stopReason };
+    return { turnID: result.turnID, text: result.text, stopReason: result.stopReason, taint: result.taint };
   } finally {
     untrack();
   }
