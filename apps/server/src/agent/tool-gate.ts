@@ -13,7 +13,7 @@ import { expireApprovalForCall } from "./pending-cards";
 import { audit } from "../policy/audit-sink";
 import { recordDenial } from "../policy/denials";
 import { decide } from "../policy/engine";
-import type { ApprovalCard, CallAssessment, PolicyInput, RunContext, StopCause } from "../policy/types";
+import type { ApprovalCard, CallAssessment, PolicyInput, RunContext, RunStop } from "../policy/types";
 import { entry } from "./card-text";
 
 export interface GateDeps {
@@ -41,7 +41,7 @@ export type GateResult =
     /** The owner was asked (the loop marks the session as having waited on a card). */
     awaiting: boolean;
     /** The whole run ends, not just this call. */
-    stop?: { cause: StopCause; message: string };
+    stop?: RunStop;
   };
 
 const blocked = (code: string, error: string, preview: string, awaiting = false): GateResult =>
@@ -72,7 +72,7 @@ export async function gateToolCall(deps: GateDeps, run: RunContext, input: Polic
         code: `run_stopped_${decision.cause}`,
         preview: decision.cause === "pause" ? "paused" : decision.cause === "budget" ? "budget used up" : "stopped",
         awaiting: false,
-        stop: { cause: decision.cause, message: decision.message },
+        stop: { cause: decision.cause, message: decision.message, ...(decision.budget ? { budget: decision.budget } : {}) },
       };
     case "refuse": {
       // An invalid call keeps its own message as the stored code, as the tool's own refusal always did.

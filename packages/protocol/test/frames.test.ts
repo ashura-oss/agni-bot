@@ -356,4 +356,14 @@ describe("Sprint 2 frames (additive)", () => {
     expect(parseServerFrame({ type: "spend.status.ok", seq: 1, day: "2026-11-16", resetsAt: "2026-11-17T00:00:00.000Z", timeZone: "UTC", caps: { dayUsd: 2, perBotDayUsd: null, perJobUsd: 0.5 }, daySpentUsd: 0, bots: [], unpricedCalls: 0 }).ok).toBe(true);
     expect(parseServerFrame({ type: "approval.full.ok", seq: 1, requestID: "apr_1", text: "everything" }).ok).toBe(true);
   });
+
+  test("spend.continue needs a run key; spend.stopped and spend.continue.ok parse", () => {
+    expect(parseClientFrame({ type: "spend.continue", runKey: "agent:ea" }).ok).toBe(true);
+    expect(parseClientFrame({ type: "spend.continue" }).ok).toBe(false);
+    expect(parseClientFrame({ type: "spend.continue", runKey: "" }).ok).toBe(false);
+    expect(parseServerFrame({ type: "spend.stopped", seq: 1, runKey: "agent:ea", agentId: "ea", scope: "day", reason: "over_cap", spentUsd: 2, capUsd: 2, message: "stopped" }).ok).toBe(true);
+    expect(parseServerFrame({ type: "spend.stopped", seq: 1, runKey: "agent:ea", scope: "week", reason: "over_cap", spentUsd: 2, capUsd: 2, message: "stopped" }).ok).toBe(false);
+    expect(parseServerFrame({ type: "spend.continue.ok", seq: 1, runKey: "agent:ea", grantedUsd: 0.5 }).ok).toBe(true);
+    expect(parseServerFrame({ type: "spend.continue.ok", seq: 1, runKey: "agent:ea", grantedUsd: 0 }).ok).toBe(false);
+  });
 });

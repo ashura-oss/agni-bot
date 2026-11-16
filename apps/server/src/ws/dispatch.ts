@@ -104,6 +104,7 @@ import {
   handleApprovalFull,
   handlePolicyPause,
   handleSpendCapsSet,
+  handleSpendContinue,
   handleSpendStatus,
   pauseStateBody,
   pauseStateIsNonDefault,
@@ -245,6 +246,8 @@ export async function dispatch(deps: DispatchDeps, session: Session, raw: string
       return handleSpendStatus(policyDeps(deps, session));
     case "spend.caps.set":
       return handleSpendCapsSet(policyDeps(deps, session), frame);
+    case "spend.continue":
+      return handleSpendContinue(policyDeps(deps, session), frame);
     case "task.list":
       return handleTaskList(deps, session, frame);
     case "task.create":

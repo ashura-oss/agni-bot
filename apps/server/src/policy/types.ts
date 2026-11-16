@@ -180,6 +180,27 @@ export interface RuleRef { id: string; agentID: string; toolName: string; create
 
 export type StopCause = "budget" | "pause" | "refused";
 
+/**
+ * Which cap stopped a run and how far it got, for the owner's notice and its "Raise" and "Continue once"
+ * buttons. `runKey` names the stopped run for the owner frame `spend.continue`.
+ */
+export interface BudgetStopDetail {
+  scope: "day" | "bot" | "job";
+  /** `over_cap`: the cap was reached. `cost_unknown`: spend that cannot be priced is in the scope. `budget_unreadable`: spend could not be read. */
+  reason: "over_cap" | "cost_unknown" | "budget_unreadable";
+  spentUsd: number;
+  capUsd: number;
+  runKey?: string;
+}
+
+/** The whole run ends here, and why: what the loop publishes and what the owner is shown. */
+export interface RunStop {
+  cause: StopCause;
+  message: string;
+  /** Set for a budget stop. */
+  budget?: BudgetStopDetail;
+}
+
 export type Decision =
   /** Run it. `via` says what let it through: nothing needed asking, or a stored rule. */
   | { action: "run"; via: "free" | "rule"; reason: string; assessment: CallAssessment; ruleID?: string; rule?: RuleRef }
@@ -188,7 +209,7 @@ export type Decision =
   /** Ask the owner with a card; the call runs only on an allowing answer. */
   | { action: "ask"; reason: string; assessment: CallAssessment; card: ApprovalCard }
   /** End the whole run, not just this call. */
-  | { action: "stop"; cause: StopCause; message: string; reason: string };
+  | { action: "stop"; cause: StopCause; message: string; reason: string; budget?: BudgetStopDetail };
 
 // ---------------------------------------------------------------------------
 // Contracts implemented elsewhere
@@ -197,7 +218,7 @@ export type Decision =
 /** S2-3: is there budget left for the next model call and tool call? */
 export type BudgetVerdict =
   | { ok: true }
-  | { ok: false; scope: "day" | "bot" | "job"; spentUSD: number; capUSD: number; message: string };
+  | { ok: false; scope: "day" | "bot" | "job"; spentUSD: number; capUSD: number; message: string; detail?: BudgetStopDetail };
 
 /** S2-2: why a run may not continue because of the pause switch. */
 export interface PauseVerdict {

@@ -84,7 +84,7 @@ function judge(run: RunContext, input: PolicyInput, record: boolean): Decision {
 
   // 4. budget
   const budget = policyHooks.checkBudget(run);
-  if (!budget.ok) return { action: "stop", cause: "budget", message: budget.message, reason: `budget: ${budget.scope} cap` };
+  if (!budget.ok) return { action: "stop", cause: "budget", message: budget.message, reason: `budget: ${budget.scope} cap`, ...(budget.detail ? { budget: budget.detail } : {}) };
 
   // 5. tier and taint
   const tainted = isTainted(run);

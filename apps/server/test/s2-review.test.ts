@@ -352,7 +352,7 @@ describe("8. Continue once", () => {
       }
     };
     walk(root);
-    // The one allowed caller is the owner-frame handler S2-2 adds.
-    expect(offenders.filter((file) => file !== "ws/dispatch.ts")).toEqual([]);
+    // The one allowed caller is the owner-frame handler for `spend.continue`.
+    expect(offenders.filter((file) => file !== "ws/policy-frames.ts")).toEqual([]);
   });
 });

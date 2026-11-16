@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-16T13:44:10.094Z",
+  "generatedAt": "2026-11-16T18:27:03.585Z",
   "protocolVersion": 2,
   "client": [
     {
@@ -372,6 +372,10 @@
       "dayUsd": 2,
       "perBotDayUsd": 1,
       "perJobUsd": 0.5
+    },
+    {
+      "type": "spend.continue",
+      "runKey": "agent:ea"
     }
   ],
   "server": [
@@ -988,6 +992,23 @@
         }
       ],
       "unpricedCalls": 0
+    },
+    {
+      "type": "spend.stopped",
+      "seq": 103,
+      "runKey": "agent:ea",
+      "agentId": "ea",
+      "scope": "day",
+      "reason": "over_cap",
+      "spentUsd": 2,
+      "capUsd": 2,
+      "message": "Agni stopped: today's spending limit is used up.\nSpent $2.00 of $2.00 today. All bots are stopped until midnight.\nWork done so far is kept."
+    },
+    {
+      "type": "spend.continue.ok",
+      "seq": 104,
+      "runKey": "agent:ea",
+      "grantedUsd": 0.5
     },
     {
       "type": "secret.request",

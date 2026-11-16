@@ -139,6 +139,7 @@ const CLIENT_FRAMES: ClientFrame[] = [
   { type: "agent.enabled.set", agentID: "researcher", enabled: false },
   { type: "spend.status" },
   { type: "spend.caps.set", dayUsd: 2, perBotDayUsd: 1, perJobUsd: 0.5 },
+  { type: "spend.continue", runKey: "agent:ea" },
 ];
 
 /** A representative plugins snapshot: one connected agent row, one disconnected owner row. */
@@ -376,6 +377,18 @@ const SERVER_FRAMES: ServerFrame[] = [
     ],
     unpricedCalls: 0,
   },
+  {
+    type: "spend.stopped",
+    seq: 103,
+    runKey: "agent:ea",
+    agentId: "ea",
+    scope: "day",
+    reason: "over_cap",
+    spentUsd: 2,
+    capUsd: 2,
+    message: "Agni stopped: today's spending limit is used up.\nSpent $2.00 of $2.00 today. All bots are stopped until midnight.\nWork done so far is kept.",
+  },
+  { type: "spend.continue.ok", seq: 104, runKey: "agent:ea", grantedUsd: 0.5 },
   {
     type: "secret.request",
     seq: 82,

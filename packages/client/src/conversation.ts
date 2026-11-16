@@ -641,6 +641,8 @@ export class Conversation {
       case "approval.full.ok":
       case "policy.pause.ok":
       case "spend.status.ok":
+      case "spend.stopped":
+      case "spend.continue.ok":
         return [];
 
       case "approval.closed":

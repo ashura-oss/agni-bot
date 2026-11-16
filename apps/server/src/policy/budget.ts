@@ -66,6 +66,11 @@ export function configureBudget(db: Database | null): void {
   grants.clear();
 }
 
+/** Has the server pointed the check at its database? Before that (a tool, a test) there is nothing to cap. */
+export function isBudgetConfigured(): boolean {
+  return source !== null;
+}
+
 /** The ledger recorder reports each write here: a failure denies further calls until one works. */
 export function markLedgerWrite(ok: boolean): void {
   ledgerFault = !ok;

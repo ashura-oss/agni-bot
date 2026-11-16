@@ -12,9 +12,11 @@ import { createRunContext, isTainted, packTaint, readTaint, unknownTaint } from 
 import { ownerWordsOf, recordOwnerWords } from "../policy/owner-words";
 import { saveTaskTaint } from "../policy/carry";
 import { decide } from "../policy/engine";
+import { budgetRunKey } from "../policy/budget";
+import { budgetStopFromRefusal, budgetStopMessage, pauseStopMessage } from "../policy/budget-messages";
 import { policyHooks } from "../policy/hooks";
 import { policyFor, taintFrom } from "../policy/metadata";
-import type { Principal, RunContext, StopCause, TaintSource } from "../policy/types";
+import type { Principal, RunContext, RunStop, TaintSource } from "../policy/types";
 import type { ToolMeta } from "../policy/tool-meta";
 import { redact } from "../util/redact";
 import { groupTaint } from "./group";
@@ -22,7 +24,7 @@ import { ABORTED_MID_CALL, closeRequest, isClosureNote, toolErrorCode } from "./
 import { FormBroker } from "./form-broker";
 import type { Persona, ResolvedPersona } from "./personas";
 import type { ChatMessage, ToolCall } from "../models/client";
-import { Router, RouterBusyError, RouterError } from "../models/router";
+import { RouteRefusedError, Router, RouterBusyError, RouterError } from "../models/router";
 import { appendMessage, createTurn, finishTurn, recentMessages, titleThreadFromFirstMessage, touchThread } from "../stores/threads";
 import { newID, nowISO } from "../util/ids";
 import { buildTaskToolRegistry, deferredToolHints, deferredTools, registerLoadTools, taskToolSpecs } from "../tools/task-registry";
@@ -597,7 +599,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   let answerText = "";
   let stopReason: StopReason = "end";
   // The policy ended the run: the owner's switch, the spend caps, or too many tries at something refused.
-  let runStop: { cause: StopCause; message: string } | null = null;
+  let runStop: RunStop | null = null;
   let cancelReason: string | undefined;
   // Every step's usage is summed: each step re-sends the prompt, and the ledger must show what the turn cost.
   let usage: TurnUsage | undefined;
@@ -857,7 +859,13 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
       if (stepCount - step > DUPLICATE_WINDOW) recentCalls.delete(sig);
     }
   } catch (error) {
-    if (error instanceof GuardrailError) {
+    const refusal = error instanceof RouteRefusedError ? stopFromRefusal(error, runCtx, persona.name) : null;
+    if (refusal) {
+      // The router's own gate said no before any request went out (a spend cap, or the owner's switch). That is
+      // the owner's decision showing up late, not a failure: it is told like any other stop, below.
+      log.warn(`turn ${turnID} stopped by the model-call gate (${(error as RouteRefusedError).reason})`);
+      runStop = refusal;
+    } else if (error instanceof GuardrailError) {
       // A depth/chain ceiling is an honest stop, not a crash. The failure
       // travels in `turn.end`; the owner gets a plain sentence, the log the detail.
       stopReason = "error";
@@ -912,6 +920,14 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
     answerText = runStop.message;
     messages.push({ role: "assistant", content: answerText });
     publish(answerText);
+    // A spend stop also tells clients which run it was, so the owner can raise the limit or Continue once.
+    if (runStop.budget) {
+      const { scope, reason, spentUsd, capUsd } = runStop.budget;
+      run.emit({
+        type: "spend.stopped", runKey: runStop.budget.runKey ?? `agent:${persona.id}`, agentId: persona.id,
+        scope, reason, spentUsd, capUsd, message: runStop.message,
+      });
+    }
   }
   if (run.channelID && run.groupContext === undefined) compactChannelHistory(db, router, run.channelID, persona.id, peerInput).catch((error) => log.warn("channel compaction failed", error));
   // Cards this turn raised and nobody answered are dead now: expire them so a
@@ -1154,7 +1170,7 @@ interface ToolOutcome {
   content: string;
   awaiting: boolean;
   /** The policy ended the whole run on this call. */
-  stop?: { cause: StopCause; message: string };
+  stop?: RunStop;
 }
 
 async function executeTool(
@@ -1289,12 +1305,34 @@ function attachmentLabel(db: Database, messageID: string): string {
   return truncate(names.slice(0, 3).join(", ") + (names.length > 3 ? `, and ${names.length - 3} more` : ""), 100);
 }
 
+/**
+ * What the router's gate refusing a call means for the run: a spend stop or a pause, in the owner's words. Other
+ * refusals (a call with no bot named, a gate that failed) are bugs or breakage and stay ordinary errors.
+ */
+function stopFromRefusal(error: RouteRefusedError, run: RunContext, botName: string): RunStop | null {
+  const budget = budgetStopFromRefusal(error);
+  if (budget) {
+    const runKey = budgetRunKey({
+      agentID: run.bot,
+      ...(run.jobID ? { jobID: run.jobID } : {}),
+      ...(run.rootJob ? { rootJobID: run.rootJob } : {}),
+    }, run.services.db);
+    const detail = { ...budget, ...(runKey !== undefined ? { runKey } : {}) };
+    return { cause: "budget", message: budgetStopMessage(botName, detail), budget: detail };
+  }
+  if (error.reason === "paused") {
+    const paused = policyHooks.isRunPaused(run);
+    return { cause: "pause", message: paused?.message ?? pauseStopMessage(botName, { scope: "all" }) };
+  }
+  return null;
+}
+
 /** The owner's switch or a spend cap, checked before the next model call. */
-function haltedBeforeStep(run: RunContext): { cause: StopCause; message: string } | null {
+function haltedBeforeStep(run: RunContext): RunStop | null {
   const paused = policyHooks.isRunPaused(run);
   if (paused) return { cause: "pause", message: paused.message };
   const budget = policyHooks.checkBudget(run);
-  if (!budget.ok) return { cause: "budget", message: budget.message };
+  if (!budget.ok) return { cause: "budget", message: budget.message, ...(budget.detail ? { budget: budget.detail } : {}) };
   return null;
 }
 

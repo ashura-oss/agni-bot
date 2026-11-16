@@ -10,6 +10,7 @@ import { resolveJobAgent } from "../jobs/runner";
 import type { JobRow } from "../stores/jobs";
 import { log } from "../log";
 import { audit } from "../policy/audit-sink";
+import { grantContinueOnce } from "../policy/budget";
 import { listBotStates, readPauseState, setAgentEnabled, setAllPaused } from "../policy/pause";
 import { fullApprovalText } from "./approval-full";
 import { cancelTurnsForPause, runningTurnCountForAgent, type PauseAbortReason } from "./turn-registry";
@@ -186,6 +187,23 @@ export function handleSpendCapsSet(deps: PolicyFrameDeps, frame: Extract<ClientF
     return deps.error("bad_cap", error instanceof Error ? error.message : "Those limits cannot be used.");
   }
   deps.emit({ type: "spend.status.ok", ...spendProvider.status(deps.db) });
+}
+
+/**
+ * "Continue once": the owner lets a run that a spend cap stopped go on, for one more allowance. This is the
+ * only caller of `grantContinueOnce`; no tool, bot or job reaches it. The change goes on the record first, as a
+ * cap change does, and a log that is down stops it.
+ */
+export function handleSpendContinue(deps: PolicyFrameDeps, frame: Extract<ClientFrame, { type: "spend.continue" }>): void {
+  try {
+    audit({ kind: "spend.continue", actor: deps.actor, detail: { runKey: frame.runKey } });
+  } catch (error) {
+    log.error("spend continue refused: the audit log could not record it", error);
+    return deps.error("internal", "That change could not be written to the audit log, so it was not made.");
+  }
+  const grantedUsd = grantContinueOnce(frame.runKey, deps.db);
+  if (grantedUsd <= 0) return deps.error("not_found", "That run is not stopped for spending, so there is nothing to continue.");
+  deps.reply({ type: "spend.continue.ok", runKey: frame.runKey, grantedUsd });
 }
 
 // --- approval.full ---------------------------------------------------------------

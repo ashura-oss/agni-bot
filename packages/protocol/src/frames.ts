@@ -579,6 +579,14 @@ export const ClientFrameSchema = z.discriminatedUnion("type", [
     perBotDayUsd: z.number().positive().max(1_000_000).nullable().optional(),
     perJobUsd: z.number().positive().max(1_000_000).nullable().optional(),
   }),
+  /**
+   * Owner-only: let a run that a spend cap stopped go on, once. `runKey` is the one `spend.stopped` named. Adds
+   * one allowance (the per-task cap, or $0.50 when that is off) for that run and that cap only; the limit itself
+   * does not change. Answered by `spend.continue.ok`, or an error `not_found` when that run was not stopped (or
+   * the server restarted since). The run does not restart by itself: the next message, or the job's retry, goes
+   * through. Bots and tools cannot send this. Additive in v2.
+   */
+  z.object({ type: z.literal("spend.continue"), runKey: z.string().min(1).max(200) }),
   /** Owner-only: replace a routine's web domain allowlist (additive v2). Bots cannot send this. */
   z.object({ type: z.literal("routine.domains.set"), jobID: z.string().min(1), domains: z.array(z.string().max(253)).max(20) }),
   /** Delete a task unless it is currently running. */
@@ -989,6 +997,26 @@ export const ServerFrameSchema = z.discriminatedUnion("type", [
     bots: z.array(z.object({ agentID: z.string(), spentUsd: z.number().nonnegative(), capUsd: z.number().positive().nullable() })),
     unpricedCalls: z.number().int().nonnegative(),
   }),
+  /**
+   * A run was stopped because spending reached a cap (or could not be counted). `message` is the notice the owner
+   * sees in the chat (the same words, three lines); the rest lets a client draw the "Raise ... limit" and
+   * "Continue once" buttons. `scope` is the cap that stopped it: all bots today, one bot today, or this task.
+   * `reason` is `over_cap`, `cost_unknown` (spend that could not be priced is in the scope) or `budget_unreadable`.
+   * `runKey` goes back in `spend.continue`. Additive in v2.
+   */
+  z.object({
+    type: z.literal("spend.stopped"),
+    seq,
+    runKey: z.string(),
+    agentId: z.string().optional(),
+    scope: z.enum(["day", "bot", "job"]),
+    reason: z.enum(["over_cap", "cost_unknown", "budget_unreadable"]),
+    spentUsd: z.number().nonnegative(),
+    capUsd: z.number().nonnegative(),
+    message: z.string(),
+  }),
+  /** Answer to `spend.continue`: how many dollars the run may spend on top of its caps. Addressed to the requester. Additive in v2. */
+  z.object({ type: z.literal("spend.continue.ok"), seq, runKey: z.string(), grantedUsd: z.number().positive() }),
   z.object({ type: z.literal("task.list.ok"), seq, tasks: z.array(TaskInfoSchema), lists: z.array(TaskListInfoSchema).optional() }),
   z.object({ type: z.literal("task.create.ok"), seq, task: TaskInfoSchema }),
   z.object({ type: z.literal("task.list.create.ok"), seq, lists: z.array(TaskListInfoSchema) }),

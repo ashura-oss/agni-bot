@@ -2,7 +2,9 @@ import { releaseHeldMessages } from "../ws/dispatch";
 import { cancelTurnsForPause } from "../ws/turn-registry";
 import { bindPauseStore, isRunPaused, listBotStates } from "../policy/pause";
 import { log } from "../log";
+import { getSpendStatus, setSpendCaps } from "../stores/policy-settings";
 import { installAuditSink } from "../stores/audit";
+import { setSpendProvider } from "../ws/policy-frames";
 import type { StartupContext } from "./context";
 
 /** How often the daemon checks for a pause made from another process (`agni pause`). */
@@ -43,6 +45,8 @@ export function pauseWatcherTick(ctx: Pick<StartupContext, "db">): void {
 export async function startupS2Audit(ctx: StartupContext): Promise<void> {
   installAuditSink(ctx.db);
   bindPauseStore(ctx.db);
+  // The spend frames read the ledger and write the caps through the same stores the router gate checks.
+  setSpendProvider({ status: getSpendStatus, setCaps: setSpendCaps });
   stopPauseWatcher();
   watcher = setInterval(() => {
     try {

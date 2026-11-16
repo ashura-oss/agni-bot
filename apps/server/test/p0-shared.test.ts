@@ -13,7 +13,7 @@ import { configureBudget } from "../src/policy/budget";
 import { recordModelUsage, setUsageRecorder, type ModelUsageEvent } from "../src/models/usage-hook";
 import { audit, setAuditSink, type AuditEvent, type AuditSink } from "../src/policy/audit-sink";
 import type { ToolMeta } from "../src/policy/tool-meta";
-import { startupS2 } from "../src/startup/s2";
+import { resetS2Startup, startupS2 } from "../src/startup/s2";
 import { startupS2Audit, stopPauseWatcher } from "../src/startup/s2-audit";
 import { unbindPauseStore } from "../src/policy/pause";
 import { startupS2Ledger } from "../src/startup/s2-ledger";
@@ -24,11 +24,13 @@ import { registerSecret, redact } from "../src/util/redact";
 
 const noopSink: AuditSink = { record() {} };
 afterEach(() => {
+  // The real startup hooks install a watcher, a gate, a recorder and a spend provider: none may leak into other tests.
+  resetS2Startup();
   stopPauseWatcher();
   unbindPauseStore();
   setAuditSink(noopSink);
   setUsageRecorder(() => {});
-  setRouteGate(null); // startupS2Ledger installs the router gate; it must not leak into other tests
+  setRouteGate(null);
   configureBudget(null);
 });
 
