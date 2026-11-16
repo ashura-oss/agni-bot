@@ -6,7 +6,7 @@
 import type { Database } from "bun:sqlite";
 import type { AgentInfo, ClientFrame, ServerFrameBody } from "@agni/protocol";
 import { canonicalAgentID, mentionRoster, personaInfo } from "../agent/personas";
-import { jobAgentID } from "../jobs/runner";
+import { resolveJobAgent } from "../jobs/runner";
 import type { JobRow } from "../stores/jobs";
 import { log } from "../log";
 import { audit } from "../policy/audit-sink";
@@ -46,7 +46,8 @@ function scheduledJobCounts(db: Database): Map<string, number> {
         continue;
       }
     }
-    const agentID = jobAgentID(db, row);
+    const who = resolveJobAgent(db, row);
+    const agentID = who.ok ? who.agentID : null;
     if (agentID) counts.set(agentID, (counts.get(agentID) ?? 0) + 1);
   }
   return counts;
@@ -125,11 +126,13 @@ export function handlePolicyPause(deps: PolicyFrameDeps, frame: Extract<ClientFr
 }
 
 export function handleAgentEnabled(deps: PolicyFrameDeps, frame: Extract<ClientFrame, { type: "agent.enabled.set" }>): void {
-  if (!listBotStates(deps.db).some((bot) => bot.agentID === frame.agentID)) {
+  // `agni` and `ea` are one bot: everything below works on the canonical id.
+  const agentID = canonicalAgentID(frame.agentID);
+  if (!listBotStates(deps.db).some((bot) => bot.agentID === agentID)) {
     return deps.error("unknown_agent", `no agent ${frame.agentID}`);
   }
-  if (!guarded(deps, () => void setAgentEnabled(deps.db, frame.agentID, frame.enabled, { actor: deps.actor }))) return;
-  const stopped = frame.enabled ? 0 : stopTurns(deps, "agent_off", frame.agentID);
+  if (!guarded(deps, () => void setAgentEnabled(deps.db, agentID, frame.enabled, { actor: deps.actor }))) return;
+  const stopped = frame.enabled ? 0 : stopTurns(deps, "agent_off", agentID);
   deps.emit(pauseStateBody(deps.db, stopped));
   deps.emit({ type: "agents.update", agents: withEnabledFlags(deps.db, personaInfo(deps.db)), mentions: withEnabledFlags(deps.db, mentionRoster(deps.db)) });
   if (frame.enabled) deps.releaseHeld();

@@ -130,8 +130,7 @@ export async function executeRoutine(deps: RoutineRunDeps, routine: Routine): Pr
     const visibleText = stripRoutineState(result.text);
     hideRoutineState(deps.db, result.turnID);
     run.summary = visibleText.slice(0, 200) || null;
-    const usage = deps.db.query<{ tokens: number }, [string]>("SELECT COALESCE(SUM(input_tokens + output_tokens), 0) AS tokens FROM usage_ledger WHERE turn_id = ?").get(result.turnID);
-    run.tokens = usage?.tokens ?? 0;
+    run.tokens = turnTokens(deps.db, result.turnID);
     const toolRows = deps.db.query("SELECT tool_name, args FROM tool_calls WHERE turn_id = ? ORDER BY created_at").all(result.turnID) as Array<{ tool_name: string; args: string }>;
     run.toolTrace = JSON.stringify(toolRows.map((row) => ({ name: row.tool_name, args: safeJson(row.args) })));
     if (signal.aborted || result.stopReason === "timeout" || result.stopReason === "cancelled") {
@@ -163,6 +162,17 @@ export async function executeRoutine(deps: RoutineRunDeps, routine: Routine): Pr
     maybePause(deps, routine, updateStreak(deps, routine, false));
   }
   return record(deps, run);
+}
+
+/**
+ * Tokens a turn used. The per-call ledger (S2-10) writes rows with no turn id, and the per-turn ledger row it
+ * replaces carried one, so both are read: the ledger rows that name the turn, and the totals the turn row
+ * itself keeps when it ends. The larger is the count, so neither shape reads as zero.
+ */
+function turnTokens(db: Database, turnID: string): number {
+  const ledger = db.query<{ tokens: number }, [string]>("SELECT COALESCE(SUM(input_tokens + output_tokens), 0) AS tokens FROM usage_ledger WHERE turn_id = ?").get(turnID)?.tokens ?? 0;
+  const own = db.query<{ tokens: number }, [string]>("SELECT COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) AS tokens FROM turns WHERE id = ?").get(turnID)?.tokens ?? 0;
+  return Math.max(ledger, own);
 }
 
 /**

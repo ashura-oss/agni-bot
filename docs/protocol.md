@@ -266,7 +266,7 @@ bubble. A client that ignores `reset` still shows the right answer: the sealing
 `unknown_provider`, `invalid_key`, `provider_exists`, `provider_storage`, `provider_auth`,
 `unknown_plugin`, `unknown_connection`, `plugin_not_configured`, `plugin_unavailable`,
 `plugin_connect_failed`, `unknown_background`, `unknown_channel`, `invalid_attachment`,
-`invalid_domains`, `resync_gap`, `not_found`, `not_running`, `agent_off`, `bad_cap`, `spend_unavailable`, `internal`.
+`invalid_domains`, `resync_gap`, `not_found`, `not_running`, `agent_off`, `paused`, `bad_cap`, `spend_unavailable`, `internal`.
 
 The four codes that answer one client frame (checked in `apps/server/src/ws/dispatch.ts`):
 
@@ -275,6 +275,7 @@ The four codes that answer one client frame (checked in `apps/server/src/ws/disp
 - `already_running`: `job.set` with `action: "run"` on a job that is running now. Nothing is queued.
 - `not_found`: `approval.rule.revoke` names an unknown or already revoked rule, or `approval.full` names a card that is gone.
 - `agent_off`: `msg.send` addresses a bot the owner turned off. The message is not stored; the text says to turn the bot on.
+- `paused`: `session.new` or `bind.direct` (which summarise with the model) while all bots are paused, or while the pause state cannot be read (which counts as paused).
 - `bad_cap`: `spend.caps.set` has a cap the server cannot use (a bot's daily cap above the daily cap). Nothing changed.
 - `spend_unavailable`: `spend.status` or `spend.caps.set` on a build with no spend ledger.
 
@@ -319,6 +320,8 @@ database, so `agni pause` / `agni resume` from a terminal works on a running ser
 A pause made with `agni pause` on the command line stops running turns within a second and starts
 held messages within a second of `agni resume`, but sends no per-turn `Stopped:` notice (the turn's
 `turn.end` still says `cancelled`).
+
+A pause check that cannot read its state fails closed: it counts as paused. `agni`, the old id of the main assistant, and `ea` are one bot, so turning one off turns off the other. Housekeeping that calls the model (tagging, summaries, embedding) also waits while everything is paused.
 
 Pause-all and per-bot off are independent: resuming all does not turn on a bot that was off.
 A client learns the state from `policy.pause.ok` after `hello` and whenever it changes;

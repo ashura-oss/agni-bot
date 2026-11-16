@@ -75,13 +75,17 @@ describe("pause-all", () => {
     expect(getJob(db, job.id)!.result).toBe("skipped (paused)");
   });
 
-  test("housekeeping, reminders and the brief are not bots: they still run", async () => {
+  test("reminders and the brief start no bot and still run; housekeeping that calls the model waits, and runs after resume", async () => {
     const tag = enqueueJob(db, { kind: "tagger", payload: {}, runAt: PAST });
     const reminder = enqueueJob(db, { kind: "task.reminder", payload: {}, runAt: PAST });
     const brief = enqueueJob(db, { kind: "brief", payload: {}, runAt: PAST });
     setAllPaused(db, true, { actor: "owner" });
     await runner.tick();
-    expect(ran.sort()).toEqual([`brief:${brief.id}`, `tagger:${tag.id}`, `task.reminder:${reminder.id}`].sort());
+    expect(ran.sort()).toEqual([`brief:${brief.id}`, `task.reminder:${reminder.id}`].sort());
+    expect(getJob(db, tag.id)!.state).toBe("queued");
+    setAllPaused(db, false, { actor: "owner" });
+    await runner.tick();
+    expect(ran).toContain(`tagger:${tag.id}`);
   });
 
   test("nothing changes while not paused", async () => {

@@ -7,12 +7,18 @@
  * Reads come from a short-lived in-memory copy, so the check costs microseconds
  * and never a model call; a change made through this process shows at once.
  *
+ * A check that cannot read its state fails closed: a bound database that cannot be read means
+ * "paused" (reason "pause state unavailable"), never "carry on". Only a store that was left
+ * unbound on purpose (tests, CLI tools) says "not paused"; a real server binds it in
+ * `startup/s2-audit.ts` before the job runner or the socket start.
+ *
  * Pause-all and per-bot off are separate: resuming all does not turn on a bot
  * that was off. Turning something off never waits on the audit log (an
  * emergency stop must work); turning it back on records first and fails
  * closed.
  */
 import type { Database } from "bun:sqlite";
+import { canonicalAgentID } from "../agent/personas";
 import { audit } from "./audit-sink";
 import { log } from "../log";
 
@@ -22,6 +28,8 @@ export interface PauseVerdict {
   reason?: string;
   /** What stopped it: everything (pause-all) or this one bot (turned off). Absent when not paused. */
   scope?: "all" | "bot";
+  /** True when the state could not be read, so the answer is "paused" by default. */
+  unavailable?: true;
 }
 
 export interface PauseActor {
@@ -51,17 +59,28 @@ interface Snapshot {
 
 let bound: { db: Database; cacheMs: number } | null = null;
 let snapshot: Snapshot | null = null;
+/** The last read failed: everything is paused until a read works again. */
+let unreadable = false;
+
+export const PAUSE_STATE_UNAVAILABLE = "pause state unavailable";
+
+/** Whether a database is bound (a real server always has one). */
+export function isPauseStoreBound(): boolean {
+  return bound !== null;
+}
 
 /** Point the check at a database. Replaces any earlier binding and drops the cached copy. */
 export function bindPauseStore(db: Database, options: { cacheMs?: number } = {}): void {
   bound = { db, cacheMs: options.cacheMs ?? DEFAULT_CACHE_MS };
   snapshot = null;
+  unreadable = false;
 }
 
 /** Forget the database (tests; a server shutting down). With none bound nothing is paused. */
 export function unbindPauseStore(): void {
   bound = null;
   snapshot = null;
+  unreadable = false;
 }
 
 function cleanName(name: string): string {
@@ -70,23 +89,29 @@ function cleanName(name: string): string {
 }
 
 function load(db: Database): Snapshot {
-  const paused = db.query<{ paused: number }, []>("SELECT paused FROM pause_state WHERE id = 1").get()?.paused === 1;
+  const row = db.query<{ paused: number }, []>("SELECT paused FROM pause_state WHERE id = 1").get();
+  // The one row is always there (migration 59); a missing row is damage, not "not paused".
+  if (!row) throw new Error("pause_state has no row");
   const off = new Map<string, string>();
-  for (const row of db.query<{ id: string; name: string | null }, []>("SELECT id, COALESCE(display_name, name) AS name FROM agents WHERE disabled = 1").all()) {
-    off.set(row.id, cleanName(row.name ?? row.id) || row.id);
+  for (const bot of db.query<{ id: string; name: string | null }, []>("SELECT id, COALESCE(display_name, name) AS name FROM agents WHERE disabled = 1").all()) {
+    // A flag on an alias row (`agni`) is a flag on the bot (`ea`).
+    off.set(canonicalAgentID(bot.id), cleanName(bot.name ?? bot.id) || bot.id);
   }
-  return { at: Date.now(), paused, off };
+  return { at: Date.now(), paused: row.paused === 1, off };
 }
 
+/** The state, or null when none is bound on purpose. A read that fails is remembered as unreadable. */
 function current(): Snapshot | null {
   if (!bound) return null;
-  if (!snapshot || Date.now() - snapshot.at >= bound.cacheMs) {
+  if (unreadable || !snapshot || Date.now() - snapshot.at >= bound.cacheMs) {
     try {
       snapshot = load(bound.db);
+      unreadable = false;
     } catch (error) {
-      // A closed or locked database must not make every tool call throw. Keep the last known state.
-      log.warn("pause: could not read the pause state", error);
-      return snapshot;
+      // Fail closed: no stale answer, no "not paused". The next call tries again.
+      log.warn("pause: could not read the pause state; treating everything as paused", error);
+      snapshot = null;
+      unreadable = true;
     }
   }
   return snapshot;
@@ -95,11 +120,13 @@ function current(): Snapshot | null {
 /** May this bot's work go on? `agentID` null or unknown only checks pause-all. */
 export function isRunPaused(run: { agentID?: string | null }): PauseVerdict {
   const state = current();
-  if (!state) return { paused: false };
+  if (!state) {
+    return unreadable ? { paused: true, reason: PAUSE_STATE_UNAVAILABLE, scope: "all", unavailable: true } : { paused: false };
+  }
   if (state.paused) {
     return { paused: true, reason: "The owner paused all bots. Do not retry; nothing new starts until the owner resumes them.", scope: "all" };
   }
-  const name = run.agentID ? state.off.get(run.agentID) : undefined;
+  const name = run.agentID ? state.off.get(canonicalAgentID(run.agentID)) : undefined;
   if (name !== undefined) {
     return { paused: true, reason: `${name} is turned off by the owner. Do not retry. Tell the owner if this task needs ${name}.`, scope: "bot" };
   }
@@ -115,6 +142,8 @@ export function listBotStates(db: Database): BotState[] {
   return db
     .query<{ id: string; name: string | null; disabled: number }, []>("SELECT id, COALESCE(display_name, name) AS name, disabled FROM agents ORDER BY created_at, id")
     .all()
+    // An alias row (`agni`) is the same bot as its canonical one, not a second bot.
+    .filter((row) => canonicalAgentID(row.id) === row.id)
     .map((row) => ({ agentID: row.id, name: cleanName(row.name ?? row.id) || row.id, enabled: row.disabled === 0 }));
 }
 
@@ -144,12 +173,17 @@ export function setAllPaused(db: Database, paused: boolean, who: PauseActor): bo
 }
 
 /** Turn one bot off or on. False when there is no such bot or it already has that state. */
-export function setAgentEnabled(db: Database, agentID: string, enabled: boolean, who: PauseActor): boolean {
-  const row = db.query<{ disabled: number }, [string]>("SELECT disabled FROM agents WHERE id = ?").get(agentID);
-  if (!row || (row.disabled === 0) === enabled) return false;
+export function setAgentEnabled(db: Database, requestedID: string, enabled: boolean, who: PauseActor): boolean {
+  const agentID = canonicalAgentID(requestedID);
+  // The bot's own row and any alias row (`agni` for `ea`) move together.
+  const rows = db.query<{ id: string; disabled: number }, []>("SELECT id, disabled FROM agents").all().filter((row) => canonicalAgentID(row.id) === agentID);
+  if (!rows.some((row) => row.id === agentID)) return false;
+  const off = rows.some((row) => row.disabled === 1);
+  if (off !== enabled) return false;
   const event = { kind: "agent.enabled", actor: who.actor, detail: { agentID, enabled } };
   if (enabled) recordChange(false, event);
-  db.run("UPDATE agents SET disabled = ?, updated_at = ? WHERE id = ?", [enabled ? 0 : 1, new Date().toISOString(), agentID]);
+  const now = new Date().toISOString();
+  for (const row of rows) db.run("UPDATE agents SET disabled = ?, updated_at = ? WHERE id = ?", [enabled ? 0 : 1, now, row.id]);
   touched(db);
   if (!enabled) recordChange(true, event);
   return true;

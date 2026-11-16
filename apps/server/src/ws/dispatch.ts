@@ -1337,6 +1337,8 @@ async function handleBindDirect(deps: DispatchDeps, session: Session, frame: Ext
   if (!requireAuth(deps, session)) return;
   const persona = resolvePersona(deps.db, frame.agentID);
   if (!persona) return sendError(deps, session, "unknown_agent", `no agent ${frame.agentID}`);
+  // Binding may roll the block over, which summarises it with the model.
+  if (refuseIfStopped(deps, session, persona.id)) return;
   const conversation = ensureConversation(deps.db, persona.id);
   const result = await rolloverIfNeeded(rolloverDeps(deps), conversation);
   const thread = getThread(deps.db, result.threadID);
@@ -1402,6 +1404,8 @@ async function handleSessionNew(
   if (!requireAuth(deps, session)) return;
   const conversation = getConversation(deps.db, frame.conversationID);
   if (!conversation) return sendError(deps, session, "unknown_conversation", `no conversation ${frame.conversationID}`);
+  // Closing a block summarises it with the model, so it is work like any other.
+  if (refuseIfStopped(deps, session, conversation.agent_id)) return;
   const result = await rotateById(rolloverDeps(deps), conversation.id, "manual");
   // Stream state, not a reply: every client renders the same boundary.
   deps.emit({ type: "session.start", conversationID: result.conversationID, sessionID: result.threadID, reason: "manual" });
@@ -1982,6 +1986,22 @@ function requireAuth(deps: DispatchDeps, session: Session): boolean {
  * slot: they reuse the current seq, which every authed socket has already
  * received, so a client's lastSeq never skips a frame it has not seen.
  */
+/**
+ * For a request that would call the model for a bot without going through a chat message: say no when
+ * everything is paused (or the pause state cannot be read) or that bot is off. True when it refused.
+ */
+function refuseIfStopped(deps: DispatchDeps, session: Session, agentID: string): boolean {
+  const verdict = isRunPaused({ agentID });
+  if (!verdict.paused) return false;
+  if (verdict.scope === "bot") {
+    const name = resolvePersona(deps.db, agentID)?.name ?? "That bot";
+    sendError(deps, session, "agent_off", `${name} is off. Turn ${name} on first.`);
+  } else {
+    sendError(deps, session, "paused", "All bots are paused. Resume them first.");
+  }
+  return true;
+}
+
 /** What the policy frame handlers need from this connection. */
 function policyDeps(deps: DispatchDeps, session: Session): PolicyFrameDeps {
   return {

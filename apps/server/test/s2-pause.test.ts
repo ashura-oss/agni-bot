@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { openDatabase } from "../src/db";
 import {
   bindPauseStore,
+  isPauseStoreBound,
   isRunPaused,
   listBotStates,
   readPauseState,
@@ -158,5 +159,65 @@ describe("state and audit", () => {
     expect(isRunPaused({ agentID: "researcher" }).paused).toBe(true);
     expect(() => setAgentEnabled(db, "researcher", true, { actor: "owner" })).toThrow("audit store down");
     expect(isRunPaused({ agentID: "researcher" }).paused).toBe(true);
+  });
+});
+
+describe("fails closed when the state cannot be read", () => {
+  test("a bound database that cannot be read means paused, with the reason, for everyone", () => {
+    const dead = openDatabase(":memory:");
+    dead.close();
+    bindPauseStore(dead, { cacheMs: 0 });
+    for (const agentID of ["ea", "researcher", null]) {
+      expect(isRunPaused({ agentID })).toMatchObject({ paused: true, reason: "pause state unavailable", scope: "all", unavailable: true });
+    }
+  });
+
+  test("a read error after a good read does not fall back to the old answer: it is paused", () => {
+    const other = openDatabase(":memory:");
+    bindPauseStore(other, { cacheMs: 0 });
+    expect(isRunPaused({ agentID: "ea" }).paused).toBe(false);
+    other.close();
+    expect(isRunPaused({ agentID: "ea" })).toMatchObject({ paused: true, reason: "pause state unavailable" });
+  });
+
+  test("it recovers as soon as the state can be read again", () => {
+    const dead = openDatabase(":memory:");
+    dead.close();
+    bindPauseStore(dead, { cacheMs: 0 });
+    expect(isRunPaused({ agentID: "ea" }).paused).toBe(true);
+    bindPauseStore(db, { cacheMs: 0 });
+    expect(isRunPaused({ agentID: "ea" })).toEqual({ paused: false });
+  });
+
+  test("only a store that was deliberately left unbound says not paused", () => {
+    unbindPauseStore();
+    expect(isPauseStoreBound()).toBe(false);
+    expect(isRunPaused({ agentID: "ea" })).toEqual({ paused: false });
+    bindPauseStore(db);
+    expect(isPauseStoreBound()).toBe(true);
+  });
+});
+
+describe("a bot's id and its aliases are one bot", () => {
+  test("turned off by one alias, it stays off under the other", () => {
+    expect(setAgentEnabled(db, "agni", false, { actor: "owner" })).toBe(true);
+    expect(isRunPaused({ agentID: "ea" }).paused).toBe(true);
+    expect(isRunPaused({ agentID: "agni" }).paused).toBe(true);
+    expect(setAgentEnabled(db, "ea", true, { actor: "owner" })).toBe(true);
+    expect(isRunPaused({ agentID: "agni" }).paused).toBe(false);
+    expect(setAgentEnabled(db, "ea", false, { actor: "owner" })).toBe(true);
+    expect(isRunPaused({ agentID: "agni" }).paused).toBe(true);
+  });
+
+  test("a flag an older write left on the alias row still counts", () => {
+    db.run("UPDATE agents SET disabled = 1 WHERE id = 'agni'");
+    bindPauseStore(db, { cacheMs: 0 });
+    expect(isRunPaused({ agentID: "ea" }).paused).toBe(true);
+  });
+
+  test("the alias row is not listed as a bot of its own", () => {
+    const ids = listBotStates(db).map((bot) => bot.agentID);
+    expect(ids).toContain("ea");
+    expect(ids).not.toContain("agni");
   });
 });

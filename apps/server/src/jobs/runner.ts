@@ -14,7 +14,7 @@
 import type { Database } from "bun:sqlite";
 import type { ServerFrameBody } from "@agni/protocol";
 import { log } from "../log";
-import { canonicalAgentID, defaultPersona } from "../agent/personas";
+import { defaultPersona, resolvePersona } from "../agent/personas";
 import { isRunPaused } from "../policy/pause";
 import { claimDueJob, finishJob, parseJobPayload, requeueJob, type JobRow } from "../stores/jobs";
 import { getRoutine } from "../stores/routines";
@@ -45,16 +45,57 @@ export interface JobRegisterOptions {
 const MAX_RETRY_DELAY_MS = 3_600_000;
 
 /**
- * Kinds that start a bot's work. Only these stop for pause-all or a bot being off (S2-13); housekeeping
- * (tagging, backups, embedding), task reminders and the morning brief start no bot and go on.
+ * Kinds that start a bot's work. They stop for pause-all and for their own bot being off (S2-13). Task
+ * reminders, backups and the morning brief start no bot and go on.
  */
 const BOT_KINDS: ReadonlySet<string> = new Set(["turn", "routine"]);
+
+/**
+ * Housekeeping that calls the model. It belongs to no one bot, so only pause-all (or a pause state that cannot
+ * be read) holds it: it stays queued and runs after resume.
+ */
+const INTERNAL_MODEL_KINDS: readonly string[] = ["tagger", "memory.embed", "memory.consolidate", "summary.rollup", "rollover.summarize", "harness.review"];
+
+/** How long a job waits when the pause state cannot be read, before it is looked at again. */
+const UNREADABLE_RETRY_MS = 15_000;
+
+/** The bot a job will run as, or why there is none. */
+export type JobAgent = { ok: true; agentID: string | null } | { ok: false; reason: string };
+
+/**
+ * The one place that decides which bot a job runs as. The pause gate asks it, and the handler is given its
+ * answer (`JobContext.agentID`), so what is checked is what runs. A bot job whose bot cannot be resolved
+ * (a name nobody has, a routine that is gone) does not run, rather than running as the default bot.
+ * Housekeeping and reminders have no bot (`agentID: null`).
+ */
+export function resolveJobAgent(db: Database, job: JobRow): JobAgent {
+  if (!BOT_KINDS.has(job.kind)) return { ok: true, agentID: null };
+  let payload: { agentID?: unknown; routineID?: unknown };
+  try {
+    payload = parseJobPayload(job);
+  } catch {
+    return { ok: false, reason: "its payload cannot be read" };
+  }
+  const byID = (id: string): JobAgent => {
+    const persona = resolvePersona(db, id);
+    return persona ? { ok: true, agentID: persona.id } : { ok: false, reason: `there is no bot "${id.slice(0, 64)}"` };
+  };
+  if (job.kind === "routine") {
+    if (typeof payload.routineID !== "string" || !payload.routineID) return { ok: false, reason: "it names no routine" };
+    const routine = getRoutine(db, payload.routineID);
+    return routine ? byID(routine.agentID) : { ok: false, reason: `there is no routine "${payload.routineID.slice(0, 64)}"` };
+  }
+  if (payload.agentID === undefined || payload.agentID === null || payload.agentID === "") return byID(defaultPersona().id);
+  return typeof payload.agentID === "string" ? byID(payload.agentID.trim()) : { ok: false, reason: "its bot is not a name" };
+}
 
 /** Kinds whose jobs are independent of each other; all others run one at a time. */
 export const PARALLEL_KINDS: ReadonlySet<string> = new Set(["turn", "routine", "task.reminder"]);
 
 export interface JobContext {
   emit: (frame: ServerFrameBody) => void;
+  /** The bot this job runs as, resolved once by `resolveJobAgent` and checked against the pause switch. Null for jobs with no bot. */
+  agentID: string | null;
 }
 
 export interface JobRunnerOptions {
@@ -146,14 +187,17 @@ export class JobRunner {
   private async work(): Promise<number> {
     let ran = 0;
     while (ran < this.maxPerTick) {
-      const job = claimDueJob(this.db, undefined, [...this.runningSingletons]);
+      // While everything is paused (or the state cannot be read) housekeeping that calls the model waits too.
+      const hold = isRunPaused({ agentID: null }).paused ? INTERNAL_MODEL_KINDS : [];
+      const job = claimDueJob(this.db, undefined, [...this.runningSingletons, ...hold]);
       if (!job) break;
       ran += 1;
-      if (this.skipIfPaused(job)) continue;
+      const gate = this.gate(job);
+      if (!gate.run) continue;
       const singleton = !PARALLEL_KINDS.has(job.kind);
       if (singleton) this.runningSingletons.add(job.kind);
       try {
-        await this.execute(job);
+        await this.execute(job, gate.agentID);
       } finally {
         if (singleton) this.runningSingletons.delete(job.kind);
       }
@@ -162,26 +206,37 @@ export class JobRunner {
   }
 
   /**
-   * S2-13: a claimed job of a paused or switched-off bot is not run. It is recorded as skipped and not run
-   * late on resume: a recurring job waits for its next slot, a one-shot is done. A delegation that is
-   * skipped is marked failed, so the bot waiting on it is told instead of waiting for ever.
+   * S2-13: decide, once, whether a claimed job runs and as which bot. A bot job whose bot cannot be resolved is
+   * not run and says why. A job of a paused or switched-off bot is not run: it is recorded as skipped and not
+   * run late on resume (a recurring job waits for its next slot, a one-shot is done). A pause state that cannot
+   * be read puts the job back a little later, never runs it. A delegation that does not run is marked failed, so
+   * the bot waiting on it is told instead of waiting for ever.
    */
-  private skipIfPaused(job: JobRow): boolean {
-    if (!BOT_KINDS.has(job.kind)) return false;
-    let verdict;
-    try {
-      verdict = isRunPaused({ agentID: jobAgentID(this.db, job) });
-    } catch (error) {
-      log.warn(`job ${job.id}: could not read the pause state, running it`, error);
-      return false;
+  private gate(job: JobRow): { run: true; agentID: string | null } | { run: false } {
+    const who = resolveJobAgent(this.db, job);
+    if (!who.ok) {
+      this.close(job, `not run: ${who.reason}`, "Not run: the bot for this task does not exist.", "failed");
+      return { run: false };
     }
-    if (!verdict.paused) return false;
-    const result = verdict.scope === "bot" ? "skipped (bot off)" : "skipped (paused)";
+    if (!BOT_KINDS.has(job.kind)) return { run: true, agentID: who.agentID };
+    const verdict = isRunPaused({ agentID: who.agentID });
+    if (!verdict.paused) return { run: true, agentID: who.agentID };
+    if (verdict.unavailable) {
+      requeueJob(this.db, job.id, new Date(Date.now() + UNREADABLE_RETRY_MS).toISOString());
+      this.db.run("UPDATE jobs SET attempts = 0, result = ? WHERE id = ?", ["waiting: pause state unavailable", job.id]);
+      log.warn(`job ${job.id} (${job.kind}) put back: the pause state cannot be read`);
+      return { run: false };
+    }
+    const off = verdict.scope === "bot";
+    this.close(job, off ? "skipped (bot off)" : "skipped (paused)", off ? "Not run: the owner turned this bot off." : "Not run: the owner paused all bots.", "done");
+    return { run: false };
+  }
+
+  /** End a claimed job that will not run: a recurring one waits for its next slot, a one-shot ends as `state`. */
+  private close(job: JobRow, result: string, delegationNote: string, state: "done" | "failed"): void {
     try {
       const delegationID = parseJobPayload<{ delegationTaskID?: string }>(job).delegationTaskID;
-      if (delegationID) {
-        setDelegationState(this.db, delegationID, "failed", verdict.scope === "bot" ? "Not run: the owner turned this bot off." : "Not run: the owner paused all bots.");
-      }
+      if (delegationID) setDelegationState(this.db, delegationID, "failed", delegationNote);
     } catch {
       // An unreadable payload has no delegation to fail.
     }
@@ -195,13 +250,12 @@ export class JobRunner {
       requeueJob(this.db, job.id, next);
       this.db.run("UPDATE jobs SET attempts = 0, result = ? WHERE id = ?", [result, job.id]);
     } else {
-      finishJob(this.db, job.id, "done", result);
+      finishJob(this.db, job.id, state, result);
     }
     log.info(`job ${job.id} (${job.kind}) ${result}${next ? `, next run ${next}` : ""}`);
-    return true;
   }
 
-  private async execute(job: JobRow): Promise<void> {
+  private async execute(job: JobRow, agentID: string | null): Promise<void> {
     const handler = this.handlers.get(job.kind);
     if (!handler) {
       finishJob(this.db, job.id, "failed", `no handler registered for kind "${job.kind}"`);
@@ -210,7 +264,7 @@ export class JobRunner {
     }
 
     try {
-      const outcome = (await handler(job, { emit: this.emit })) ?? {};
+      const outcome = (await handler(job, { emit: this.emit, agentID })) ?? {};
       if (outcome.nextRunAt) {
         requeueJob(this.db, job.id, outcome.nextRunAt);
         // A clean recurring run starts a fresh retry budget for its next failure.
@@ -262,20 +316,6 @@ export class JobRunner {
   private notify(title: string, body: string): void {
     this.emit({ type: "notify", title, body, sound: false });
   }
-}
-
-/** The bot a bot-kind job runs as: the turn's own agent (the main assistant when none is named) or its routine's. */
-export function jobAgentID(db: Database, job: JobRow): string | null {
-  let payload: { agentID?: unknown; routineID?: unknown };
-  try {
-    payload = parseJobPayload(job);
-  } catch {
-    return null;
-  }
-  if (job.kind === "routine") {
-    return typeof payload.routineID === "string" ? (getRoutine(db, payload.routineID)?.agentID ?? null) : null;
-  }
-  return typeof payload.agentID === "string" && payload.agentID ? canonicalAgentID(payload.agentID) : defaultPersona().id;
 }
 
 function truncate(text: string, max: number): string {

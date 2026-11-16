@@ -81,3 +81,25 @@ describe("routine msg.new", () => {
     expect(frames.filter((frame) => frame.type === "msg.new")).toEqual([]);
   });
 });
+
+describe("routine token count", () => {
+  async function tokensWith(options: { ledgerKeepsTurnID: boolean }): Promise<number> {
+    const value = routine({ id: "rtn_tok", jobID: "job_tok" });
+    const database = setup(value);
+    if (!options.ledgerKeepsTurnID) {
+      // The per-call ledger (S2-10) writes rows with no turn_id: model that by clearing it as each row lands.
+      database.run("CREATE TRIGGER no_turn_id AFTER INSERT ON usage_ledger BEGIN UPDATE usage_ledger SET turn_id = NULL WHERE id = NEW.id; END;");
+    }
+    const router = { route: async () => ({ text: withState("All good."), inputTokens: 30, outputTokens: 20, provider: "fake", model: "fake", latencyMs: 1 }) } as never;
+    const result = await executeRoutine({ db: database, router, settings, emit: () => undefined }, { ...value, threadID: createThread(database, "ea").id });
+    return result.tokens;
+  }
+
+  test("counts the turn's tokens when the ledger rows carry the turn id", async () => {
+    expect(await tokensWith({ ledgerKeepsTurnID: true })).toBe(50);
+  });
+
+  test("counts the same when the ledger rows carry no turn id", async () => {
+    expect(await tokensWith({ ledgerKeepsTurnID: false })).toBe(50);
+  });
+});
