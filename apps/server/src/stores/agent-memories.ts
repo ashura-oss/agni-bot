@@ -42,7 +42,17 @@ export interface AgentMemoryRow {
  * is stored as `valid_to`, so a temporary fact expires on its own).
  * The format matches `nowISO()`, so the comparison is a string compare.
  */
-export const LIVE_SQL = "(valid_to IS NULL OR valid_to > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))";
+const SQLITE_NOW = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
+export const LIVE_SQL = `(valid_to IS NULL OR valid_to > ${SQLITE_NOW})`;
+
+/**
+ * The value to store when closing a row, with one `?` for the intended close
+ * time. LIVE_SQL judges liveness by SQLite's clock, which on Windows lags
+ * JavaScript's by a millisecond or two; a row closed at JavaScript's "now"
+ * would still read as live for that moment. A close is never later than the
+ * clock that decides what is live.
+ */
+export const CLOSE_AT_SQL = `min(?, ${SQLITE_NOW})`;
 const LIVE_SQL_M = LIVE_SQL.replace(/valid_to/g, "m.valid_to");
 
 const MEMORY_COLUMNS =
@@ -177,7 +187,7 @@ export function putAgentMemory(db: Database, input: AgentMemoryInput): AgentMemo
       existing.valid_to === (input.validTo ?? null);
     // B11: a no-op rewrite leaves updated_at alone, or it reshuffles the pins.
     if (unchanged) return existing;
-    db.run("UPDATE agent_memories SET valid_to = ?, key_slug = ?, updated_at = ? WHERE id = ?", [
+    db.run(`UPDATE agent_memories SET valid_to = ${live ? CLOSE_AT_SQL : "?"}, key_slug = ?, updated_at = ? WHERE id = ?`, [
       live ? timestamp : existing.valid_to,
       `${existing.key_slug}~${existing.id}`,
       timestamp,

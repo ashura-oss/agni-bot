@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runBackup } from "../src/jobs/backup";
@@ -9,6 +9,7 @@ import { openDatabase } from "../src/db";
 import { createTask, getTask } from "../src/stores/tasks";
 import { JobRunner } from "../src/jobs/runner";
 import { registerTaskReminderJob, scheduleTaskReminder } from "../src/jobs/task-reminders";
+import { expectPrivate, withFailingAcl } from "./acl-helper";
 
 describe("db.backup", () => {
   test("copy is readable, mode 0600, keeps newest 7", () => {
@@ -21,10 +22,31 @@ describe("db.backup", () => {
     expect(files.length).toBe(7);
     expect(files[0]).toBe("agni-20260104.db");
     const f = join(dir, files[6]!);
-    expect(statSync(f).mode & 0o777).toBe(0o600);
-    expect(statSync(dir).mode & 0o777).toBe(0o700);
+    // POSIX mode bits, or on Windows an ACL that grants only the current user.
+    expectPrivate(f, 0o600);
+    expectPrivate(dir, 0o700);
     expect(new Database(f, { readonly: true }).query("SELECT x FROM t").get()).toEqual({ x: 42 });
     expect(runBackup(new Database(":memory:"), { dir })).toBeNull();
+  });
+
+  // Windows only: elsewhere the ACL step is a no-op, so there is nothing to fail.
+  test.skipIf(process.platform !== "win32")("still writes the backup when the directory ACL cannot be set", () => {
+    const root = mkdtempSync(join(tmpdir(), "agni-bk-acl-"));
+    const db = new Database(join(root, "app.sqlite"));
+    db.run("CREATE TABLE t(x)"); db.run("INSERT INTO t VALUES (7)");
+    const dir = join(root, "backups");
+    const warnings: string[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => { warnings.push(args.join(" ")); };
+    let file: string | null;
+    try {
+      file = withFailingAcl(() => runBackup(db, { dir }, new Date(Date.UTC(2026, 0, 1))));
+    } finally {
+      console.error = realError;
+    }
+    expect(file).toBe(join(dir, "agni-20260101.db"));
+    expect(new Database(file!, { readonly: true }).query("SELECT x FROM t").get()).toEqual({ x: 7 });
+    expect(warnings.some((w) => w.includes("WARN") && w.includes("backup"))).toBe(true);
   });
 });
 

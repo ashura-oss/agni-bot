@@ -3,14 +3,13 @@ import { createHash, createPublicKey, randomBytes, randomUUID, verify } from "no
 import { readFileSync } from "node:fs";
 import { chmod, mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { z } from "zod";
 import type { ChatGPTConnection } from "@agni/protocol";
 import { ProviderError } from "./client";
 import type { ProviderConfig } from "./providers";
 import { chatGPTPage } from "./chatgpt-page";
 import { log } from "../log";
+import { restrictToOwnerOnWindowsAsync } from "../util/windows-acl";
 
 /** The single switch: the router, login entry point and listing all honour it. */
 export function chatGPTEnabled(): boolean { return process.env.AGNI_CHATGPT === "1"; }
@@ -22,7 +21,6 @@ const RESOURCE = "https://api.openai.com/v1";
 const TOKEN_URL = `${AUTH}/api/accounts/oauth/token`;
 const SCOPE = "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct";
 const LOGIN_MS = 5 * 60_000;
-const runFile = promisify(execFile);
 const modelSchema = z.object({ id: z.string(), label: z.string(), vision: z.boolean().default(false) });
 const tokensSchema = z.object({
   accessToken: z.string(), refreshToken: z.string(), idToken: z.string(),
@@ -51,7 +49,7 @@ interface TokenResponse {
 }
 
 export class ChatGPTAuthError extends Error {
-  constructor(message: string) { super(message); this.name = "ChatGPTAuthError"; }
+  constructor(message: string, options?: ErrorOptions) { super(message, options); this.name = "ChatGPTAuthError"; }
 }
 
 export class ChatGPTAuth {
@@ -394,12 +392,8 @@ export class ChatGPTAuth {
       const directory = dirname(path);
       await mkdir(directory, { recursive: true, mode: 0o700 });
       await chmod(directory, 0o700);
-      if (process.platform === "win32") {
-        const { stdout } = await runFile("whoami", ["/user", "/fo", "csv", "/nh"], { windowsHide: true });
-        const sid = stdout.match(/S-1-\d+(?:-\d+)+/)?.[0];
-        if (!sid) throw new ChatGPTAuthError("Could not secure the ChatGPT credential directory.");
-        await runFile("icacls", [directory, "/inheritance:r", "/grant:r", `*${sid}:(OI)(CI)F`], { windowsHide: true });
-      }
+      try { await restrictToOwnerOnWindowsAsync(directory, true); }
+      catch (cause) { throw new ChatGPTAuthError("Could not secure the ChatGPT credential directory.", { cause }); }
       const temporary = `${path}.${randomUUID()}.tmp`;
       try { await writeFile(temporary, contents, { mode: 0o600, flag: "wx" }); await chmod(temporary, 0o600); await rename(temporary, path); }
       finally { await unlink(temporary).catch(() => {}); }
