@@ -55,30 +55,48 @@ const RECORD_LIMIT = 10;
 /** The argument that says what a call was about, in the order a person would name it. */
 const TARGET_KEYS = ["path", "command", "to", "recipients", "attendees", "url", "title", "name", "toAgentID", "query"] as const;
 
+/** Characters the record is built from, shown as escapes inside a target so a path cannot imitate its structure. */
+const STRUCTURE_CHARS = /[\[\];]/g;
+const neutralise = (text: string): string => text.replace(STRUCTURE_CHARS, (ch) => `\\u${ch.charCodeAt(0).toString(16).toUpperCase().padStart(4, "0")}`);
+
 function targetOf(args: unknown): string {
   if (typeof args !== "object" || args === null) return "";
   const record = args as Record<string, unknown>;
   for (const key of TARGET_KEYS) {
     const value = record[key];
     if (value === undefined || value === null || value === "") continue;
-    return entry(Array.isArray(value) ? value.map((item) => (typeof item === "string" ? item : JSON.stringify(item))).join(", ") : value, 80);
+    return neutralise(entry(Array.isArray(value) ? value.map((item) => (typeof item === "string" ? item : JSON.stringify(item))).join(", ") : value, 80));
   }
   return "";
 }
 
-interface RecordedCall { tool_name: string; args: string; result: string | null; ok: number; error: string | null; card: string | null }
-type Bucket = "done" | "failed" | "denied" | "notRun";
+interface RecordedCall {
+  tool_name: string; args: string; result: string | null; ok: number; error: string | null;
+  /** The call's approval card: how it stands (`pending`, `decided`, `expired`) and what the owner answered. */
+  card: string | null; decision: string | null; rule_id: string | null;
+}
+type Bucket = "done" | "unknown" | "failed" | "denied" | "notRun";
+
+/** Errors stored when the abort cut a call in the middle: the call may well have gone through. */
+const CUT_ERRORS: readonly string[] = ["tool timed out or was cancelled", "interrupted_before_result"];
 
 function bucketOf(row: RecordedCall): { bucket: Bucket; outcome: string } {
-  if (row.error === "approval_rejected") return { bucket: "denied", outcome: "denied" };
+  if (row.error !== null && CUT_ERRORS.includes(row.error)) return { bucket: "unknown", outcome: "outcome unknown" };
+  if (row.error === "approval_rejected") {
+    // Only the owner's own "reject" is a denial; a card still open when the turn was stopped never ran.
+    return row.decision === "reject"
+      ? { bucket: "denied", outcome: "denied" }
+      : { bucket: "notRun", outcome: "not run: stopped while waiting for approval" };
+  }
   if (row.error !== null && ["approval_expired", "tool_not_allowed", "domain_not_allowed", "tool_not_loaded", "cancelled"].includes(row.error)) {
     return { bucket: "notRun", outcome: "not run: refused or not approved" };
   }
   if (row.result === null) {
-    // No result was stored: a call still waiting on its card never ran; one without a card was running.
-    return row.card !== null
-      ? { bucket: "notRun", outcome: "not run: interrupted before it ran" }
-      : { bucket: "notRun", outcome: "was running when interrupted: outcome unknown, check before repeating" };
+    // No result was stored. A card that is still pending means the call never started. An approved call (or one
+    // with no card) was running, and nobody knows how far it got.
+    if (row.card === "pending") return { bucket: "notRun", outcome: "not run: interrupted before it ran" };
+    if (row.decision === "reject") return { bucket: "denied", outcome: "denied" };
+    return { bucket: "unknown", outcome: "outcome unknown" };
   }
   return row.ok === 1 && row.error === null ? { bucket: "done", outcome: "ok" } : { bucket: "failed", outcome: "failed" };
 }
@@ -91,12 +109,14 @@ function recordOf(db: Database, turnID: string): string {
   const rows = db
     .query<RecordedCall, [string]>(
       `SELECT tc.tool_name, tc.args, tc.result, tc.ok, tc.error,
-              (SELECT a.status FROM approvals a WHERE a.turn_id = tc.turn_id AND a.call_id = tc.call_id LIMIT 1) AS card
+              (SELECT a.status FROM approvals a WHERE a.turn_id = tc.turn_id AND a.call_id = tc.call_id LIMIT 1) AS card,
+              (SELECT a.decision FROM approvals a WHERE a.turn_id = tc.turn_id AND a.call_id = tc.call_id LIMIT 1) AS decision,
+              (SELECT a.rule_id FROM approvals a WHERE a.turn_id = tc.turn_id AND a.call_id = tc.call_id LIMIT 1) AS rule_id
        FROM tool_calls tc WHERE tc.turn_id = ? ORDER BY tc.created_at, tc.rowid`,
     )
     .all(turnID);
   if (rows.length === 0) return "[Record from the tool log: No tool call of that request had run.]";
-  const sections: Array<[Bucket, string]> = [["done", "Already done"], ["failed", "Failed"], ["denied", "Denied"], ["notRun", "Not done"]];
+  const sections: Array<[Bucket, string]> = [["done", "Already done"], ["unknown", "Outcome unknown, check the real state before repeating"], ["failed", "Failed"], ["denied", "Denied"], ["notRun", "Not done"]];
   const described = rows.map((row) => {
     const { bucket, outcome } = bucketOf(row);
     let args: unknown = {};
@@ -115,7 +135,7 @@ function recordOf(db: Database, turnID: string): string {
     parts.push(`${label}: ${take.map((call) => call.text).join("; ")}`);
   }
   const more = described.length - shown;
-  return `[Record from the tool log of that request (not from memory): ${parts.join(". ")}${more > 0 ? ` (and ${more} more)` : ""}. I will never say that anything listed as done did not happen, and I will not repeat it.]`;
+  return `[Record from the tool log of that request (not from memory): ${parts.join(". ")}${more > 0 ? ` (and ${more} more)` : ""}. I will never say that anything listed as done did not happen, I will not repeat it, and I check anything listed as unknown before I act on it.]`;
 }
 
 export function closeRequest(db: Database, params: { threadID: string; turnID?: string; reason: "stopped" | "interrupted" | "revoked" }): void {
