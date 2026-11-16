@@ -858,6 +858,12 @@ export const ServerFrameSchema = z.discriminatedUnion("type", [
     seq,
     conversationID: z.string(),
     messages: z.array(MessageInfoSchema),
+    /**
+     * The turn running in this conversation right now, when one is (additive):
+     * a client that reloads mid-turn can show Writing and Stop at once instead of
+     * waiting for the next frame of the turn.
+     */
+    runningTurn: z.object({ turnID: z.string(), threadID: z.string(), agentID: z.string() }).optional(),
   }),
   /** Answer to `thread.export`; addressed to the requester, not replayed. */
   z.object({

@@ -103,6 +103,12 @@ export function runningTurnThread(turnID: string): string | undefined {
   return running.get(turnID)?.threadID;
 }
 
+/** The first running turn that belongs to one of these threads, if any. */
+export function runningTurnIn(threadIDs: readonly string[]): { turnID: string; threadID: string } | undefined {
+  for (const [turnID, turn] of running) if (threadIDs.includes(turn.threadID)) return { turnID, threadID: turn.threadID };
+  return undefined;
+}
+
 /** How many turns are registered (tests assert entries are cleaned up). */
 export function runningTurnCount(): number {
   return running.size;
