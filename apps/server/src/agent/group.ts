@@ -12,9 +12,9 @@
  */
 import type { Database } from "bun:sqlite";
 import { resolveAgentMention } from "./mentions";
-import { resolvePersona } from "./personas";
-import { MISSING_AGENT_VISIBILITY, redactForCaller } from "./visibility";
-import { channelAgentIDs, type ChannelRow } from "../stores/channels";
+import { callerKey, isChannelParticipant, redactRowForCaller, rowAuthority } from "./channel-visibility";
+import { redactForCaller } from "./visibility";
+import { channelAgentIDs, getChannel, type ChannelRow } from "../stores/channels";
 import type { TaintSource } from "../policy/types";
 
 /** Recent group messages a responding bot sees. */
@@ -33,7 +33,9 @@ export function groupResponder(db: Database, channel: ChannelRow, text: string):
 /**
  * The room as `callerAgentID` may see it: the last few messages before the
  * current one, oldest first. The caller's own lines are already in its own
- * history, so only the owner's and the other bots' lines are listed.
+ * history, so only the owner's and the other bots' lines are listed. Each line
+ * goes through the bot that wrote it; a caller that is not in the room reads
+ * the owner's lines through the strictest bot in it.
  */
 export function groupHistory(db: Database, channelID: string, callerAgentID: string, beforeID?: string): string[] {
   const rows = db
@@ -47,15 +49,21 @@ export function groupHistory(db: Database, channelID: string, callerAgentID: str
     .filter((row) => row.id !== beforeID)
     .slice(0, GROUP_HISTORY_MESSAGES)
     .reverse();
+  const channel = getChannel(db, channelID);
+  const member = isChannelParticipant(db, channel, callerAgentID);
+  const caller = callerKey(callerAgentID);
   const lines: string[] = [];
   for (const row of rows) {
     if (row.from_type === "user") {
-      lines.push(`owner: ${clip(row.text)}`);
+      // The room's own owner line is for the room; anyone else reads it as the strictest bot in the room would let them.
+      const seen = member ? { text: row.text, redacted: false } : redactRowForCaller(db, channel, row, row.text, callerAgentID);
+      lines.push(seen.redacted || !seen.text ? "owner: (private)" : `owner: ${clip(seen.text)}`);
       continue;
     }
-    if (row.from_id === callerAgentID) continue;
-    const visibility = resolvePersona(db, row.from_id)?.visibility ?? MISSING_AGENT_VISIBILITY;
-    const seen = redactForCaller(row.text, row.from_id, callerAgentID, visibility);
+    const { owner, visibility } = rowAuthority(db, channel, row);
+    if (owner === caller) continue;
+    // Even inside the room, another bot's line is shown through that bot's visibility.
+    const seen = redactForCaller(row.text, owner, caller, visibility);
     const name = row.name?.trim() || row.from_id;
     lines.push(seen.redacted || !seen.text ? `${name}: (replied; private)` : `${name}: ${clip(seen.text)}`);
   }

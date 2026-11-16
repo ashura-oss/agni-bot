@@ -91,7 +91,8 @@ export interface HandoffDeps {
  * parent can report to the user instead of spinning.
  */
 export async function handoff(deps: HandoffDeps, request: HandoffRequest): Promise<HandoffResult> {
-  const persona = deps.persona ?? resolvePersona(deps.db, request.toAgentID) ?? defaultResolvedPersona(deps.db);
+  const named = deps.persona ?? resolvePersona(deps.db, request.toAgentID);
+  const persona = named ?? defaultResolvedPersona(deps.db);
   const child = enterDelegation(deps.guardrail, persona.id, request.context ?? null);
   // The delegated work belongs to the agent that was asked: its block lives in
   // that agent's conversation, so opening that agent's chat in the app shows
@@ -103,7 +104,8 @@ export async function handoff(deps: HandoffDeps, request: HandoffRequest): Promi
   // block that is active now.
   // Only when the caller says the chain began with the owner's own turn, and
   // never from a private bot: its chat stays in its own conversation.
-  const ownChat = request.includeOwnChat && persona.visibility !== "private" ? ownRecentChat(deps.db, conversation) : null;
+  // A target that could not be found runs as the default bot; it is not the bot that was asked for, so it reads no chat.
+  const ownChat = request.includeOwnChat && named && persona.visibility !== "private" ? ownRecentChat(deps.db, conversation) : null;
   const childThread = delegationSession(deps.db, conversation, `${parent} messaged ${persona.name}`);
   const childThreadID = childThread.id;
 

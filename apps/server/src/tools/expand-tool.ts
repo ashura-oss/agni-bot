@@ -11,7 +11,8 @@ import type { ToolRegistry } from "./registry";
 import { getAgentMemory, type AgentMemoryRow } from "../stores/agent-memories";
 import { canonicalAgentID, resolvePersona } from "../agent/personas";
 import { DEFAULT_VISIBILITY, MISSING_AGENT_VISIBILITY, redactForCaller, type RedactedText } from "../agent/visibility";
-import { channelAgentIDs, getChannel } from "../stores/channels";
+import { redactRowForCaller } from "../agent/channel-visibility";
+import { getChannel } from "../stores/channels";
 import { searchTranscripts } from "../stores/transcripts";
 
 /** The most messages one `expand` of a range returns. */
@@ -26,10 +27,11 @@ const MAX_EXPANDED_MESSAGES = 50;
 function redactMemory(db: Database, row: AgentMemoryRow, callerAgentID: string): RedactedText {
   const owner = row.agent_id ?? "";
   const visibility = owner ? resolvePersona(db, owner)?.visibility ?? MISSING_AGENT_VISIBILITY : DEFAULT_VISIBILITY;
-  if (row.visibility === "private" && (row.agent_id ?? "ea") !== canonicalAgentID(callerAgentID)) {
+  const caller = canonicalAgentID(callerAgentID);
+  if (row.visibility === "private" && canonicalAgentID(row.agent_id ?? "ea") !== caller) {
     return { text: null, redacted: true, mode: "private" };
   }
-  return redactForCaller(row.content, owner, callerAgentID, visibility);
+  return redactForCaller(row.content, owner ? canonicalAgentID(owner) : owner, caller, visibility);
 }
 
 export interface ExpandToolDeps {
@@ -102,16 +104,12 @@ export function registerExpandTool(registry: ToolRegistry, deps: ExpandToolDeps)
         )
         .all(anchor.channel_id, id, around * 60, id, around * 60, MAX_EXPANDED_MESSAGES);
       const channel = getChannel(deps.db, anchor.channel_id);
-      const channelOwner = channel?.agent_id ?? "";
-      const caller = canonicalAgentID(deps.currentAgentID);
-      // The caller reads its own channel, and a group it belongs to, in full; any other bot's channel goes through the visibility filter.
-      const isParticipant = channel !== null && channelAgentIDs(deps.db, channel).some((member) => canonicalAgentID(member) === caller);
-      const visibility = channelOwner ? resolvePersona(deps.db, channelOwner)?.visibility ?? MISSING_AGENT_VISIBILITY : DEFAULT_VISIBILITY;
       const cap = (text: string): string => text.slice(0, 2_000);
       const messages: Array<{ id: string; from: string; fromType: string; text: string; createdAt: string }> = [];
       let redacted = false;
+      // Row by row: a bot that belongs to the channel reads it in full; anyone else reads each line through the bot that wrote it.
       for (const row of rows) {
-        const view = isParticipant ? { text: cap(row.text), redacted: false } : redactForCaller(cap(row.text), channelOwner, caller, visibility);
+        const view = redactRowForCaller(deps.db, channel, row, cap(row.text), deps.currentAgentID);
         redacted ||= view.redacted;
         if (view.text !== null) messages.push({ id: row.id, from: row.from_id, fromType: row.from_type, text: view.text, createdAt: row.created_at });
       }

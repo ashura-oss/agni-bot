@@ -282,7 +282,8 @@ function taskView(task: TaskRow, deps: DelegateTaskToolDeps): Record<string, unk
   // Only the bot that delegated the task (and the one that did the work) reads its full result. Any other
   // bot that comes by a task ID gets the short summary the visibility rule allows, nothing more.
   const asker = canonicalAgentID(deps.currentAgentID);
-  const involved = !task.parent_agent_id || asker === canonicalAgentID(task.parent_agent_id) || (owner !== "" && asker === canonicalAgentID(owner));
+  // A task with no recorded delegator is open to nobody but the bot that did the work: unknown means most restrictive.
+  const involved = (Boolean(task.parent_agent_id) && asker === canonicalAgentID(task.parent_agent_id as string)) || (owner !== "" && asker === canonicalAgentID(owner));
   const shownVisibility: Visibility = involved || visibility === "private" ? visibility : "summary";
   const redacted = involved
     ? redactStoredForCaller(artifact?.content ?? task.result, owner, deps.currentAgentID, shownVisibility, RESULT_MAX_CHARS, true)
