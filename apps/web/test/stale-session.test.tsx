@@ -97,6 +97,20 @@ describe("a stale session (resync_gap)", () => {
     expect(document.title).toBe("Scout");
   });
 
+  it("says it is waiting for the daemon, not just loading, while the connection is not ready", () => {
+    const { model } = openAt("/agent/scout");
+    (model as unknown as { connectionState: unknown; publish: () => void }).connectionState = { kind: "connecting" };
+    act(() => (model as unknown as { publish: () => void }).publish());
+    show(model);
+    expect(screen.getByRole("status", { name: /loading/i })).toHaveTextContent("Waiting for the daemon…");
+    // Connected, the roster is what it waits for.
+    act(() => {
+      (model as unknown as { connectionState: unknown }).connectionState = { kind: "ready", lastSeq: 0 };
+      (model as unknown as { publish: () => void }).publish();
+    });
+    expect(screen.getByRole("status", { name: /loading/i })).toHaveTextContent("Loading…");
+  });
+
   it("calls an unknown bot not found once the roster is known, with no default thread", () => {
     const { model } = openAt("/agent/nobody");
     show(model);

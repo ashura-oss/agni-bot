@@ -4,11 +4,13 @@
  * instead would put a message in the wrong chat.
  */
 import { Menu } from "lucide-react";
-import { useAppModel } from "../state/use-app-model";
+import { useAppModel, useAppSnapshot } from "../state/use-app-model";
 import { ConnectionBanner } from "./ConnectionBanner";
 
 export function RouteLoadingView({ onToggleSidebar }: { onToggleSidebar?: () => void }) {
   const model = useAppModel();
+  // Not connected yet, the roster cannot come: say what is being waited for.
+  const connected = useAppSnapshot().connectionState.kind === "ready";
   return (
     <main className="chat-main route-state" aria-busy="true">
       <header className="route-state-bar">
@@ -23,7 +25,7 @@ export function RouteLoadingView({ onToggleSidebar }: { onToggleSidebar?: () => 
       </header>
       <ConnectionBanner />
       <div className="route-state-body">
-        <p role="status" aria-label="Loading" className="route-state-loading">Loading…</p>
+        <p role="status" aria-label="Loading" className="route-state-loading">{connected ? "Loading…" : "Waiting for the daemon…"}</p>
       </div>
     </main>
   );

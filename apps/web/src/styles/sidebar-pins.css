@@ -1,0 +1,52 @@
+/* The way back from a pin: the star in the corner of a pinned bot's tile is a button.
+ * It sits beside the tile (a button cannot hold a button) and is always drawn, so a pin
+ * made by accident on a touch screen can be undone there, and by keyboard.
+ */
+.sidebar-tile-cell {
+  position: relative;
+  min-width: 0;
+}
+
+/* Room above the first row, so the unpin button's touch area is not clipped by the scrolling list. */
+.sidebar-grid {
+  padding-top: 8px;
+}
+
+.sidebar-tile-cell > .sidebar-tile {
+  height: 100%;
+}
+
+.sidebar-tile-unpin {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--hairline);
+  border-radius: 50%;
+  background: var(--surface-raised);
+  color: var(--ink-secondary);
+  transition: border-color var(--motion-snappy);
+}
+
+.sidebar-tile-unpin svg {
+  fill: var(--amber);
+  stroke: currentColor;
+}
+
+.sidebar-tile-unpin:hover {
+  border-color: var(--ink-secondary);
+}
+
+@media (max-width: 720px) {
+  /* 22px drawn, 44px to touch: the hit area is painted past the edge (an inset is from the padding
+   * box, inside the 1px border). */
+  .sidebar-tile-unpin::after {
+    content: "";
+    position: absolute;
+    inset: -12px;
+  }
+}

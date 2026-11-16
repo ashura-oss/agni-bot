@@ -74,6 +74,7 @@ export function SidebarView({ onCollapse, collapsed = false }: { onCollapse?: ()
         type="button"
         key={agent.id}
         className={`sidebar-row${selected ? " selected" : ""}`}
+        data-agent-id={agent.id}
         onClick={() => model.selectAgent(agent)}
         aria-label={`Open ${agent.name} chat`}
         aria-current={selected ? "true" : undefined}
@@ -197,23 +198,41 @@ export function SidebarView({ onCollapse, collapsed = false }: { onCollapse?: ()
             {favourites.map((agent) => {
               const selected = onConversation && snapshot.conversation.agentID === agent.id;
               return (
-                <button
-                  type="button"
-                  key={agent.id}
-                  className={`sidebar-tile${selected ? " selected" : ""}`}
-                  onClick={() => model.selectAgent(agent)}
-                  aria-label={`Open ${agent.name} chat`}
-                  aria-current={selected ? "true" : undefined}
-                >
-                  <span className="sidebar-tile-mark">
-                    <SidebarAgentBadge agent={agent} size={44} />
-                    <span className="sidebar-tile-star" aria-label="Favourite">
-                      <Star size={10} />
+                <div className="sidebar-tile-cell" key={agent.id}>
+                  <button
+                    type="button"
+                    className={`sidebar-tile${selected ? " selected" : ""}`}
+                    onClick={() => model.selectAgent(agent)}
+                    aria-label={`Open ${agent.name} chat`}
+                    aria-current={selected ? "true" : undefined}
+                  >
+                    <span className="sidebar-tile-mark">
+                      <SidebarAgentBadge agent={agent} size={44} />
                     </span>
-                  </span>
-                  <span className="sidebar-tile-name">{agent.name}</span>
-                  {writtenRole(agent.role) ? <span className="sidebar-tile-tag">{writtenRole(agent.role)}</span> : null}
-                </button>
+                    <span className="sidebar-tile-name">{agent.name}</span>
+                    {writtenRole(agent.role) ? <span className="sidebar-tile-tag">{writtenRole(agent.role)}</span> : null}
+                  </button>
+                  {/* A sibling of the tile, not inside it: a button cannot hold a button, and this one
+                      must be reachable by keyboard and by finger. It is the way back from a pin. */}
+                  <button
+                    type="button"
+                    className="sidebar-tile-unpin"
+                    aria-label={`Unpin ${agent.name}`}
+                    title={`Unpin ${agent.name}`}
+                    onClick={() => {
+                      model.toggleFavorite(agent.id);
+                      // The tile is gone once unpinned; the bot is a roster row again. Keep a keyboard
+                      // user's place there instead of dropping focus on the page.
+                      requestAnimationFrame(() => {
+                        for (const rowButton of document.querySelectorAll<HTMLElement>(".sidebar-row[data-agent-id]")) {
+                          if (rowButton.dataset.agentId === agent.id) rowButton.focus();
+                        }
+                      });
+                    }}
+                  >
+                    <Star size={11} />
+                  </button>
+                </div>
               );
             })}
           </div>

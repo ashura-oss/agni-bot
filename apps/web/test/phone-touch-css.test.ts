@@ -84,7 +84,6 @@ describe("phone touch targets", () => {
     // Visual size stays: the 44px hit area is a pseudo-element drawn past the control edge (inset is from its padding box; the border adds the rest).
     [".switch::after", -10],
     [".accent-grid > button::after", -7],
-    [".custom-swatch::after", -7],
   ])("%s extends the hit area to 44px without growing the control", (selector, inset) => {
     const rule = declarations(phone, selector);
     expect(rule["content"]).toBe('""');
@@ -144,5 +143,66 @@ describe("the new-task dialog on a narrow screen", () => {
   it("stacks the fields in one column under 420px", () => {
     const narrow = mediaBlock(read("phone-touch.css"), "max-width: 420px");
     expect(declarations(narrow, ".task-composer-fields")["grid-template-columns"]).toBe("minmax(0, 1fr)");
+  });
+});
+
+const px = (value: string | undefined) => Number.parseFloat(value ?? "NaN");
+
+describe("hit areas that must not overlap a neighbour", () => {
+  it("keeps the task checkbox's 44px area clear of the title button: the row gap covers what pokes out", () => {
+    // The 17px box is a 44px button with a -13.5px margin, so 13.5px of it sits over the row gap.
+    // The gap has to be at least that, or the checkbox (painted above, being positioned) eats the title's left edge.
+    const overhang = (44 - 17) / 2;
+    expect(px(declarations(phone, ".dashboard-task")["gap"])).toBeGreaterThanOrEqual(overhang + 1);
+  });
+
+  it("gives a subtask row its own 44px, so neighbouring checkboxes do not overlap", () => {
+    // 44px of content plus the row's 1px bottom rule.
+    expect(declarations(phone, ".task-detail-child")["min-height"]).toBe("calc(var(--touch-target) + 1px)");
+  });
+
+  it("has no rule for a swatch class that nothing renders", () => {
+    expect(read("phone-touch.css")).not.toMatch(/\.custom-swatch(?!\w)/);
+  });
+});
+
+describe("the composer on a phone", () => {
+  it("draws the + hit area 44px past its 1px border (inset is from the padding box)", () => {
+    expect(declarations(phone, ".composer-row > .composer-plus::after")["inset"]).toBe("-5px");
+  });
+
+  it("makes the message field a 44px target", () => {
+    expect(declarations(phone, ".composer-input")["min-height"]).toMatch(TOUCH);
+  });
+});
+
+describe("the new-task dialog body", () => {
+  const dialog = () => read("task-dialog.css");
+
+  it("scrolls instead of squeezing its fields", () => {
+    expect(declarations(dialog(), ".task-composer > *")["flex-shrink"]).toBe("0");
+  });
+
+  it("keeps the notes field about three lines tall", () => {
+    expect(px(declarations(dialog(), ".task-composer .text-area")["min-height"])).toBeGreaterThanOrEqual(72);
+  });
+
+  it("loads after the rules it protects", () => {
+    const order = [...read("app.css").matchAll(/@import "\.\/([\w-]+\.css)"/g)].map((m) => m[1]);
+    expect(order.indexOf("task-dialog.css")).toBeGreaterThan(order.indexOf("phone-touch.css"));
+  });
+});
+
+describe("the unpin button on a pinned tile", () => {
+  const pins = strip(readFileSync(join(styles, "sidebar-pins.css"), "utf8"));
+  const phonePins = mediaBlock(pins, "max-width: 720px");
+
+  it("is 22px drawn with a 44px touch area (12px past the padding box, inside its 1px border)", () => {
+    expect(declarations(pins, ".sidebar-tile-unpin")["width"]).toBe("22px");
+    expect(declarations(phonePins, ".sidebar-tile-unpin::after")["inset"]).toBe("-12px");
+  });
+
+  it("leaves room above the first row so the scrolling list does not clip that area", () => {
+    expect(px(declarations(pins, ".sidebar-grid")["padding-top"])).toBeGreaterThanOrEqual(8);
   });
 });

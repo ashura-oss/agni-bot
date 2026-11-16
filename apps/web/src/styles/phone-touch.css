@@ -58,6 +58,18 @@
     background: #65b895;
   }
 
+  /* The checkbox's 44px area pokes 13.5px past its 17px box. The row gap has to cover that, or the
+   * checkbox (positioned, so painted on top) takes the left edge of the title button next to it. */
+  .dashboard-task {
+    gap: 15px;
+  }
+
+  /* Subtask rows have 44px of content (plus their 1px rule), so the checkboxes of two rows touch
+   * without overlapping. */
+  .task-detail-child {
+    min-height: calc(var(--touch-target) + 1px);
+  }
+
   .dashboard-task-title {
     display: flex;
     align-items: center;
@@ -190,16 +202,26 @@
     inset: -10px 0;
   }
 
-  .accent-grid > button,
-  .custom-swatch {
+  .accent-grid > button {
     position: relative;
   }
 
-  .accent-grid > button::after,
-  .custom-swatch::after {
+  .accent-grid > button::after {
     content: "";
     position: absolute;
     inset: -7px;
+  }
+
+  /* The composer. The + has a 1px border and an inset is measured from the padding box, so -5px
+   * (not -4px) is what makes 36px into a 44px target. The message field is a target of its own. */
+  .composer-row > .composer-plus::after {
+    inset: -5px;
+  }
+
+  .composer-input {
+    min-height: var(--touch-target);
+    padding-block: 11px;
+    box-sizing: border-box;
   }
 }
 

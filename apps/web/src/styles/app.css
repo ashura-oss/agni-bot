@@ -21,6 +21,8 @@
  *   phone-baseline.css - The 375px baseline for the shell and conversation (wins over the above).
  *   routes.css - Not-found and group pages.
  *   phone-touch.css - Phone touch targets (44px), 16px fields and the narrow new-task dialog.
+ *   sidebar-pins.css - The unpin button on a pinned bot's tile.
+ *   task-dialog.css - The new-task dialog keeps its fields' size and scrolls.
  */
 @import "./base.css";
 @import "./sidebar.css";
@@ -39,3 +41,5 @@
 @import "./phone-baseline.css";
 @import "./routes.css";
 @import "./phone-touch.css";
+@import "./sidebar-pins.css";
+@import "./task-dialog.css";
