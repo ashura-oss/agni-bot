@@ -1,18 +1,20 @@
+import { renameSync } from "node:fs";
 import { join } from "node:path";
 import { agniHome } from "../home";
 import { openDatabaseForCLI } from "../db";
 import { loadConfig } from "../config";
 import { setEnvFileValues } from "../secrets/env";
 import { runVaultExport, runVaultMigrations } from "../secrets/migrate";
-import { VaultError, unlockVault, vaultExists, vaultStatus } from "../secrets";
+import { VaultError, lockVault, unlockVault, vaultExists, vaultStatus } from "../secrets";
 import { vaultRefusalMessage } from "../startup/s3-vault";
 import type { CommandTable } from "./command-table";
 
 const USAGE = `usage:
   agni vault status                 where the vault is, which keystore holds its key, whether it opens
   agni vault list                   entry names (never values)
-  agni vault migrate                move plaintext credentials into the vault (backup first), then switch to vault mode
-  agni vault export --yes           ROLLBACK: write every secret back to the old plaintext files`;
+  agni vault migrate                move plaintext credentials into the vault, then switch to vault mode (no plaintext copy is kept)
+  agni vault export --yes           ROLLBACK: write every secret back to the old plaintext files and return to file mode
+                                    (from a script or a service: --yes --non-interactive)`;
 
 function fail(message: string): void {
   console.error(message);
@@ -67,7 +69,8 @@ async function migrate(): Promise<void> {
     for (const { name, count } of results) console.log(`${name}: ${count} moved`);
     // Only after every migrator finished: from now on credentials come from the vault.
     setEnvFileValues(join(home, "config.env"), { AGNI_SECRETS_MODE: "vault" });
-    console.log(`done. Backups of the old plaintext files are in ${join(home, "data", "vault-backups")}; delete them once you have checked Agni works.`);
+    console.log("done. config.env keeps only the non-secret settings; the credentials are in vault.bin, encrypted. No plaintext copy was kept.");
+    console.log("to undo it: agni vault export --yes");
     console.log("restart the daemon to apply: agni daemon restart");
   } catch (error) {
     fail(`migration stopped: ${error instanceof Error ? error.message : String(error)}\nThe old files were left in place. Run it again after fixing the cause.`);
@@ -76,11 +79,34 @@ async function migrate(): Promise<void> {
   }
 }
 
+/** True when a person can answer at this terminal. */
+const interactive = (): boolean => process.stdin.isTTY === true;
+
+/**
+ * A file-mode start opens any `vault.bin` it finds, which needs the keystore.
+ * Setting the file aside makes the rollback complete. Renamed, not deleted: it
+ * is still encrypted, and it is the only copy if the export missed something.
+ */
+function setVaultAside(path: string): string {
+  lockVault();
+  const kept = `${path}.exported-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  renameSync(path, kept);
+  return kept;
+}
+
 async function exportSecrets(args: string[]): Promise<void> {
   if (!args.includes("--yes")) {
     fail(
       "agni vault export writes every secret in the vault back to plaintext files (config.env and the other old stores).\n" +
         "That undoes the encryption. Run `agni vault export --yes` if you mean it.",
+    );
+    return;
+  }
+  // A script, a pipe or a service cannot read a warning, so it has to say so explicitly.
+  if (!interactive() && !args.includes("--non-interactive")) {
+    fail(
+      "agni vault export is not running at a terminal, so nobody can see what it is about to do (it writes every secret back to plaintext).\n" +
+        "Run it from a terminal, or add --non-interactive if a script really means it: agni vault export --yes --non-interactive",
     );
     return;
   }
@@ -96,7 +122,12 @@ async function exportSecrets(args: string[]): Promise<void> {
     for (const { name, count } of await runVaultExport(vault, { home, db })) console.log(`${name}: ${count} written`);
     setEnvFileValues(join(home, "config.env"), { AGNI_SECRETS_MODE: "file" });
     console.log("exported. Credentials are plaintext again and Agni is back in file mode; restart the daemon to apply.");
-    console.log("vault.bin was left in place; delete it yourself when you no longer want it.");
+    const path = vaultStatus().path;
+    try {
+      console.log(`the encrypted vault was renamed to ${setVaultAside(path)}; delete it (and its key in the credential store) when you no longer want it.`);
+    } catch (error) {
+      fail(`the secrets are exported, but ${path} could not be renamed (${error instanceof Error ? error.message : String(error)}). Rename or delete it yourself, or file-mode starts will still try to open it.`);
+    }
   } catch (error) {
     fail(`export stopped: ${error instanceof Error ? error.message : String(error)}`);
   } finally {

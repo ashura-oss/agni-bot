@@ -4,7 +4,7 @@
  * Also the config.env helpers that move secrets in and out of the vault.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadHomeEnv } from "../src/home";
@@ -16,7 +16,7 @@ import {
   plaintextSecretNames,
   setEnvFileValues,
 } from "../src/secrets/env";
-import { isSecretEnvName } from "../src/secrets/mode";
+import { isSecretEnvName } from "../src/secrets/classify";
 
 let roots: string[] = [];
 const fresh = (): string => {
@@ -32,25 +32,25 @@ afterEach(() => {
 });
 
 describe("which names are secrets", () => {
-  test("keys, tokens, secrets and passwords are; ids, public keys, limits and paths are not", () => {
-    for (const name of ["GROQ_API_KEY", "OPENROUTER_API_KEY", "GOOGLE_OAUTH_CLIENT_SECRET", "GMAIL_APP_PASSWORD", "AGNI_TOKEN", "AGNI_FIRECRAWL_API_KEY", "AGNI_VAPID_PRIVATE_KEY", "MY_SERVICE_PASSPHRASE"]) {
+  test("keys, tokens, secrets, passwords and anything unknown are; known settings, public keys and the vault's own settings are not", () => {
+    for (const name of ["GROQ_API_KEY", "OPENROUTER_API_KEY", "GOOGLE_OAUTH_CLIENT_SECRET", "GMAIL_APP_PASSWORD", "AGNI_TOKEN", "AGNI_FIRECRAWL_API_KEY", "AGNI_VAPID_PRIVATE_KEY", "MY_SERVICE_PASSPHRASE", "GOOGLE_OAUTH_CLIENT_ID", "SOME_UNHEARD_OF_SETTING"]) {
       expect(isSecretEnvName(name)).toBe(true);
     }
-    for (const name of ["AGNI_HOST", "AGNI_PORT", "GOOGLE_OAUTH_CLIENT_ID", "AGNI_MAX_OUTPUT_TOKENS", "AGNI_VAPID_PUBLIC_KEY", "AGNI_VAULT_PASSPHRASE_FILE", "AGNI_SECRETS_MODE", "AGNI_VISION_MODELS"]) {
+    for (const name of ["AGNI_HOST", "AGNI_PORT", "AGNI_MAX_OUTPUT_TOKENS", "AGNI_VAPID_PUBLIC_KEY", "AGNI_VAULT_PASSPHRASE_FILE", "AGNI_KEYSTORE", "AGNI_SECRETS_MODE", "AGNI_VISION_MODELS"]) {
       expect(isSecretEnvName(name)).toBe(false);
     }
   });
 });
 
 describe("loadHomeEnv", () => {
-  const configEnv = "AGNI_PORT=9999\nGROQ_API_KEY=gsk_plain\nGOOGLE_OAUTH_CLIENT_ID=id-1\nGMAIL_APP_PASSWORD=pw\n";
+  const configEnv = "AGNI_PORT=9999\nGROQ_API_KEY=gsk_plain\nAGNI_HOST=127.0.0.1\nGMAIL_APP_PASSWORD=pw\n";
 
   test("file mode (the default): secrets are loaded from config.env as before", () => {
     const home = fresh();
     writeFileSync(join(home, "config.env"), configEnv);
     const env: Record<string, string | undefined> = { AGNI_HOME: home };
     loadHomeEnv(env);
-    expect(env).toMatchObject({ AGNI_PORT: "9999", GROQ_API_KEY: "gsk_plain", GOOGLE_OAUTH_CLIENT_ID: "id-1", GMAIL_APP_PASSWORD: "pw" });
+    expect(env).toMatchObject({ AGNI_PORT: "9999", GROQ_API_KEY: "gsk_plain", AGNI_HOST: "127.0.0.1", GMAIL_APP_PASSWORD: "pw" });
   });
 
   test("vault mode set in the shell: only non-secret settings are loaded from config.env", () => {
@@ -59,7 +59,7 @@ describe("loadHomeEnv", () => {
     const env: Record<string, string | undefined> = { AGNI_HOME: home, AGNI_SECRETS_MODE: "vault" };
     loadHomeEnv(env);
     expect(env.AGNI_PORT).toBe("9999");
-    expect(env.GOOGLE_OAUTH_CLIENT_ID).toBe("id-1");
+    expect(env.AGNI_HOST).toBe("127.0.0.1");
     expect(env.GROQ_API_KEY).toBeUndefined();
     expect(env.GMAIL_APP_PASSWORD).toBeUndefined();
   });
@@ -104,15 +104,18 @@ describe("applyVaultEnv", () => {
 });
 
 describe("moving secrets between config.env and the vault", () => {
-  const original = "# keys\nAGNI_PORT=9999\nGROQ_API_KEY=gsk_canary_1\nGMAIL_APP_PASSWORD=\"has space\"\nGOOGLE_OAUTH_CLIENT_ID=id-1\n";
+  const original = "# keys\nAGNI_PORT=9999\nGROQ_API_KEY=gsk_canary_1\nGMAIL_APP_PASSWORD=\"has space\"\nAGNI_HOST=127.0.0.1\n";
 
-  test("import: secrets move into the vault, the file keeps everything else, a backup is made first", async () => {
+  /** Every file under `dir`, recursively. */
+  const allFiles = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((entry) => (entry.isDirectory() ? allFiles(join(dir, entry.name)) : [join(dir, entry.name)]));
+
+  test("import: secrets move into the vault and the file keeps everything else; no plaintext copy is left anywhere", async () => {
     const home = fresh();
     const vault = await unlockVault({ home, keystore: createMemoryKeyStore(), create: true });
     const file = join(home, "config.env");
     writeFileSync(file, original);
-    const backupDir = join(home, "backups", "b1");
-    const moved = importEnvFileSecrets(vault, file, backupDir);
+    const moved = importEnvFileSecrets(vault, file);
     expect(moved.sort()).toEqual(["GMAIL_APP_PASSWORD", "GROQ_API_KEY"]);
     expect(vault.get("env/GROQ_API_KEY")).toBe("gsk_canary_1");
     expect(vault.get("env/GMAIL_APP_PASSWORD")).toBe("has space");
@@ -121,8 +124,14 @@ describe("moving secrets between config.env and the vault", () => {
     expect(after).not.toContain("has space");
     expect(after).toContain("# keys");
     expect(after).toContain("AGNI_PORT=9999");
-    expect(after).toContain("GOOGLE_OAUTH_CLIENT_ID=id-1");
-    expect(readFileSync(join(backupDir, "config.env"), "utf8")).toBe(original);
+    expect(after).toContain("AGNI_HOST=127.0.0.1");
+    // V2: the old file is the backup until the vault holds every value; after that there is no second plaintext copy.
+    for (const path of allFiles(home)) {
+      const bytes = readFileSync(path).toString("latin1");
+      expect(bytes, path).not.toContain("gsk_canary_1");
+      expect(bytes, path).not.toContain("has space");
+    }
+    expect(allFiles(home).filter((path) => !path.endsWith("vault.bin") && !path.endsWith("config.env"))).toEqual([]);
   });
 
   test("import is idempotent: a second run moves nothing and changes nothing", async () => {
@@ -130,11 +139,10 @@ describe("moving secrets between config.env and the vault", () => {
     const vault = await unlockVault({ home, keystore: createMemoryKeyStore(), create: true });
     const file = join(home, "config.env");
     writeFileSync(file, original);
-    importEnvFileSecrets(vault, file, join(home, "b1"));
+    importEnvFileSecrets(vault, file);
     const once = readFileSync(file, "utf8");
-    expect(importEnvFileSecrets(vault, file, join(home, "b2"))).toEqual([]);
+    expect(importEnvFileSecrets(vault, file)).toEqual([]);
     expect(readFileSync(file, "utf8")).toBe(once);
-    expect(existsSync(join(home, "b2"))).toBe(false);
   });
 
   test("a failure leaves config.env exactly as it was", async () => {
@@ -148,7 +156,7 @@ describe("moving secrets between config.env and the vault", () => {
       if (++calls === 2) throw new VaultError("WRITE_FAILED", "disk full");
       realSet(name, value);
     };
-    expect(() => importEnvFileSecrets(vault, file, join(home, "b1"))).toThrow(/disk full/);
+    expect(() => importEnvFileSecrets(vault, file)).toThrow(/disk full/);
     expect(readFileSync(file, "utf8")).toBe(original);
   });
 
@@ -157,7 +165,7 @@ describe("moving secrets between config.env and the vault", () => {
     const vault = await unlockVault({ home, keystore: createMemoryKeyStore(), create: true });
     const file = join(home, "config.env");
     writeFileSync(file, original);
-    importEnvFileSecrets(vault, file, join(home, "b1"));
+    importEnvFileSecrets(vault, file);
     expect(exportEnvEntries(vault, file)).toBe(2);
     expect(parse(readFileSync(file, "utf8"))).toMatchObject({ GROQ_API_KEY: "gsk_canary_1", GMAIL_APP_PASSWORD: "has space", AGNI_PORT: "9999" });
     // Exporting again replaces the lines instead of repeating them.

@@ -6,6 +6,7 @@
  * covers the credentials in `config.env`.
  */
 import { join } from "node:path";
+import { secretClassifier } from "./classify";
 import { importEnvFileSecrets, exportEnvEntries } from "./env";
 import { listVaultMigrators, registerVaultMigrator } from "./state";
 import type { Vault, VaultMigrationContext } from "./types";
@@ -16,7 +17,11 @@ export interface MigrationResult {
 }
 
 /**
- * Where a migration run puts its plaintext backups: `AGNI_HOME/data/vault-backups/vault-<time>`.
+ * Where a migrator that must keep a copy of an old file puts it:
+ * `AGNI_HOME/data/vault-backups/vault-<time>`. The built-in `config-env` migrator
+ * keeps none (its source file is untouched until the vault holds every value). A
+ * copy of a plaintext store left under AGNI_HOME defeats the vault, so a migrator
+ * that writes one must remove it again once its values are verified in the vault.
  * Not `AGNI_HOME/backups`: `migrateHomeLayout` treats that old name as a layout to move into `data/`.
  */
 export function newBackupDir(home: string, now = new Date()): string {
@@ -49,6 +54,7 @@ export async function runVaultExport(vault: Vault, context: Omit<VaultMigrationC
 
 registerVaultMigrator({
   name: "config-env",
-  migrate: (vault, context) => importEnvFileSecrets(vault, join(context.home, "config.env"), context.backupDir).length,
+  // No backup file: config.env is left untouched until the vault holds every value, then rewritten atomically.
+  migrate: (vault, context) => importEnvFileSecrets(vault, join(context.home, "config.env"), secretClassifier({ home: context.home })).length,
   export: (vault, context) => exportEnvEntries(vault, join(context.home, "config.env")),
 });

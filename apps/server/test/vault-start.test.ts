@@ -3,7 +3,7 @@
  * `agni vault` commands. Throwaway home, in-memory keystore.
  */
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadHomeEnv, migrateHomeLayout } from "../src/home";
@@ -34,6 +34,10 @@ afterEach(() => {
   for (const dir of roots) rmSync(dir, { recursive: true, force: true });
   roots = [];
 });
+
+/** Every file under `dir`, recursively. */
+const filesUnder = (dir: string): string[] =>
+  readdirSync(dir).flatMap((name) => (statSync(join(dir, name)).isDirectory() ? filesUnder(join(dir, name)) : [join(dir, name)]));
 
 /** A keystore that fails the test if anything touches it. */
 const forbiddenKeystore = (): KeyStore => ({
@@ -152,14 +156,14 @@ describe("agni vault", () => {
     expect(config).not.toContain("gsk_cli_canary");
     expect(config).toContain("AGNI_PORT=9999");
     expect(config).toContain("AGNI_SECRETS_MODE=vault");
-    const backups = readdirSync(join(home, "data", "vault-backups"));
-    expect(backups.length).toBe(1);
-    expect(readFileSync(join(home, "data", "vault-backups", backups[0]!, "config.env"), "utf8")).toContain("gsk_cli_canary");
-    expect(readFileSync(join(home, "vault.bin")).toString("latin1")).not.toContain("gsk_cli_canary");
+    // V2: no plaintext copy of the old file is kept: the canary is in no file under the home, vault.bin included.
+    for (const file of filesUnder(home)) expect(readFileSync(file).toString("latin1"), file).not.toContain("gsk_cli_canary");
+    expect(existsSync(join(home, "data", "vault-backups"))).toBe(false);
+    expect(first.out).not.toContain("gsk_cli_canary");
+    expect(first.out).not.toMatch(/backup/i);
 
-    // The old-layout mover (`migrateHomeLayout`) must not take the backups away at the next start.
+    // The old-layout mover (`migrateHomeLayout`) has nothing of ours to move.
     expect(migrateHomeLayout({ AGNI_HOME: home }, home).movedFrom).toEqual([]);
-    expect(existsSync(join(home, "data", "vault-backups", backups[0]!, "config.env"))).toBe(true);
 
     const second = await run(home, "migrate");
     expect(second.out).toContain("config-env: 0 moved");
@@ -185,17 +189,70 @@ describe("agni vault", () => {
     expect(readFileSync(join(home, "config.env"), "utf8")).not.toContain("gsk_cli_canary");
   });
 
-  test("export --yes restores plaintext to the old file and returns to file mode", async () => {
+  /** Pretend stdin is (or is not) an interactive terminal for one call. */
+  async function withTerminal<T>(isTTY: boolean, fn: () => Promise<T>): Promise<T> {
+    const before = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
+    Object.defineProperty(process.stdin, "isTTY", { value: isTTY, configurable: true });
+    try {
+      return await fn();
+    } finally {
+      if (before) Object.defineProperty(process.stdin, "isTTY", before);
+      else delete (process.stdin as { isTTY?: boolean }).isTTY;
+    }
+  }
+
+  test("export --yes --non-interactive restores plaintext, returns to file mode and takes vault.bin out of the way", async () => {
     const home = fresh();
     writeFileSync(join(home, "config.env"), "AGNI_PORT=9999\nGROQ_API_KEY=gsk_cli_canary\n");
     await run(home, "migrate");
-    const exported = await run(home, "export", "--yes");
+    const exported = await withTerminal(false, () => run(home, "export", "--yes", "--non-interactive"));
     expect(exported.code).toBe(0);
     expect(exported.out).toContain("config-env: 1 written");
     const config = readFileSync(join(home, "config.env"), "utf8");
     expect(config).toContain("GROQ_API_KEY=gsk_cli_canary");
     expect(config).toContain("AGNI_SECRETS_MODE=file");
     expect(config).toContain("AGNI_PORT=9999");
+    // Rollback is complete: a file-mode start no longer depends on the keystore.
+    expect(existsSync(join(home, "vault.bin"))).toBe(false);
+    const kept = readdirSync(home).filter((name) => name.startsWith("vault.bin."));
+    expect(kept.length).toBe(1);
+    expect(exported.out).toContain(kept[0]!);
+    setKeyStoreOverride(forbiddenKeystore());
+    const env: Record<string, string | undefined> = {};
+    expect(await unlockVaultAtStart({ home, env })).toEqual({ mode: "file", unlocked: false, applied: [] });
+    // And a later migrate starts a new vault from the plaintext file.
+    setKeyStoreOverride(createMemoryKeyStore());
+    const again = await run(home, "migrate");
+    expect(again.code).toBe(0);
+    expect(again.out).toContain("config-env: 1 moved");
+    expect(existsSync(join(home, "vault.bin"))).toBe(true);
+  });
+
+  test("export refuses when stdin is not a terminal unless --non-interactive is given too", async () => {
+    const home = fresh();
+    writeFileSync(join(home, "config.env"), "GROQ_API_KEY=gsk_cli_canary\n");
+    await run(home, "migrate");
+    const before = readFileSync(join(home, "config.env"), "utf8");
+    const refused = await withTerminal(false, () => run(home, "export", "--yes"));
+    expect(refused.code).toBe(1);
+    expect(refused.err).toContain("--non-interactive");
+    expect(readFileSync(join(home, "config.env"), "utf8")).toBe(before);
+    expect(existsSync(join(home, "vault.bin"))).toBe(true);
+    // --non-interactive alone is not consent.
+    const noConsent = await withTerminal(false, () => run(home, "export", "--non-interactive"));
+    expect(noConsent.code).toBe(1);
+    expect(noConsent.err).toContain("--yes");
+    expect(existsSync(join(home, "vault.bin"))).toBe(true);
+  });
+
+  test("export --yes at a terminal needs nothing more", async () => {
+    const home = fresh();
+    writeFileSync(join(home, "config.env"), "GROQ_API_KEY=gsk_cli_canary\n");
+    await run(home, "migrate");
+    const exported = await withTerminal(true, () => run(home, "export", "--yes"));
+    expect(exported.code).toBe(0);
+    expect(readFileSync(join(home, "config.env"), "utf8")).toContain("gsk_cli_canary");
+    expect(existsSync(join(home, "vault.bin"))).toBe(false);
   });
 
   test("a vault that will not open is reported with the reason, exit code 1, and the files untouched", async () => {

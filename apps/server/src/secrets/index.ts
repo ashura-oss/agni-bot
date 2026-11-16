@@ -24,5 +24,6 @@ export { createPassphraseKeyStore, passphraseFilePath } from "./passphrase";
 export { selectKeyStore } from "./select";
 export { secretsMode, unlockVault, vaultExists, vaultStatus } from "./unlock";
 export { applyVaultEnv, importEnvFileSecrets, exportEnvEntries, plaintextSecretNames, setEnvFileValues } from "./env";
-export { envEntryName, isSecretEnvName } from "./mode";
+export { envEntryName } from "./mode";
+export { isSecretEnvName, secretClassifier, valueCarriesCredential, type SecretClassifier } from "./classify";
 export { runVaultExport, runVaultMigrations, type MigrationResult } from "./migrate";

@@ -9,16 +9,22 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { parseEnvFile } from "../home";
 import { writePrivateFileSync } from "../util/private-file";
-import { envEntryName, isSecretEnvName } from "./mode";
+import { secretClassifier, type SecretClassifier } from "./classify";
+import { envEntryName } from "./mode";
 import { VaultError, type Vault } from "./types";
 
 const ENV_PREFIX = "env/";
 
-/** Copy the vault's `env/<NAME>` entries into `env` for variables that are not set. Returns the names set. */
-export function applyVaultEnv(env: Record<string, string | undefined>, vault: Vault): string[] {
+/**
+ * Copy the vault's `env/<NAME>` entries into `env` for variables that are not
+ * set. `only` limits it to those variables (a CLI command that needs one token
+ * does not pull every secret into its environment). Returns the names set.
+ */
+export function applyVaultEnv(env: Record<string, string | undefined>, vault: Vault, only?: readonly string[]): string[] {
   const applied: string[] = [];
   for (const { name } of vault.list(ENV_PREFIX)) {
     const variable = name.slice(ENV_PREFIX.length);
+    if (only && !only.includes(variable)) continue;
     if (env[variable]) continue;
     const value = vault.get(name);
     if (value === undefined) continue;
@@ -29,10 +35,10 @@ export function applyVaultEnv(env: Record<string, string | undefined>, vault: Va
 }
 
 /** Names of credentials still in a plaintext env file with a value. Never values. */
-export function plaintextSecretNames(envFile: string, isSecret: (name: string) => boolean = isSecretEnvName): string[] {
+export function plaintextSecretNames(envFile: string, isSecret: SecretClassifier = secretClassifier({ home: dirname(envFile) })): string[] {
   if (!existsSync(envFile)) return [];
   return Object.entries(parseEnvFile(readFileSync(envFile, "utf8")))
-    .filter(([name, value]) => value !== "" && isSecret(name))
+    .filter(([name, value]) => value !== "" && isSecret(name, value))
     .map(([name]) => name);
 }
 
@@ -70,21 +76,21 @@ export function setEnvFileValues(envFile: string, values: Record<string, string>
 
 /**
  * Move every credential in an env file into the vault as `env/<NAME>`.
- *  1. back the file up (owner-only) in `backupDir`;
- *  2. store each value and read it back;
- *  3. only then remove those lines from the file.
- * Any failure before step 3 leaves the file untouched. A second run finds
- * nothing to move. A value in the file replaces one already in the vault: the
- * file is the older store, so a value there means the owner just put it there.
- * Returns the names moved.
+ *  1. store each value and read it back;
+ *  2. only then remove those lines from the file (one atomic, owner-only write).
+ * Any failure before step 2 leaves the file untouched, so the file itself is
+ * the backup until the vault holds every value, and no second plaintext copy is
+ * ever written (a backup file under AGNI_HOME would hold every key in the
+ * clear, which defeats the vault). The way back is `agni vault export`.
+ * A second run finds nothing to move. A value in the file replaces one already
+ * in the vault: the file is the older store, so a value there means the owner
+ * just put it there. Returns the names moved.
  */
-export function importEnvFileSecrets(vault: Vault, envFile: string, backupDir: string, isSecret: (name: string) => boolean = isSecretEnvName): string[] {
+export function importEnvFileSecrets(vault: Vault, envFile: string, isSecret: SecretClassifier = secretClassifier({ home: dirname(envFile) })): string[] {
   if (!existsSync(envFile)) return [];
   const text = readFileSync(envFile, "utf8");
-  const names = Object.entries(parseEnvFile(text)).filter(([name, value]) => value !== "" && isSecret(name));
+  const names = Object.entries(parseEnvFile(text)).filter(([name, value]) => value !== "" && isSecret(name, value));
   if (names.length === 0) return [];
-  mkdirSync(backupDir, { recursive: true, mode: 0o700 });
-  writePrivateFileSync(`${backupDir}/config.env`, text);
   for (const [name, value] of names) {
     vault.set(envEntryName(name), value);
     if (vault.get(envEntryName(name)) !== value) throw new VaultError("WRITE_FAILED", `${name} could not be read back from the vault, so config.env was not changed.`);

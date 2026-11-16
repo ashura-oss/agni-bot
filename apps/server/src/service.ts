@@ -5,6 +5,9 @@ import { dirname, join, resolve } from "node:path";
 import type { Config } from "./config";
 import { daemonStatus, fetchHealth } from "./daemon";
 import { agniHome } from "./home";
+import { PASSPHRASE_CREDENTIAL_NAME } from "./secrets/passphrase";
+import type { KeyStoreKind } from "./secrets/types";
+import { vaultStatus } from "./secrets/unlock";
 
 export const LAUNCHD_LABEL = "dev.agni.server";
 export const SYSTEMD_UNIT = "agni.service";
@@ -14,6 +17,12 @@ export interface ServiceOptions {
   script: string;
   home: string;
   logPath: string;
+  /**
+   * systemd only: the file holding the vault passphrase (headless Linux). It
+   * reaches the server as the credential `agni-vault-passphrase`; the unit
+   * never contains the passphrase itself.
+   */
+  passphraseFile?: string;
 }
 
 const xmlEscape = (s: string): string =>
@@ -56,7 +65,39 @@ export function launchdPlist(o: ServiceOptions): string {
 /** systemd splits ExecStart on whitespace; quote each word and escape backslash, quote and %. */
 const sdQuote = (s: string): string => `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%")}"`;
 
+/**
+ * The `LoadCredential=` line that hands a passphrase file to the service.
+ * systemd puts it at `$CREDENTIALS_DIRECTORY/agni-vault-passphrase`, which is
+ * where the passphrase keystore looks, so the server needs no variable for it.
+ */
+export function systemdCredentialLine(file: string): string {
+  if (!file.startsWith("/")) throw new Error(`the vault passphrase file must be an absolute path (got "${file}")`);
+  return `LoadCredential=${PASSPHRASE_CREDENTIAL_NAME}:${file.replace(/%/g, "%%")}`;
+}
+
+/**
+ * The passphrase file the unit must pass on, or `undefined` when the vault does
+ * not use the passphrase backend. The backend is the passphrase when
+ * `AGNI_KEYSTORE=passphrase`, when an existing vault's header says so, or when
+ * the owner names a passphrase file (a headless set-up). A passphrase backend
+ * with no file named throws: that unit could never start the server.
+ */
+export function passphraseServiceFile(env: Record<string, string | undefined>, headerKind: KeyStoreKind | undefined): string | undefined {
+  const asked = env.AGNI_KEYSTORE?.trim().toLowerCase();
+  const file = env.AGNI_VAULT_PASSPHRASE_FILE?.trim() || undefined;
+  if (asked === "bun-secrets" || headerKind === "bun-secrets") return undefined;
+  const passphrase = asked === "passphrase" || headerKind === "passphrase";
+  if (passphrase && !file) {
+    throw new Error(
+      "the vault uses a passphrase: set AGNI_VAULT_PASSPHRASE_FILE to the file that holds it (readable only by you) and run `service install` again, " +
+        "so the service can be given it as a systemd credential",
+    );
+  }
+  return file;
+}
+
 export function systemdUnit(o: ServiceOptions): string {
+  const credential = o.passphraseFile ? `${systemdCredentialLine(o.passphraseFile)}\n` : "";
   return `[Unit]
 Description=Agni Bot server
 After=network-online.target
@@ -65,7 +106,7 @@ After=network-online.target
 ExecStart=${sdQuote(o.bun)} ${sdQuote(o.script)} serve
 WorkingDirectory=${o.home.replace(/%/g, "%%")}
 Environment=${sdQuote(`AGNI_HOME=${o.home}`)}
-Restart=always
+${credential}Restart=always
 RestartSec=3
 
 [Install]
@@ -115,6 +156,14 @@ export async function serviceCommand(sub: string | undefined, config: Config): P
       console.log(`installed ${path}`);
     } else {
       const path = unitPath();
+      // A vault opened by passphrase (headless server): hand the file to the service as a systemd credential.
+      const passphraseFile = passphraseServiceFile(process.env, vaultStatus().keystoreKind);
+      if (passphraseFile) {
+        o.passphraseFile = resolve(passphraseFile);
+        if (!existsSync(o.passphraseFile)) {
+          throw new Error(`the vault passphrase file ${o.passphraseFile} does not exist; create it (readable only by you) and run \`service install\` again`);
+        }
+      }
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, systemdUnit(o));
       run(["systemctl", "--user", "daemon-reload"]);

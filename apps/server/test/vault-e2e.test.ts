@@ -116,8 +116,8 @@ describe("vault end to end (child processes, passphrase keystore)", () => {
     expect(migrated.out).toContain("config-env: 1 moved");
     expect(migrated.out).not.toContain(CANARY);
 
-    // 2. no plaintext canary anywhere in the home outside the backup the owner is told about
-    for (const file of filesUnder(home, ["vault-backups"])) expect(readFileSync(file).toString("latin1")).not.toContain(CANARY);
+    // 2. no plaintext canary anywhere in the home: no backup copy is kept
+    for (const file of filesUnder(home)) expect(readFileSync(file).toString("latin1")).not.toContain(CANARY);
 
     // 3. serve: the provider is configured from the vault
     const running = await serve(home);
@@ -129,7 +129,7 @@ describe("vault end to end (child processes, passphrase keystore)", () => {
     } finally {
       await running.stop();
     }
-    for (const file of filesUnder(home, ["vault-backups"])) expect(readFileSync(file).toString("latin1")).not.toContain(CANARY);
+    for (const file of filesUnder(home)) expect(readFileSync(file).toString("latin1")).not.toContain(CANARY);
 
     // 4. wrong passphrase: refuses, names the reason, and does not use any plaintext key
     writeFileSync(join(parent, "pp.txt"), "a completely different passphrase\n");
@@ -179,8 +179,24 @@ describe("vault end to end (child processes, passphrase keystore)", () => {
     const refused = await agni(home, ["vault", "export"]);
     expect(refused.code).toBe(1);
     expect(readFileSync(join(home, "config.env"), "utf8")).not.toContain(CANARY);
-    const exported = await agni(home, ["vault", "export", "--yes"]);
+    // A child process has no terminal on stdin: --yes alone is refused.
+    const noTerminal = await agni(home, ["vault", "export", "--yes"]);
+    expect(noTerminal.code).toBe(1);
+    expect(noTerminal.out).toContain("--non-interactive");
+    expect(readFileSync(join(home, "config.env"), "utf8")).not.toContain(CANARY);
+    const exported = await agni(home, ["vault", "export", "--yes", "--non-interactive"]);
     expect(exported.code).toBe(0);
     expect(readFileSync(join(home, "config.env"), "utf8")).toContain(`GROQ_API_KEY=${CANARY}`);
-  }, 40_000);
+    // The rollback is complete: no vault.bin, so the next start is plain file mode and needs no keystore.
+    expect(filesUnder(home).some((file) => file.endsWith("vault.bin"))).toBe(false);
+    writeFileSync(join(parent, "pp.txt"), "");
+    const running = await serve(home, { AGNI_KEYSTORE: "bun-secrets" });
+    try {
+      expect(running.exited).toBe(false);
+      expect(running.output).toMatch(/provider groq/);
+      expect(running.output).not.toContain("vault: open");
+    } finally {
+      await running.stop();
+    }
+  }, 60_000);
 });

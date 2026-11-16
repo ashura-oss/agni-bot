@@ -54,7 +54,7 @@ import { browserOpenCommand } from "./util/open-url";
 import { secureDirectory, secureFile, verifyHomePrivate } from "./util/private-file";
 import { extraHelpLines, runExtraCommand } from "./cli/extra-commands";
 import { runStartupHooks } from "./startup";
-import { unlockVaultAtStart, vaultRefusalMessage } from "./startup/s3-vault";
+import { loadVaultEnvForCli, unlockVaultAtStart, vaultRefusalMessage } from "./startup/s3-vault";
 
 const [command = "help", ...args] = Bun.argv.slice(2);
 
@@ -66,6 +66,9 @@ if (layout.blockedByPid !== undefined) {
   process.exit(1);
 }
 for (const from of layout.movedFrom) console.error(`moved ${from} into ${agniHome()}`);
+// These commands ask the running daemon how it is, sending the stored device token. In vault mode that token
+// lives in the vault, not in config.env (S3-01).
+if (command === "daemon" || command === "service" || command === "setup") await loadVaultEnvForCli();
 
 if (command === "serve") await serve();
 else if (command === "daemon") await daemonCommand(args);

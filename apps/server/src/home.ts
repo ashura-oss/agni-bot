@@ -16,7 +16,8 @@
 import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { isSecretEnvName, secretsMode } from "./secrets/mode";
+import { secretClassifier } from "./secrets/classify";
+import { secretsMode } from "./secrets/mode";
 
 type Env = Record<string, string | undefined>;
 
@@ -61,8 +62,10 @@ export function loadHomeEnv(env: Env = process.env): void {
   if (!existsSync(path)) return;
   const values = parseEnvFile(readFileSync(path, "utf8"));
   const mode = secretsMode({ AGNI_SECRETS_MODE: env.AGNI_SECRETS_MODE || values.AGNI_SECRETS_MODE });
+  // Only vault mode needs the classifier, so file mode never reads providers.json here.
+  const isSecret = mode === "vault" ? secretClassifier({ env, home: agniHome(env) }) : undefined;
   for (const [key, value] of Object.entries(values)) {
-    if (mode === "vault" && isSecretEnvName(key)) continue;
+    if (isSecret?.(key, value)) continue;
     if (!env[key]) env[key] = value;
   }
 }
