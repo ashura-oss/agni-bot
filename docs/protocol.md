@@ -260,6 +260,13 @@ bubble. A client that ignores `reset` still shows the right answer: the sealing
 `plugin_connect_failed`, `unknown_background`, `unknown_channel`, `invalid_attachment`,
 `invalid_domains`, `resync_gap`, `not_found`, `not_running`, `internal`.
 
+The four codes that answer one client frame (checked in `apps/server/src/ws/dispatch.ts`):
+
+- `not_running`: `msg.cancel` names a turn that is not running. It finished, never existed, or the server restarted.
+- `unknown_request`: `approve.reply` or `form.answer` names a request that is not pending any more (decided, expired, or its turn has ended). `secret.reply` or `secret.cancel` names a secret prompt that is not pending.
+- `already_running`: `job.set` with `action: "run"` on a job that is running now. Nothing is queued.
+- `not_found`: `approval.rule.revoke` names an unknown or already revoked rule.
+
 ## Versioning
 
 `PROTOCOL_VERSION` bumps on any breaking change (removed/renamed frame or
