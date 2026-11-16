@@ -4,6 +4,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { newID, nowISO } from "../util/ids";
+import { registerSecret } from "../util/redact";
 
 export interface Device {
   id: string;
@@ -15,6 +16,18 @@ export interface Device {
 
 const TOKEN_PREFIX = "agni_";
 
+/**
+ * A device token no one has used for this long stops working: a lost phone or a
+ * forgotten browser does not stay paired forever. It slides: every use (a page
+ * check-in, a socket hello, a CLI or Mac request, an open socket) moves it forward.
+ * Browser sessions, the Mac app and the CLI all authenticate through `verifyToken`,
+ * so they share this rule; a CLI or Mac token idle 30 days is paired again.
+ */
+export const SESSION_IDLE_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** `last_seen_at` is written at most this often per device, so a busy client does not write on every request. */
+const TOUCH_INTERVAL_MS = 60 * 60 * 1000;
+
 export async function hashToken(token: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
   return Buffer.from(digest).toString("hex");
@@ -22,6 +35,8 @@ export async function hashToken(token: string): Promise<string> {
 
 export async function mintToken(db: Database, name: string): Promise<{ device: Device; token: string }> {
   const token = `${TOKEN_PREFIX}${Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url")}`;
+  // Registered before it is stored or handed out: from here on no log line or frame can carry it.
+  registerSecret(token);
   const device: Device = {
     id: newID("dev"),
     name,
@@ -45,16 +60,31 @@ export async function verifyToken(db: Database, token: string): Promise<Device |
     )
     .get(await hashToken(token));
   if (!row || row.revoked_at) return null;
-  db.run("UPDATE devices SET last_seen_at = ? WHERE id = ?", [nowISO(), row.id]);
+  // Idle too long: judged by the last use, or by pairing time for a device never seen.
+  const lastActive = Date.parse(row.last_seen_at ?? row.created_at);
+  if (Number.isFinite(lastActive) && Date.now() - lastActive > SESSION_IDLE_MS) return null;
+  registerSecret(token);
+  touchDevice(db, row.id);
   return row;
 }
 
+/** Mark a device as in use now, unless it was marked within the last hour. */
+export function touchDevice(db: Database, deviceID: string): void {
+  const now = Date.now();
+  db.run(
+    "UPDATE devices SET last_seen_at = ? WHERE id = ? AND revoked_at IS NULL AND (last_seen_at IS NULL OR last_seen_at < ?)",
+    [new Date(now).toISOString(), deviceID, new Date(now - TOUCH_INTERVAL_MS).toISOString()],
+  );
+}
+
 export function revokeDevice(db: Database, idOrPrefix: string): Device | null {
+  // A prefix, compared as text: `LIKE` would read `%` and `_` in the argument as wildcards.
+  if (idOrPrefix.length === 0) return null;
   const row = db
-    .query<Device, [string, string]>(
-      "SELECT id, name, created_at, last_seen_at, revoked_at FROM devices WHERE id = ? OR id LIKE ? LIMIT 1",
+    .query<Device, [string]>(
+      "SELECT id, name, created_at, last_seen_at, revoked_at FROM devices WHERE substr(id, 1, length(?1)) = ?1 LIMIT 1",
     )
-    .get(idOrPrefix, `${idOrPrefix}%`);
+    .get(idOrPrefix);
   if (!row) return null;
   if (!row.revoked_at) {
     db.run("UPDATE devices SET revoked_at = ? WHERE id = ?", [nowISO(), row.id]);
@@ -82,15 +112,29 @@ export function listDevices(db: Database): Device[] {
 /** The HttpOnly cookie a paired browser carries; its value is a device token. */
 export const SESSION_COOKIE = "agni_session";
 
+/** How long a browser keeps the session cookie after its last renewal: 30 days, renewed whenever the page checks in. */
+export const SESSION_MAX_AGE_S = 30 * 24 * 60 * 60;
+
+/** The session cookie's value, if the request carries one. */
+export function cookieToken(request: Request): string | undefined {
+  for (const part of (request.headers.get("cookie") ?? "").split(";")) {
+    const [name, ...value] = part.trim().split("=");
+    if (name === SESSION_COOKIE && value.length > 0) {
+      try {
+        return decodeURIComponent(value.join("="));
+      } catch {
+        return undefined;
+      }
+    }
+  }
+  return undefined;
+}
+
 /** A device token from `Authorization: Bearer` (Mac, CLI) or the session cookie (browser). */
 export function requestToken(request: Request): string | undefined {
   const bearer = /^Bearer (.+)$/i.exec(request.headers.get("authorization") ?? "")?.[1];
   if (bearer) return bearer;
-  for (const part of (request.headers.get("cookie") ?? "").split(";")) {
-    const [name, ...value] = part.trim().split("=");
-    if (name === SESSION_COOKIE && value.length > 0) return decodeURIComponent(value.join("="));
-  }
-  return undefined;
+  return cookieToken(request);
 }
 
 // 32 symbols, no 0/O/1/I: a byte % 32 is unbiased and the code is easy to type.

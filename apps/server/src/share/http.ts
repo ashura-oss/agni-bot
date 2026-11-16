@@ -9,12 +9,13 @@
  * that never existed, so a stale token reveals nothing.
  */
 import type { Database } from "bun:sqlite";
-import { requestToken, verifyToken } from "../auth/tokens";
+import { requestDevice } from "../auth/gate";
 import type { OriginPolicy } from "../auth/origin";
 import { SHARE_PAGE_HEADERS } from "../ws/csp";
+import { SHARE_ROUTE } from "./route";
 import { readShareFile, revokeShare } from "./document";
 
-export const SHARE_ROUTE = /^\/share\/([0-9a-f]{32})(?:\.html)?$/;
+export { SHARE_ROUTE };
 
 const NOT_FOUND = "This export no longer exists.";
 
@@ -26,8 +27,7 @@ export async function shareRequest(request: Request, db: Database, policy: Origi
     // A revoke changes state: it needs a paired device and a page we trust.
     const foreign = policy.rejectForeignOrigin(request);
     if (foreign) return foreign;
-    const credential = requestToken(request);
-    if (!credential || !(await verifyToken(db, credential))) {
+    if (!(await requestDevice(request, db))) {
       return Response.json({ error: "Pair this device before revoking a link." }, { status: 401, headers: { "cache-control": "no-store" } });
     }
     return revokeShare(token)

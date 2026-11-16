@@ -8,7 +8,8 @@
  */
 import type { Database } from "bun:sqlite";
 import { NO_BROWSER_ORIGINS, type OriginPolicy } from "../auth/origin";
-import { requestToken, verifyToken } from "../auth/tokens";
+import { requestDevice } from "../auth/gate";
+import { redact } from "../util/redact";
 import type { Config } from "../config";
 import type { Router } from "../models/router";
 import { dayTotals } from "../stores/usage";
@@ -30,11 +31,11 @@ export async function debugRequest(request: Request, db: Database, router: Route
   const foreign = policy.rejectForeignOrigin(request);
   if (foreign) return foreign;
   const headers = { ...policy.cors(request, "GET, OPTIONS", "authorization, content-type"), "cache-control": "no-store" };
-  const reply = (data: unknown, status = 200) => Response.json(data, { status, headers });
+  // This screen shows raw tool arguments, results and model context: mask registered secrets in what leaves.
+  const reply = (data: unknown, status = 200) => new Response(redact(JSON.stringify(data)), { status, headers: { ...headers, "content-type": "application/json;charset=utf-8" } });
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers });
   if (request.method !== "GET") return reply({ error: "Read-only." }, 405);
-  const token = requestToken(request);
-  if (!token || !(await verifyToken(db, token))) return reply({ error: "Pair this device first." }, 401);
+  if (!(await requestDevice(request, db))) return reply({ error: "Pair this device first." }, 401);
 
   const url = new URL(request.url);
   if (url.pathname === "/debug/overview") {
