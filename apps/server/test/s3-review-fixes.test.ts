@@ -137,12 +137,9 @@ describe("streamed text is redacted across token frames", () => {
     harness = await startHarness();
     const client = await harness.connect();
     const before = secretCount();
-    // Other test files in the same process leave secrets registered (device tokens, vault values), and a
-    // delta that ends in the first letters of one is held back. Ending in a character no secret starts
-    // with keeps this test about the no-match path whatever ran before it.
-    harness.server.emit({ type: "token", turnID: "t2", threadID: "th1", delta: "immediate ✓" });
+    harness.server.emit({ type: "token", turnID: "t2", threadID: "th1", delta: "immediate" });
     const frame = await client.next("token", { match: (f) => f.turnID === "t2" });
-    expect(frame.delta).toBe("immediate ✓");
+    expect(frame.delta).toBe("immediate");
     expect(secretCount()).toBe(before);
   });
 

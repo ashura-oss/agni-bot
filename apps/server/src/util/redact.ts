@@ -125,6 +125,12 @@ export function unregisterSecret(value: string): void {
   if (registry.delete(value)) needles = null;
 }
 
+/** Forget every registered secret. For the test preload only: a test starts with an empty registry. */
+export function clearSecretsForTests(): void {
+  registry.clear();
+  needles = null;
+}
+
 /** How many secrets are registered. */
 export function secretCount(): number {
   return registry.size;
