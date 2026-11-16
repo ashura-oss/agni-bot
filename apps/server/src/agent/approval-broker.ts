@@ -117,7 +117,7 @@ export class ApprovalBroker {
   ): Promise<Decision | null> {
     const action = describeAction(toolName, args);
     const note = this.deps.approvalNote?.(toolName);
-    const preview = note ? `${previewAction(toolName, args)}\n\n${note}` : previewAction(toolName, args);
+    const preview = note ? `${previewAction(toolName, args)}\n\n${escapeUnsafe(note)}` : previewAction(toolName, args);
     const { db } = this.deps;
     const requestID = newID("apr");
     // The rule's scope: this turn's bot, this tool, this exact target. Without
@@ -196,47 +196,91 @@ Auto-approved by standing rule ${rule.id}: "Always allow" for ${rule.agentID} / 
   }
 }
 
+/**
+ * Everything on an approval card that the model chose (a path, a command, a
+ * recipient, any argument) goes through this section before it is drawn, so
+ * nothing the model writes can add a line to the card, reorder it, or read
+ * differently from what it is. Control characters, bidirectional overrides and
+ * isolates, and zero-width or invisible characters are shown as visible
+ * escapes (a line break becomes backslash-n, U+202E becomes backslash-u202E); each entry is capped; free text that really is
+ * several lines (a mail body, a shell script) is quoted line by line.
+ */
+const UNSAFE_CHARS = /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb]|[\u{e0000}-\u{e007f}]/gu;
+const NAMED_ESCAPES: Record<string, string> = { "\n": "\\n", "\r": "\\r", "\t": "\\t" };
+
+/** Show every character that could change how the card reads as a visible escape. `keepLineBreaks` leaves "\n" alone (the card's own structure). */
+function escapeUnsafe(text: string, keepLineBreaks = false): string {
+  return text.replace(UNSAFE_CHARS, (ch) => {
+    if (keepLineBreaks && ch === "\n") return ch;
+    const named = NAMED_ESCAPES[ch];
+    if (named) return named;
+    const code = ch.codePointAt(0)!;
+    return code > 0xffff ? `\\u{${code.toString(16).toUpperCase()}}` : `\\u${code.toString(16).toUpperCase().padStart(4, "0")}`;
+  });
+}
+
+/** One model-chosen entry on one line, cut at `max` characters with a marker that says how much is missing. */
+function entry(value: unknown, max = 320): string {
+  const raw = typeof value === "string" ? value : JSON.stringify(value) ?? "";
+  return raw.length > max ? `${escapeUnsafe(raw.slice(0, max))}… (+${raw.length - max} chars)` : escapeUnsafe(raw);
+}
+
+/** Several lines of model-written text, each quoted, so a line that looks like a card field is plainly quoted text. */
+function quoted(text: string, max: number): string {
+  return escapeUnsafe(clip(text.replace(/\r\n/g, "\n"), max), true).split("\n").map((line) => `> ${line}`).join("\n");
+}
+
 /** An argument for display. A missing one reads as "(not given)", never "?" or "undefined". */
 function shown(value: unknown, max = 400): string {
   if (value === undefined || value === null || value === "") return "(not given)";
-  return clip(typeof value === "string" ? value : JSON.stringify(value) ?? "(not given)", max);
+  return escapeUnsafe(clip(typeof value === "string" ? value : JSON.stringify(value) ?? "(not given)", max));
+}
+
+/** The arguments with every string cut at `max` characters, for the JSON view. */
+function boundedArgs(value: unknown, max: number): unknown {
+  if (typeof value === "string") return value.length > max ? `${value.slice(0, max)}… (+${value.length - max} chars)` : value;
+  if (Array.isArray(value)) return value.map((item) => boundedArgs(item, max));
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, boundedArgs(item, max)]));
+  return value;
 }
 
 function describeAction(toolName: string, args: Record<string, unknown>): string {
   switch (toolName) {
-    case "bash": return `run shell: ${clip(String(args.command ?? ""), 400)}`;
+    case "bash": return `run shell: ${shown(String(args.command ?? ""), 400)}`;
     case "write_file": {
       const path = typeof args.path === "string" ? args.path : "";
       const replaces = path !== "" && args.append !== true && !isOutsideScratch(path, scratchDir()) && writeTargetExists(path);
       return `${replaces ? "overwrite existing file" : "write file"}: ${shown(path)}`;
     }
     case "read_file": return `read file: ${shown(args.path)}`;
-    case "memory_write": return `save memory: ${String(args.text ?? "").slice(0, 80)}`;
+    case "memory_write": return `save memory: ${entry(String(args.text ?? ""), 80)}`;
     case "link_save": return `save link: ${shown(args.url)}`;
     case "task_create": return `add task: ${shown(args.title)}`;
     case "task_update": return `update task ${shown(args.id)}`;
-    case "mail_send": return `send email to ${Array.isArray(args.to) ? shown(args.to.join(", ")) : shown(args.to)}: ${String(args.subject ?? "").slice(0, 80)}`;
+    case "mail_send": return `send email to ${Array.isArray(args.to) ? shown(args.to.map((to) => entry(to)).join(", ")) : shown(args.to)}: ${entry(String(args.subject ?? ""), 80)}`;
     case "rename_agent": return args.agentId ? `rename ${shown(args.agentId)} to ${shown(args.name)}` : `rename the assistant to ${shown(args.name)}`;
-    default: return `${toolName}(${clip(JSON.stringify(args), 400)})`;
+    default: return `${entry(toolName, 80)}(${escapeUnsafe(clip(JSON.stringify(args), 400))})`;
   }
 }
 
 function previewAction(toolName: string, args: Record<string, unknown>): string {
-  if (toolName === "bash") return clip(String(args.command ?? ""), 4_000);
-  if (toolName === "mail_send") return [...audienceLines(args), describeAction(toolName, args), "", clip(String(args.body ?? ""), 4_000)].join("\n");
+  if (toolName === "bash") return quoted(String(args.command ?? ""), 4_000);
+  if (toolName === "mail_send") return [...audienceLines(args), describeAction(toolName, args), "", quoted(String(args.body ?? ""), 4_000)].join("\n");
   if (toolName === "write_file" && typeof args.path === "string") {
     // The path the write really lands on: a relative path means under scratch,
     // and a link is followed. This is also what "always allow" would remember.
     const real = resolveWritePath(args.path);
     return `${describeAction(toolName, args)}
 
-Resolved path: ${real ?? "(cannot be resolved)"}`;
+Resolved path: ${real === null || real === undefined ? "(cannot be resolved)" : entry(real, 1_000)}`;
   }
   return fullCall(toolName, args);
 }
 
 /** How much of a call's arguments the card shows: enough that padding cannot push anything out of sight. */
 const PREVIEW_ARGS_CHARS = 4_000;
+/** One string in the arguments view. */
+const PREVIEW_ARG_STRING_CHARS = 1_000;
 
 /**
  * A card for a tool that has no preview of its own: the whole call, not a cut
@@ -246,19 +290,28 @@ const PREVIEW_ARGS_CHARS = 4_000;
  * argument and its size.
  */
 function fullCall(toolName: string, args: Record<string, unknown>): string {
-  const json = JSON.stringify(args, null, 2) ?? "{}";
-  const sizes = Object.entries(args).map(([name, value]) => `${name} (${(typeof value === "string" ? value : JSON.stringify(value) ?? "").length} chars)`);
+  const json = escapeUnsafe(JSON.stringify(boundedArgs(args, PREVIEW_ARG_STRING_CHARS), null, 2) ?? "{}", true);
+  const sizes = Object.entries(args).map(([name, value]) => `${entry(name, 80)} (${(typeof value === "string" ? value : JSON.stringify(value) ?? "").length} chars)`);
   const body = json.length > PREVIEW_ARGS_CHARS ? `${clip(json, PREVIEW_ARGS_CHARS)}\n\nArguments given: ${sizes.join(", ")}` : json;
-  return [...audienceLines(args), `${toolName} with these arguments:`, "", body].join("\n");
+  return [...audienceLines(args), `${entry(toolName, 80)} with these arguments:`, "", body].join("\n");
 }
 
-/** The people a call reaches, one line per kind, ahead of everything else. */
+/** Argument names that hold the people a call reaches. */
+const AUDIENCE_KEYS: ReadonlyArray<readonly [string, string]> = [
+  ["to", "To"], ["cc", "Cc"], ["bcc", "Bcc"], ["attendees", "Attendees"],
+  ["recipients", "Recipients"], ["emails", "Emails"], ["invitees", "Invitees"], ["guests", "Guests"], ["participants", "Participants"],
+];
+const AUDIENCE_SHOWN = 50;
+
+/** The people a call reaches, one line per kind with how many there are, ahead of everything else. */
 function audienceLines(args: Record<string, unknown>): string[] {
   const out: string[] = [];
-  for (const [key, label] of [["to", "To"], ["cc", "Cc"], ["bcc", "Bcc"], ["attendees", "Attendees"]] as const) {
+  for (const [key, label] of AUDIENCE_KEYS) {
     const value = args[key];
-    const names = Array.isArray(value) ? value.map((item) => (typeof item === "string" ? item : JSON.stringify(item))) : typeof value === "string" && value ? [value] : [];
-    if (names.length > 0) out.push(`${label}: ${names.join(", ")}`);
+    const names = Array.isArray(value) ? value : typeof value === "string" && value ? [value] : [];
+    if (names.length === 0) continue;
+    const more = names.length > AUDIENCE_SHOWN ? `, … (+${names.length - AUDIENCE_SHOWN} more)` : "";
+    out.push(`${label} (${names.length}): ${names.slice(0, AUDIENCE_SHOWN).map((name) => entry(name)).join(", ")}${more}`);
   }
   return out;
 }
