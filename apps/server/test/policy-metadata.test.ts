@@ -3,7 +3,11 @@
  * central table fails this file, so a new tool cannot slip in unclassified.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { policyFor, toolsMissingMetadata, TOOL_POLICY } from "../src/policy/metadata";
+import { join } from "node:path";
+import { assessCall, policyFor, toolsMissingMetadata, TOOL_POLICY } from "../src/policy/metadata";
+import { recordDenial } from "../src/policy/denials";
+import { decide } from "../src/policy/engine";
+import { pathResource } from "../src/policy/resources";
 import { policyRig, type PolicyRig } from "./policy-fixture";
 
 let rig: PolicyRig | undefined;
@@ -55,5 +59,40 @@ describe("tool metadata", () => {
       expect({ name, protectedWrite: policyFor(name)!.protectedWrite }).toEqual({ name, protectedWrite: true });
     }
     expect(policyFor("memory_write")!.protectedWrite).toBeUndefined();
+  });
+});
+
+describe("what a search and a privileged command reach", () => {
+  test("grep with no path searches scratch, so it names scratch: a refusal of a file inside it covers it", () => {
+    rig = policyRig();
+    const policy = policyFor("grep");
+    const { resources } = assessCall(policy, { pattern: "secret" });
+    expect(resources).toEqual([pathResource(".")]);
+    expect(assessCall(policy, { pattern: "secret", path: "sub" }).resources).toEqual([pathResource("sub")]);
+
+    recordDenial(rig.db, rig.run, { tool: "bash", operation: "read", cause: "denied", resources: [pathResource("sub/id_rsa")] });
+    const decision = decide(rig.run, { tool: "grep", args: { pattern: "BEGIN" }, callID: "call_grep" });
+    expect(decision).toMatchObject({ action: "refuse", code: "denied_resource" });
+  });
+
+  // `run_privileged` may run in the server's own folder (the OS-authorization path), not in scratch, so a relative word does not say which file.
+  test("run_privileged: a relative operand is unresolved, an absolute one is read", () => {
+    rig = policyRig();
+    const policy = policyFor("run_privileged");
+    for (const command of ["rm denied.txt", "rm sub/denied.txt", "rm -rf .", "cat ./a", "mv /tmp/x b"]) {
+      const assessment = assessCall(policy, { command, purpose: "test" });
+      expect({ command, unproven: assessment.unprovenShell === true, resources: assessment.resources }).toEqual({ command, unproven: true, resources: [] });
+    }
+    const absolute = join(rig.scratch, "denied.txt");
+    const proven = assessCall(policy, { command: `rm ${absolute.replaceAll("\\", "/")}`, purpose: "test" });
+    expect(proven.unprovenShell, "an absolute path is still read").toBeUndefined();
+    expect(proven.resources).toEqual([pathResource(absolute)]);
+  });
+
+  test("bash keeps reading a relative operand against scratch, where the server runs it", () => {
+    rig = policyRig();
+    const assessment = assessCall(policyFor("bash"), { command: "rm denied.txt" });
+    expect(assessment.unprovenShell).toBeUndefined();
+    expect(assessment.resources).toEqual([pathResource("denied.txt")]);
   });
 });

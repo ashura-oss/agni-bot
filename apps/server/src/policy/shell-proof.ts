@@ -24,7 +24,7 @@
  * profile, not this module, is the boundary around what a command can reach.
  */
 import { lstatSync, statSync } from "node:fs";
-import { parse, relative, resolve, sep } from "node:path";
+import { isAbsolute, parse, relative, resolve, sep } from "node:path";
 import type { Operation } from "./types";
 
 export type ShellProof =
@@ -85,8 +85,10 @@ const unresolved = (why: string): ShellProof => ({ proven: false, why });
 /**
  * Is `command` one allowlisted program with plain literal words, and if so what files does it name?
  * `cwd` is the absolute folder the server will run it in (the caller chose it, never the model).
+ * `absoluteOnly` is for a command that may run somewhere else (`run_privileged` under the OS authorization runs in the
+ * server's own folder): a relative operand does not say which file it is, so it is unresolved.
  */
-export function proveShell(command: string, cwd: string, platform: NodeJS.Platform = process.platform): ShellProof {
+export function proveShell(command: string, cwd: string, platform: NodeJS.Platform = process.platform, options: { absoluteOnly?: boolean } = {}): ShellProof {
   const words = command.trim().split(/[ \t]+/);
   const program = words[0] ?? "";
   const spec = Object.hasOwn(PROGRAMS, program) ? PROGRAMS[program] : undefined;
@@ -134,6 +136,7 @@ export function proveShell(command: string, cwd: string, platform: NodeJS.Platfo
       const host = hostPathOf(operand, platform);
       if (host === null) return unresolved("a path the server cannot place on this computer");
       if (host.split(/[\\/]/).includes("..")) return unresolved("an operand with a `..` segment");
+      if (options.absoluteOnly && !isAbsolute(host)) return unresolved("a relative operand, for a command that does not run in the folder the server chose");
       const absolute = resolve(cwd, host);
       if (crossesLink(absolute, cwd)) return unresolved("an operand that goes through a link");
       paths.push(absolute);

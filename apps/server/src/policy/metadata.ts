@@ -86,9 +86,12 @@ function assessShell(args: Args): Partial<CallAssessment> {
   return { tier: 3, risk: "command", asks: true, operation: facts.operation, resources: facts.resources, ...unproven };
 }
 
-/** A command run as administrator: always asks, never read-only, and names the same files a shell call would. */
+/**
+ * A command run as administrator: always asks, never read-only, and names the files it is given. It may run outside scratch (the OS
+ * authorization path runs it in the server's own folder), so a relative operand is unresolved: only an absolute path names a file.
+ */
 function assessPrivileged(args: Args): Partial<CallAssessment> {
-  const facts = shellFacts(String(args.command ?? ""), shellWorkingDir(undefined));
+  const facts = shellFacts(String(args.command ?? ""), shellWorkingDir(undefined), true);
   return { tier: 3, risk: "command", asks: true, operation: facts.operation, resources: facts.resources, ...(facts.proven ? {} : { unprovenShell: true }) };
 }
 
@@ -102,6 +105,11 @@ function assessSend(args: Args): Partial<CallAssessment> {
 function assessFetch(args: Args): Partial<CallAssessment> {
   const destinations = hostResource(args.url);
   return { tier: 0, risk: "egress", asks: false, egress: "fetch", destinations, resources: destinations, operation: "send" };
+}
+
+/** The folder a search reaches: its `path`, or scratch when it names none. */
+function searchRoot(args: Args): ToolResource[] {
+  return [pathResource(typeof args.path === "string" && args.path.trim() ? args.path : ".")];
 }
 
 const MCP_POLICY_BASE: ToolPolicy = { classes: ["untrusted-reader", "effector"], tier: 2 };
@@ -149,8 +157,9 @@ export const TOOL_POLICY: Readonly<Record<string, ToolPolicy>> = {
 
   // The owner's files. Confined to scratch by the tools themselves.
   read_file: readOnly(["private-reader"], { resources: (args) => (typeof args.path === "string" ? [pathResource(args.path)] : []) }),
-  grep: readOnly(["private-reader"]),
-  glob: readOnly(["private-reader"]),
+  // With no `path` they search scratch, so that is the resource they name.
+  grep: readOnly(["private-reader"], { resources: searchRoot }),
+  glob: readOnly(["private-reader"], { resources: searchRoot }),
   write_file: { classes: ["effector"], tier: 1, assess: assessWrite, resources: (args) => (typeof args.path === "string" ? [pathResource(args.path)] : []) },
   // What an approved command prints can be a web page (curl) or a file someone else wrote: outside text. A read-only command in scratch is not.
   bash: {

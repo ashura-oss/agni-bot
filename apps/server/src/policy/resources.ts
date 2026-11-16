@@ -86,8 +86,8 @@ export interface ShellFacts {
 }
 
 /** The one reading of a shell line the policy uses, for the card, for denials and for the audit trail. */
-export function shellFacts(command: string, cwd: string): ShellFacts {
-  const proof = proveShell(command, cwd);
+export function shellFacts(command: string, cwd: string, absoluteOnly = false): ShellFacts {
+  const proof = proveShell(command, cwd, process.platform, { absoluteOnly });
   if (!proof.proven) return { proven: false, operation: "run", resources: [] };
   return { proven: true, operation: proof.operation, resources: proof.paths.map(pathResource) };
 }
