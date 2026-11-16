@@ -5,6 +5,7 @@ import type { Database } from "bun:sqlite";
 import type { PeerIntent, ServerFrameBody, StopReason } from "@agni/protocol";
 import { peerEnvelope, stripPeerTags } from "./peer-message";
 import { ApprovalBroker, waitForApprovalDecision } from "./approval-broker";
+import { abortReasonOf } from "./abort-reason";
 import { closeRequest, isClosureNote } from "./closure";
 import { FormBroker } from "./form-broker";
 import type { Decision } from "./approval-broker";
@@ -105,6 +106,13 @@ export interface TaskTurnRun {
    * system note ("Vision messaged you: …"), not the owner speaking.
    */
   inputRole?: "user" | "system";
+  /**
+   * Log the request as a system row so the owner's history does not show it,
+   * without changing how the turn is trusted: unlike `inputRole: "system"` this
+   * is still the owner's own routine, so it streams, retrieves and anchors as a
+   * turn the owner started does.
+   */
+  hideInput?: boolean;
   /** A retried job: reuse the input row it already wrote instead of appending it again (H20). */
   reuseInput?: boolean;
   /** The text written to the durable log (defaults to the request text). */
@@ -347,7 +355,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   const reused = previous?.role === inputRole && previous.text === inputText;
   // The reused row and its turn's output are history; the model gets the input below instead.
   if (reused) messages.splice(Math.max(0, messages.length - tail.slice(at).filter((m) => m.role === "user" || m.role === "assistant").length));
-  const inputMessage = reused ? previous : appendMessage(db, { threadID, turnID, role: inputRole, text: inputText });
+  const inputMessage = reused ? previous : appendMessage(db, { threadID, turnID, role: run.hideInput ? "system" : inputRole, text: inputText });
   if (!reused && run.attachmentIDs?.length) linkAttachments(db, inputMessage.id, run.attachmentIDs);
   titleThreadFromFirstMessage(db, threadID, run.text);
   // Peer-originated input (a brief, a handoff, a completion wake) must not shape
@@ -859,7 +867,10 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   expirePendingForTurn(db, turnID, stopReason === "cancelled" ? "cancelled" : "expired", run.emit);
   finishTurn(db, { id: turnID, stopReason, ...usage });
   // A request the owner stopped is closed for the model too; one their next message took over from is not.
-  if (stopReason === "cancelled" && cancelReason !== SUPERSEDED) closeRequest(db, { threadID, turnID, reason: "stopped" });
+  if (stopReason === "cancelled" && cancelReason !== SUPERSEDED) {
+    const why = abortReasonOf(run.signal);
+    closeRequest(db, { threadID, turnID, reason: why === "shutdown" ? "interrupted" : why === "device_revoked" ? "revoked" : "stopped" });
+  }
   touchThread(db, threadID);
   // A turn waiting for the owner's answer is not a failed turn: the session
   // is parked, and the resume picks it up.

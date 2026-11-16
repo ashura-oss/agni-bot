@@ -106,9 +106,9 @@ export async function executeRoutine(deps: RoutineRunDeps, routine: Routine): Pr
       threadID,
       text: buildRoutinePrompt(routine),
       // The instruction (and the saved state in it) is the daemon's, not something the owner
-      // typed: logged as a system note so history never shows it as the owner's message.
-      // The model still receives it as the turn's input.
-      inputRole: "system",
+      // typed: it is logged as a system row, so history never shows it as the owner's
+      // message. The routine keeps the trust it always had; only the log row differs.
+      hideInput: true,
       persona,
       emit: deps.emit,
       signal,

@@ -92,13 +92,13 @@ export function listThreads(db: Database, limit = 20): ThreadRow[] {
     .all(limit);
 }
 
-/** Thread list and latest message in one indexed query (avoids per-thread reads). */
+/** Thread list and latest message in one indexed query (avoids per-thread reads). System rows (instructions, closure notes) are not the owner's words and never the preview. */
 export function listThreadsWithPreview(db: Database, limit = 20): ThreadListRow[] {
   const rows = db
     .query<ThreadRow & { preview_text: string | null }, [number]>(
       `SELECT t.id, t.agent_id, t.title, t.created_at, t.updated_at,
               t.conversation_id, t.closed_at, t.closed_by, t.opened_carry, t.opened_tail,
-              (SELECT m.text FROM messages m WHERE m.thread_id = t.id
+              (SELECT m.text FROM messages m WHERE m.thread_id = t.id AND m.role <> 'system'
                ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS preview_text
        FROM threads t ORDER BY t.updated_at DESC LIMIT ?`,
     )

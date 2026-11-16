@@ -293,6 +293,25 @@ describe("a routine's prompt and state block are not shown to the owner", () => 
     expect(rows.find((row) => row.role === "system")?.text).toContain("Check the inbox and report.");
   });
 
+  test("hiding the instruction does not change the routine's trust: it streams, and its topic anchor is built from the instruction", async () => {
+    const r = routine({ preflight: { kind: "none" }, prompt: "Summarise the quarterly filing backlog." });
+    const database = setup(r);
+    const frames: Array<{ type: string }> = [];
+    let prefix = "";
+    const fake = routerWith((request) => {
+      prefix = request.messages.filter((message: any) => message.role === "system").map((message: any) => String(message.content)).join(" ");
+      request.onDelta?.("Backlog is clear.");
+      return { text: "Backlog is clear.", outputTokens: 20, provider: "fake", model: "fake", latencyMs: 1 };
+    });
+    await executeRoutine({ db: database, router: fake.router, settings, emit: (frame) => frames.push(frame as never) }, r);
+    // A peer-influenced turn streams nothing and anchors on nothing.
+    expect(frames.some((frame) => frame.type === "token")).toBe(true);
+    expect(prefix).toContain("quarterly filing backlog");
+    // And the instruction is still not in the owner's history.
+    const roles = database.query<{ role: string }, []>("SELECT role FROM messages WHERE text LIKE '%quarterly filing backlog%'").all().map((row) => row.role);
+    expect(roles).toEqual(["system"]);
+  });
+
   test("the stored reply, the run summary and the notification carry no state block; the state is kept", async () => {
     const r = routine({ preflight: { kind: "none" } });
     const database = setup(r);
