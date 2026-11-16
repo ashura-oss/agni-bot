@@ -311,11 +311,15 @@ describe("transcript", () => {
     const approvalEffects = conversation.apply(fixtureFrame("approval.request"));
     expect(conversation.openApprovals.length).toBe(1);
     expect(conversation.openApprovals[0]?.decisions).toEqual(["once", "always", "reject"]);
+    // The product name is never a bot's name: with no turn in flight the
+    // requester is unknown, so the wording is neutral.
     expect(approvalEffects).toContainEqual({
       kind: "notify",
-      title: "Agni needs you",
+      title: "Approval needed",
       body: "shell: git push origin main",
       sound: true,
+      need: "approval",
+      agentID: null,
     });
 
     conversation.apply(fixtureFrame("form.request"));
@@ -329,6 +333,55 @@ describe("transcript", () => {
     expect(conversation.needsYou).toBe(false);
   });
 
+  test("the requesting bot is the one whose turn is in flight (S1-40)", () => {
+    const conversation = new Conversation("agni", "thr_1");
+    conversation.apply(startFrame("trn_9", "thr_1", "researcher"));
+    const effects = conversation.apply(fixtureFrame("approval.request"));
+    expect(conversation.openApprovals[0]?.agentID).toBe("researcher");
+    expect(effects).toContainEqual(expect.objectContaining({ kind: "notify", need: "approval", agentID: "researcher" }));
+    for (const effect of effects) {
+      if (effect.kind === "notify") expect(effect.title).not.toMatch(/agni/i);
+    }
+    conversation.apply(fixtureFrame("form.request"));
+    expect(conversation.openForms[0]?.agentID).toBe("researcher");
+    conversation.apply(endFrame("trn_9", "thr_1", "end"));
+    conversation.apply(wire({ type: "secret.request", seq: 5, requestID: "sec_1", purpose: "sudo", command: "ls", kind: "password", expiresAt: "2030-01-01T00:00:00.000Z" }));
+    const secret = conversation.apply(wire({ type: "secret.request", seq: 6, requestID: "sec_2", purpose: "sudo", command: "ls", kind: "password", expiresAt: "2030-01-01T00:00:00.000Z" }));
+    for (const effect of secret) {
+      if (effect.kind === "notify") expect(effect.title).not.toMatch(/agni/i);
+    }
+  });
+
+  test("approval.closed removes the approval card and only that one (S1-closed)", () => {
+    const conversation = new Conversation("agni", "thr_1");
+    conversation.apply(fixtureFrame("approval.request"));
+    conversation.apply(wire({ type: "approval.request", seq: 51, requestID: "apr_other", action: "shell: ls", preview: "", buttons: ["once"] }));
+    conversation.apply(fixtureFrame("form.request"));
+    expect(conversation.openApprovals.map((a) => a.id)).toEqual(["apr_01hq", "apr_other"]);
+
+    // A form with the same id must not be touched by an approval close.
+    conversation.apply(wire({ type: "approval.closed", seq: 60, requestID: "apr_01hq", kind: "approval", reason: "decided" }));
+    expect(conversation.approvals.map((a) => a.id)).toEqual(["apr_other"]);
+    expect(conversation.openForms.length).toBe(1);
+
+    conversation.apply(wire({ type: "approval.closed", seq: 61, requestID: "frm_01hq", kind: "form", reason: "expired" }));
+    expect(conversation.forms.length).toBe(0);
+    expect(conversation.openApprovals.map((a) => a.id)).toEqual(["apr_other"]);
+  });
+
+  test("approval.closed removes an already answered card and ignores an unknown id", () => {
+    const conversation = new Conversation("agni", "thr_1");
+    conversation.apply(fixtureFrame("approval.request"));
+    conversation.resolveApproval("apr_01hq", "once");
+    conversation.apply(wire({ type: "approval.closed", seq: 60, requestID: "apr_01hq", kind: "approval", reason: "decided" }));
+    expect(conversation.approvals.length).toBe(0);
+    expect(() => conversation.apply(wire({ type: "approval.closed", seq: 61, requestID: "nope", kind: "form", reason: "cancelled" }))).not.toThrow();
+    // An approval id never closes a form of the same id, and vice versa.
+    conversation.apply(fixtureFrame("form.request"));
+    conversation.apply(wire({ type: "approval.closed", seq: 62, requestID: "frm_01hq", kind: "approval", reason: "cancelled" }));
+    expect(conversation.forms.length).toBe(1);
+  });
+
   test("messages for another thread become an unread mark, not a bubble", () => {
     const conversation = new Conversation("agni", "thr_1");
     const effects = conversation.apply(startFrame("trn_5", "thr_other"));
@@ -338,6 +391,60 @@ describe("transcript", () => {
 
     conversation.apply(tokenFrame("trn_5", "thr_other", "background noise"));
     expect(conversation.messages.length).toBe(0);
+  });
+
+  test("a reply picked up mid-stream is marked as a continuation until its full text lands (S1-40)", () => {
+    const conversation = new Conversation("agni", "thr_1");
+    // The owner switched away and back: the turn began before this view existed.
+    conversation.apply(tokenFrame("trn_mid", "thr_1", "the rest of the sentence"));
+    const bubble = conversation.messages[0];
+    expect(bubble?.isContinuation).toBe(true);
+
+    conversation.apply(wire({
+      type: "msg.new", seq: 130, id: "msg_full", channelId: "main", fromType: "agent", fromId: "agni",
+      senderName: "Agni", text: "The whole sentence, start to finish.", createdAt: "2026-10-16T12:00:00.000Z",
+    }));
+    const sealed = conversation.messages.find((message) => message.id === "msg_full");
+    expect(sealed?.text).toBe("The whole sentence, start to finish.");
+    expect(sealed?.isContinuation).toBe(false);
+  });
+
+  test("a reply picked up mid-stream asks for the durable copy when the turn ends", () => {
+    const conversation = new Conversation("agni", "thr_1");
+    conversation.apply(tokenFrame("trn_mid", "thr_1", "the rest"));
+    const effects = conversation.apply(endFrame("trn_mid", "thr_1", "end"));
+    expect(effects).toContainEqual({ kind: "reloadDurableState" });
+    // A normal turn does not.
+    const whole = new Conversation("agni", "thr_1");
+    whole.apply(startFrame("trn_w", "thr_1"));
+    whole.apply(tokenFrame("trn_w", "thr_1", "all of it"));
+    expect(whole.apply(endFrame("trn_w", "thr_1", "end"))).not.toContainEqual({ kind: "reloadDurableState" });
+  });
+
+  test("a turn seen from its start is never a continuation", () => {
+    const conversation = new Conversation("agni", "thr_1");
+    conversation.apply(startFrame("trn_whole", "thr_1"));
+    conversation.apply(tokenFrame("trn_whole", "thr_1", "from the start"));
+    expect(conversation.messages[0]?.isContinuation).toBe(false);
+  });
+
+  test("a stopped turn keeps its marker after the history reloads (S1-40)", () => {
+    const conversation = new Conversation("agni", "thr_1");
+    const durable: MessageInfo[] = [
+      info({ id: "msg_q", role: "user", text: "write a poem", createdAt: "2026-10-16T11:00:00.000Z", turnID: "trn_s" }),
+      info({ id: "msg_a", role: "assistant", text: "Roses are", createdAt: "2026-10-16T11:00:01.000Z", turnID: "trn_s" }),
+      info({ id: "msg_b", role: "assistant", text: "Fine.", createdAt: "2026-10-16T11:05:00.000Z", turnID: "trn_ok" }),
+    ];
+    conversation.loadHistory("thr_1", null, "agni", durable);
+    expect(conversation.messages.every((message) => message.state.kind === "complete")).toBe(true);
+
+    conversation.restoreStops({ trn_s: "cancelled" });
+    const stopped = conversation.messages.find((message) => message.id === "msg_a");
+    expect(stopped?.state).toEqual({ kind: "stopped", reason: "cancelled" });
+    expect(stopExplanation(stopped!)).not.toBeNull();
+    // Neither the owner's message nor another turn's answer changes.
+    expect(conversation.messages.find((message) => message.id === "msg_q")?.state.kind).toBe("complete");
+    expect(conversation.messages.find((message) => message.id === "msg_b")?.state.kind).toBe("complete");
   });
 
   test("replayed deltas without their start still render", () => {
@@ -437,6 +544,52 @@ describe("session seams", () => {
     conversation.apply(endFrame("trn_job", "thr_brief", "end", { conversationID: "cnv_1" }));
     expect(isComplete(conversation.messages[0]!)).toBe(true);
     expect(conversation.isStreaming).toBe(false);
+  });
+
+  test("a background job that says nothing leaves no failed empty reply in the open chat (S1-23)", () => {
+    const conversation = new Conversation("agni");
+    conversation.bind("cnv_1", "agni", "thr_active");
+
+    conversation.apply(startFrame("trn_job", "thr_job", "agni", "cnv_1"));
+    conversation.apply(endFrame("trn_job", "thr_job", "end", { conversationID: "cnv_1" }));
+    expect(conversation.messages.length).toBe(0);
+    expect(conversation.isStreaming).toBe(false);
+
+    // The same turn kind in the open block is the owner's own: an empty
+    // answer there still reads as "produced no reply".
+    conversation.apply(startFrame("trn_own", "thr_active", "agni", "cnv_1"));
+    conversation.apply(endFrame("trn_own", "thr_active", "end", { conversationID: "cnv_1" }));
+    expect(conversation.messages.length).toBe(1);
+    expect(conversation.messages[0]?.isBackground).toBe(false);
+  });
+
+  test("a background job that failed or timed out is not silently dropped (review)", () => {
+    for (const reason of ["error", "timeout"]) {
+      const conversation = new Conversation("agni");
+      conversation.bind("cnv_1", "agni", "thr_active");
+      conversation.apply(startFrame("trn_f", "thr_job", "agni", "cnv_1"));
+      conversation.apply(endFrame("trn_f", "thr_job", reason, { conversationID: "cnv_1" }));
+      const kept = conversation.messages.find((message) => message.turnID === "trn_f");
+      expect(kept?.isBackground).toBe(true);
+      expect(kept?.state.kind).not.toBe("complete");
+      expect(kept?.state.kind).not.toBe("streaming");
+    }
+  });
+
+  test("a background job that spoke keeps its text; one that only ran tools is flagged, not failed", () => {
+    const conversation = new Conversation("agni");
+    conversation.bind("cnv_1", "agni", "thr_active");
+    conversation.apply(startFrame("trn_a", "thr_job", "agni", "cnv_1"));
+    conversation.apply(tokenFrame("trn_a", "thr_job", "Time to stretch."));
+    conversation.apply(endFrame("trn_a", "thr_job", "end", { conversationID: "cnv_1" }));
+    expect(conversation.messages[0]?.text).toBe("Time to stretch.");
+
+    conversation.apply(startFrame("trn_b", "thr_job2", "agni", "cnv_1"));
+    conversation.apply(wire({ type: "tool.start", seq: 130, callID: "c1", name: "notify", turnID: "trn_b" }));
+    conversation.apply(endFrame("trn_b", "thr_job2", "end", { conversationID: "cnv_1" }));
+    const quiet = conversation.messages.find((m) => m.turnID === "trn_b");
+    expect(quiet?.isBackground).toBe(true);
+    expect(quiet?.text).toBe("");
   });
 
   test("turns of another conversation stay out", () => {

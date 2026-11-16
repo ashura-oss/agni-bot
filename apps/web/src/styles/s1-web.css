@@ -1,0 +1,138 @@
+/**
+ * Sprint 1 web fixes. Kept out of app.css on purpose (it is already far too
+ * large): the lost-connection band, the mid-stream continuation mark, the
+ * field error, and the small corrections that follow them.
+ */
+
+/* A lost connection, said plainly under the header. It fades in after a beat
+   so the first second of a normal connect does not flash it. */
+.connection-banner {
+  position: absolute;
+  top: 72px;
+  left: 50%;
+  z-index: 19;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: max-content;
+  max-width: calc(100% - 28px);
+  padding: 8px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--ink-secondary);
+  font-size: var(--text-meta);
+  box-shadow: var(--shadow-card);
+  transform: translateX(-50%);
+  animation: connection-banner-in 200ms 700ms both;
+}
+
+.connection-banner.lost {
+  border-color: color-mix(in srgb, var(--amber) 55%, var(--hairline));
+  color: var(--ink);
+}
+
+.connection-banner.lost > svg {
+  color: var(--amber);
+}
+
+.connection-banner > svg {
+  flex: 0 0 auto;
+}
+
+.connection-banner-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.connection-banner .btn {
+  flex: 0 0 auto;
+}
+
+@keyframes connection-banner-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.presence-dot.attention {
+  width: 9px;
+  height: 9px;
+  background: var(--amber);
+}
+
+/* A reply picked up in the middle: the start is not on screen yet. */
+.assistant-bubble.continued .prose > :first-child::before {
+  content: "… ";
+  color: var(--ink-tertiary);
+}
+
+.profile-field-error {
+  color: var(--amber);
+  font-size: var(--text-caption);
+}
+
+.sidebar-owner-avatar svg {
+  display: block;
+}
+
+/* Tables scroll sideways inside their own box instead of squeezing every
+   column until words break in the middle. */
+.markdown-table table {
+  width: max-content;
+  min-width: 100%;
+}
+
+.markdown-table th,
+.markdown-table td {
+  min-width: 7ch;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+/* The details panel never scrolls sideways: a long path or id wraps instead of
+   pushing the pane wider than its box. */
+.inspector {
+  overflow-x: hidden;
+}
+
+.inspector .routine-title,
+.inspector .routine-meta,
+.inspector .inspector-agent-name,
+.inspector .settings-row,
+.inspector .empty-note,
+.inspector .provider-note,
+.inspector .provider-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* A failed turn: one sentence, with the raw reply from the daemon folded away. */
+.failure-note .failure-detail {
+  margin-top: 6px;
+  color: var(--ink-secondary);
+  font-size: var(--text-caption);
+}
+
+.failure-note .failure-detail summary {
+  cursor: pointer;
+}
+
+.failure-note .failure-detail pre {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+}
+
+/* Read by screen readers, not drawn. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}

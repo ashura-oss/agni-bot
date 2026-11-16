@@ -8,6 +8,7 @@
  * profile. It is a place in the chat column, not a dialog floating over one
  * (blueprint v3 §5).
  */
+import { previewLine, writtenRole } from "../state/display";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Check, Plus, X } from "lucide-react";
 import { useAppModel, useAppSnapshot } from "../state/use-app-model";
@@ -45,7 +46,7 @@ export function NewChatView() {
         newest = { updatedAt: thread.updatedAt, preview: thread.preview };
       }
     }
-    return newest?.preview;
+    return newest?.preview ? previewLine(newest.preview) : undefined;
   };
 
   // Every open starts clean, so a half-typed search never reappears later.
@@ -144,7 +145,7 @@ export function NewChatView() {
           ) : (
             agents.map((agent, index) => {
               const selected = snapshot.conversation.agentID === agent.id;
-              const subtitle = previewFor(agent.id) ?? agent.role ?? agent.model ?? "Assistant";
+              const subtitle = previewFor(agent.id) || writtenRole(agent.role) || agent.model || "Assistant";
               return (
                 <button
                   type="button"

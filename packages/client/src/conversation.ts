@@ -46,6 +46,18 @@ export interface ChatMessage {
   /** Set on a question from a delegated task; the answer carries it back. */
   taskId: string | null;
   questionId: string | null;
+  /**
+   * The reply of a background job (a reminder, a brief) that streamed into
+   * this conversation from a session block of its own. It never counts as the
+   * owner's own empty answer.
+   */
+  isBackground: boolean;
+  /**
+   * The text so far is the middle of a reply: this view picked the turn up
+   * after it began (the owner switched away and back). The full text replaces
+   * it when the answer is sealed.
+   */
+  isContinuation: boolean;
 }
 
 export interface ApprovalRow {
@@ -55,6 +67,8 @@ export interface ApprovalRow {
   decisions: string[];
   decision: string | null;
   isLocal: boolean;
+  /** The bot whose turn asked, when the frames said so; null when unknown. */
+  agentID?: string | null;
 }
 
 export interface FormEmail {
@@ -75,6 +89,8 @@ export interface FormRow {
   multiple: boolean;
   /** The draft, when the kind is "email". */
   email: FormEmail | null;
+  /** The bot whose turn asked, when the frames said so; null when unknown. */
+  agentID?: string | null;
 }
 
 /** A one-time password prompt. The value never lives in this row. */
@@ -101,7 +117,20 @@ export interface NoticeRow {
 export type ConversationEffect =
   | { kind: "refreshThreadList" }
   | { kind: "reloadDurableState" }
-  | { kind: "notify"; title: string; body: string; sound: boolean; threadID?: string }
+  | {
+      kind: "notify";
+      title: string;
+      body: string;
+      sound: boolean;
+      threadID?: string;
+      /**
+       * Set when the notice is the app asking the owner for something. `title`
+       * is neutral; the app puts the asking bot's name in front when it knows
+       * it. The product name is never used as a bot's name.
+       */
+      need?: "approval" | "question" | "password";
+      agentID?: string | null;
+    }
   | { kind: "focusComposer" }
   | { kind: "unread"; threadID: string }
   | { kind: "agentsChanged"; agents: AgentInfo[] }
@@ -127,6 +156,8 @@ function newMessage(partial: Partial<ChatMessage> & Pick<ChatMessage, "id" | "ro
     uiHint: null,
     taskId: null,
     questionId: null,
+    isBackground: false,
+    isContinuation: false,
     ...partial,
   };
 }
@@ -184,6 +215,8 @@ export class Conversation {
    * their tokens carry only a block id, so attribution survives the seam.
    */
   private adoptedTurns = new Set<string>();
+  /** Which bot runs each turn this view follows: who an approval is "from". */
+  private turnAgents = new Map<string, string>();
 
   private static readonly noticeCap = 40;
 
@@ -354,6 +387,23 @@ export class Conversation {
     this.messages = rebuilt;
   }
 
+  /**
+   * Re-mark replies that did not finish. History carries no stop reason, so
+   * the app remembers the reasons it saw on `turn.end` and hands them back
+   * after a reload; the last answer of each such turn gets its marker again.
+   */
+  restoreStops(stops: Readonly<Record<string, string>>): void {
+    for (const [turnID, reason] of Object.entries(stops)) {
+      if (reason === "end" || reason === "needs_input") continue;
+      for (let index = this.messages.length - 1; index >= 0; index -= 1) {
+        const message = this.messages[index];
+        if (!message || message.turnID !== turnID || message.role !== "assistant") continue;
+        if (message.state.kind === "complete") message.state = { kind: "stopped", reason };
+        break;
+      }
+    }
+  }
+
   // MARK: frames
 
   apply(frame: IncomingFrame): ConversationEffect[] {
@@ -394,13 +444,21 @@ export class Conversation {
       case "appearance.updated":
       case "push.vapid":
       case "agent.proactivity":
-      // TODO(s1): remove the card named by `requestID` (`kind` approval|form). The contract
-      // exists; the client handler is a separate task. Listed here so the switch stays exhaustive.
-      case "approval.closed":
       // Group channels are a roster concern; a group's messages arrive as msg.new.
       case "channel.created":
       case "channel.list.ok":
       case "channel.history.ok":
+        return [];
+
+      case "approval.closed":
+        // The card is no longer actionable (answered here or elsewhere, timed
+        // out, or its turn ended). The id spaces of approvals and forms are
+        // separate, so `kind` says which list the card is in.
+        if (frame.kind === "approval") {
+          this.approvals = this.approvals.filter((approval) => approval.id !== frame.requestID);
+        } else {
+          this.forms = this.forms.filter((form) => form.id !== frame.requestID);
+        }
         return [];
 
       case "presence":
@@ -456,6 +514,7 @@ export class Conversation {
             streamed.text = frame.text;
             streamed.createdAt = parseISO(frame.createdAt);
             streamed.state = { kind: "complete" };
+            streamed.isContinuation = false;
             streamed.senderName = frame.senderName;
             streamed.senderColor = frame.senderColor ?? null;
             streamed.uiHint = frame.uiHint ?? null;
@@ -519,6 +578,11 @@ export class Conversation {
         if (frame.conversationID !== undefined || this.threadID === frame.threadID) {
           this.adoptedTurns.add(frame.turnID);
         }
+        this.turnAgents.set(frame.turnID, frame.agentID);
+        // A turn bound in by conversation but running in a block other than the
+        // open one is background work (a reminder, a brief), not the owner's chat.
+        const isBackground =
+          frame.conversationID !== undefined && this.threadID !== null && this.threadID !== frame.threadID;
         this.adopt(frame.threadID);
         this.inFlightTurnID = frame.turnID;
         this.inFlightThreadID = frame.threadID;
@@ -538,6 +602,7 @@ export class Conversation {
               agentID: frame.agentID,
               sessionID: frame.threadID,
               state: { kind: "streaming" },
+              isBackground,
             }),
           );
         }
@@ -565,6 +630,8 @@ export class Conversation {
               agentID: this.agentID,
               sessionID: frame.threadID,
               state: { kind: "streaming" },
+              // No turn.start was seen, so the start of this reply is not here.
+              isContinuation: true,
             }),
           );
         }
@@ -580,10 +647,21 @@ export class Conversation {
         const id = Conversation.assistantID(frame.turnID);
         const message = this.messages.find((candidate) => candidate.id === id);
         const answerID = this.turnAnswers.get(frame.turnID);
+        this.turnAgents.delete(frame.turnID);
         if (message) {
           if (message.text.length === 0 && answerID !== undefined) {
             // The answer was sealed under its durable id; this is only the
             // empty bubble opened for a next step that never came.
+            this.messages = this.messages.filter((candidate) => candidate !== message);
+          } else if (
+            message.text.length === 0 &&
+            message.isBackground &&
+            message.tools.length === 0 &&
+            frame.stopReason === "end"
+          ) {
+            // A background job that finished and said nothing is not a failed reply in the
+            // owner's chat. One that failed or timed out keeps its bubble, so the owner
+            // hears that their reminder did not run.
             this.messages = this.messages.filter((candidate) => candidate !== message);
           } else {
             // A turn that ended badly keeps the daemon's own explanation when
@@ -611,12 +689,14 @@ export class Conversation {
         }
         this.turnAnswers.delete(frame.turnID);
         this.failures.delete(frame.turnID);
+        // A reply this view only saw the tail of is completed from the durable copy.
+        const pickedUpMidStream = message?.isContinuation === true && message.text.length > 0;
         if (!isOurs) return [{ kind: "unread", threadID: frame.threadID }, { kind: "refreshThreadList" }];
         if (this.inFlightTurnID === frame.turnID) {
           this.inFlightTurnID = null;
           this.inFlightThreadID = null;
         }
-        return [{ kind: "refreshThreadList" }];
+        return pickedUpMidStream ? [{ kind: "refreshThreadList" }, { kind: "reloadDurableState" }] : [{ kind: "refreshThreadList" }];
       }
 
       case "tool.start":
@@ -645,9 +725,17 @@ export class Conversation {
           decisions: frame.buttons,
           decision: null,
           isLocal: false,
+          agentID: this.requestingAgentID(),
         });
         return [
-          { kind: "notify", title: "Agni needs you", body: frame.action, sound: true },
+          {
+            kind: "notify",
+            title: "Approval needed",
+            body: frame.action,
+            sound: true,
+            need: "approval",
+            agentID: this.requestingAgentID(),
+          },
           { kind: "refreshThreadList" },
         ];
 
@@ -661,9 +749,17 @@ export class Conversation {
           kind: frame.kind === "email" ? "email" : "choice",
           multiple: frame.multiple === true,
           email: frame.email ?? null,
+          agentID: this.requestingAgentID(),
         });
         return [
-          { kind: "notify", title: "Agni asked a question", body: frame.question, sound: false },
+          {
+            kind: "notify",
+            title: "A question for you",
+            body: frame.question,
+            sound: false,
+            need: "question",
+            agentID: this.requestingAgentID(),
+          },
           { kind: "focusComposer" },
         ];
 
@@ -677,7 +773,14 @@ export class Conversation {
           expiresAt: frame.expiresAt,
         });
         return [
-          { kind: "notify", title: "Agni needs your password", body: frame.purpose, sound: true },
+          {
+            kind: "notify",
+            title: "Password needed",
+            body: frame.purpose,
+            sound: true,
+            need: "password",
+            agentID: this.requestingAgentID(),
+          },
         ];
 
       case "secret.cancel":
@@ -732,6 +835,15 @@ export class Conversation {
     if (conversationID) return conversationID === this.conversationID;
     if (this.threadID) return this.threadID === threadID;
     return true;
+  }
+
+  /**
+   * The bot whose turn is running here, which is who an approval or question
+   * arriving now is from. Those frames name no bot, so with no turn in flight
+   * this is null and the wording stays neutral.
+   */
+  private requestingAgentID(): string | null {
+    return this.inFlightTurnID ? (this.turnAgents.get(this.inFlightTurnID) ?? null) : null;
   }
 
   private adopt(threadID: string): void {

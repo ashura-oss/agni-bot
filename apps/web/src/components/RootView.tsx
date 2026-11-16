@@ -18,6 +18,7 @@ import { InspectorView } from "./InspectorView";
 import { DebugView } from "./DebugView";
 import { ChatGPTPlanNotice } from "./ChatGPTConnectionView";
 import { TasksView } from "./TasksView";
+import { ConnectionBanner } from "./ConnectionBanner";
 
 export function RootView() {
   const model = useAppModel();
@@ -135,6 +136,7 @@ function ChatView() {
         ) : (
           <>
             <ThreadHeader onToggleSidebar={() => setSidebarCollapsed((value) => !value)} />
+            <ConnectionBanner />
             <ThreadView />
           </>
         )}

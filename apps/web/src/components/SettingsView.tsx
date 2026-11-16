@@ -2,7 +2,7 @@
  * App settings reached from the account control at the bottom of the sidebar:
  * account, plugins, model providers, and this browser's pairing.
  */
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   ArrowLeft,
   Cpu,
@@ -23,6 +23,8 @@ import { AddProviderView } from "./AddProviderView";
 import { ConfigurePluginView } from "./ConfigurePluginView";
 import { ChatGPTConnectionView } from "./ChatGPTConnectionView";
 import { AppearanceView } from "./AppearanceView";
+import { useDialog } from "./use-dialog";
+import { providerLabel } from "../state/display";
 
 type Section = "general" | "appearance" | "plugins" | "models" | "device";
 
@@ -66,6 +68,8 @@ export function SettingsView() {
   const [addingProvider, setAddingProvider] = useState(false);
   const [editingProvider, setEditingProvider] = useState<ProviderStatus | null>(null);
   const [connectingPlugin, setConnectingPlugin] = useState<PluginInfo | null>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
+  useDialog(rootRef, () => model.closeSettings());
 
   useEffect(() => {
     void model.refreshSettingsData();
@@ -76,7 +80,7 @@ export function SettingsView() {
   const current = SECTIONS.find((item) => item.id === section) ?? SECTIONS[0]!;
 
   return (
-    <div className="settings-overlay" role="dialog" aria-label="Settings">
+    <div className="settings-overlay" role="dialog" aria-modal="true" ref={rootRef} aria-label="Settings">
       <nav className="settings-rail">
         <h2>Settings</h2>
         <div className="settings-tabs">
@@ -402,8 +406,8 @@ function ModelsSection({ onAdd, onEdit }: { onAdd: () => void; onEdit: (provider
           Local models can be served by LM Studio on the daemon host.
         </span>
         <span className="settings-note">
-          Model choices are saved on the daemon in data/providers.json. Provider API keys stay
-          in its mode-600 .env file.
+          Model choices are saved on the daemon in providers.json, in its Agni home folder
+          (AGNI_HOME, ~/.agni by default). Provider API keys stay in config.env there.
         </span>
       </div>
       {snapshot.configuredProviders.length === 0 || (snapshot.chatgpt?.accounts.length ?? 0) > 0 || snapshot.chatgpt?.status === "pending" ? <div className="settings-group"><ChatGPTConnectionView manage /></div> : null}
@@ -416,7 +420,7 @@ function ProviderRow({ provider, onEdit }: { provider: ProviderStatus; onEdit: (
     <div className="plugin-row">
       <span className={`provider-dot${provider.available ? "" : " off"}`} style={{ marginTop: 6 }} />
       <div className="plugin-main">
-        <div className="provider-name">{provider.label}</div>
+        <div className="provider-name">{providerLabel(provider)}</div>
         <div className="provider-model">{provider.model}</div>
         <div className={`settings-note${provider.available ? "" : " warning-text"}`}>
           {provider.available ? provider.tiers.join(" · ") : provider.lastError ?? "Unavailable"}
@@ -429,7 +433,7 @@ function ProviderRow({ provider, onEdit }: { provider: ProviderStatus; onEdit: (
         type="button"
         className="icon-btn"
         title="Choose model"
-        aria-label={`Choose model for ${provider.label}`}
+        aria-label={`Choose model for ${providerLabel(provider)}`}
         onClick={onEdit}
       >
         <Pencil size={12} />
@@ -510,6 +514,8 @@ function ProviderModelEditor({
   const [draft, setDraft] = useState(provider.model);
   const [selectedModel, setSelectedModel] = useState(provider.model);
   const [custom, setCustom] = useState(false);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  useDialog(dialogRef, onDismiss);
 
   useEffect(() => {
     model.loadProviderModels(provider.id);
@@ -545,11 +551,11 @@ function ProviderModelEditor({
         if (event.target === event.currentTarget) onDismiss();
       }}
     >
-      <div className="dialog wide" role="dialog" aria-label="Choose a model">
+      <div className="dialog wide" role="dialog" aria-modal="true" ref={dialogRef} aria-label="Choose a model">
         <div>
           <h2>Choose a model</h2>
           <p style={{ marginTop: 4 }}>
-            {isChatGPT ? "Choose a model available to your ChatGPT account." : `Enter a model ID supported by ${provider.label}. The daemon will route future requests to it.`}
+            {isChatGPT ? "Choose a model available to your ChatGPT account." : `Enter a model ID supported by ${providerLabel(provider)}. The daemon will route future requests to it.`}
           </p>
         </div>
 

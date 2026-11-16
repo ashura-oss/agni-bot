@@ -51,6 +51,7 @@ import {
   savePreferences,
   type Preferences,
 } from "./preferences";
+import { loadStops, rememberStop } from "./stops";
 import { APPEARANCE_PENDING_KEY, cacheAppearance, defaultAppearance, loadCachedAppearance, loadPendingAppearance } from "../appearance";
 
 export type AppScreen = "pairing" | "chat";
@@ -143,6 +144,8 @@ export interface AppModelEnv {
 }
 
 const PRIMARY_AGENTS = new Set(["ea", "agni"]);
+/** The product's own name: the tab title before the roster is known. Never a bot's name. */
+const APP_TITLE = "Agni";
 
 export function isPrimaryAgent(agent: AgentInfo | null | undefined): boolean {
   return !agent || PRIMARY_AGENTS.has(agent.id);
@@ -154,7 +157,6 @@ function seedAgents(): AgentInfo[] {
 
 /** What the "+" button makes: an agent with a placeholder name, not a form. */
 const NEW_AGENT_NAME = "New bot";
-const NEW_AGENT_ROLE = "unnamed";
 const NEW_AGENT_PROMPT = `You are {name}, an agent {user} just created in the app. You have no job description yet.
 
 Open with one short line, then ask two things: what they want to call you, and what you should do for them.
@@ -210,6 +212,8 @@ export class AppModel {
   private conversation = new Conversation("ea");
   private threads: ThreadInfo[] = [];
   private agents: AgentInfo[] = seedAgents();
+  /** The daemon has sent the real roster; until then the seed row is only a stand-in. */
+  private rosterKnown = false;
   /** Hidden specialists are absent from the sidebar but still addressable. */
   private mentionAgents: AgentInfo[] = seedAgents();
   /** The channel this client is bound to, when it bound itself to an agent. */
@@ -382,7 +386,8 @@ export class AppModel {
     this.snapshotValue = this.buildSnapshot();
     for (const listener of this.listeners) listener();
     if (typeof document !== "undefined") {
-      document.title = this.agent?.name ?? "Agni";
+      // The seed bot's placeholder name must not flash in the tab before the roster arrives.
+      document.title = this.rosterKnown ? (this.agent?.name ?? APP_TITLE) : APP_TITLE;
     }
   }
 
@@ -489,8 +494,7 @@ export class AppModel {
 
   private syncAgentRoute(): void {
     if (!this.pendingAgentRoute) return;
-    const key = this.pendingAgentRoute.toLowerCase();
-    const agent = [...this.mentionAgents, ...this.agents].find((item) => item.id.toLowerCase() === key || item.name.toLowerCase().replace(/[^a-z0-9]+/g, "-") === key);
+    const agent = agentForRoute(this.pendingAgentRoute, [...this.mentionAgents, ...this.agents]);
     if (!agent) return;
     this.pendingAgentRoute = null;
     this.selectAgent(agent, false);
@@ -604,6 +608,7 @@ export class AppModel {
     this.secretKind = null;
     this.threads = [];
     this.agents = seedAgents();
+    this.rosterKnown = false;
     this.mentionAgents = seedAgents();
     this.conversation = new Conversation("ea");
     this.health = null;
@@ -1047,6 +1052,8 @@ export class AppModel {
   }
 
   answer(approval: ApprovalRow, decision: string): void {
+    // A card the daemon has closed (answered elsewhere, expired) is gone: nothing to send.
+    if (!this.conversation.approvals.some((candidate) => candidate.id === approval.id)) return;
     this.reply(
       approval.id,
       { type: "approve.reply", requestID: approval.id, decision: decision as "once" | "always" | "reject" },
@@ -1059,6 +1066,7 @@ export class AppModel {
    * so the turn waiting on it can carry on.
    */
   answerForm(form: FormRow, answer: string): void {
+    if (!this.conversation.forms.some((candidate) => candidate.id === form.id)) return;
     this.reply(form.id, { type: "form.answer", requestID: form.id, answer }, () =>
       this.conversation.resolveForm(form.id, answer),
     );
@@ -1304,6 +1312,8 @@ export class AppModel {
 
   toggleInspector(): void {
     this.isInspectorPresented = !this.isInspectorPresented;
+    // The jobs list is only pushed in answer to a request: ask again when the panel opens.
+    if (this.isInspectorPresented) this.refreshJobs();
     this.publish();
   }
 
@@ -1444,7 +1454,7 @@ export class AppModel {
     const connection = this.connection;
     if (!connection) return;
     const { id, name } = nextNewAgent([...this.agents, ...this.mentionAgents]);
-    const agent: AgentInfo = { id, name, role: NEW_AGENT_ROLE, tools: [] };
+    const agent: AgentInfo = { id, name, tools: [] };
     this.agents = [...this.agents, agent];
     this.mentionAgents = [...this.mentionAgents, agent];
     void connection
@@ -1452,7 +1462,6 @@ export class AppModel {
         type: "agent.create",
         id: agent.id,
         name,
-        role: NEW_AGENT_ROLE,
         prompt: NEW_AGENT_PROMPT,
       })
       .catch(() => undefined);
@@ -1728,6 +1737,8 @@ export class AppModel {
         this.conversation.agentID,
         frame.messages,
       );
+      // History does not say how a turn ended; put back the "didn't finish" marks this browser saw.
+      this.conversation.restoreStops(loadStops());
       if (this.conversation.threadID === null) {
         const connection = this.connection;
         if (connection && isReady(this.connectionState)) {
@@ -1940,8 +1951,14 @@ export class AppModel {
     }
 
     if (frame.type === "agents.update" && frame.mentions) this.mentionAgents = frame.mentions;
+    // A card the daemon closed must not have a late answer re-sent for it on reconnect.
+    if (frame.type === "approval.closed") this.unsent.delete(frame.requestID);
+    if (frame.type === "turn.end" && frame.stopReason !== "end" && frame.stopReason !== "needs_input") {
+      rememberStop(frame.turnID, frame.stopReason);
+    }
     const effects = this.conversation.apply(frame);
     if (frame.type === "turn.end" || frame.type === "turn.start") this.refreshThreadList();
+    if ((frame.type === "turn.end" || frame.type === "notify") && this.isInspectorPresented) this.refreshJobs();
     this.run(effects);
     this.syncAgentRoute();
     this.publish();
@@ -1958,7 +1975,7 @@ export class AppModel {
           this.reloadConversation();
           break;
         case "notify":
-          this.notifyUser(effect.title, effect.body, effect.sound, effect.threadID);
+          this.notifyUser(this.attentionTitle(effect), effect.body, effect.sound, effect.threadID);
           break;
         case "focusComposer":
           this.focusComposer();
@@ -1967,6 +1984,7 @@ export class AppModel {
           if (effect.threadID !== this.conversation.threadID) this.unread.add(effect.threadID);
           break;
         case "agentsChanged":
+          this.rosterKnown = true;
           if (JSON.stringify(effect.agents) !== JSON.stringify(this.agents)) this.agents = effect.agents;
           break;
         case "taskChanged":
@@ -2093,6 +2111,26 @@ export class AppModel {
 
   // MARK: notifications
 
+  /** The display name of the bot that asked for something, or null when no bot is known. */
+  requesterName(agentID: string | null | undefined): string | null {
+    if (!agentID) return null;
+    return [...this.mentionAgents, ...this.agents].find((agent) => agent.id === agentID)?.name ?? null;
+  }
+
+  /** "<bot> needs your approval", or the neutral wording when the frames named no bot. */
+  private attentionTitle(effect: Extract<ConversationEffect, { kind: "notify" }>): string {
+    const name = this.requesterName(effect.agentID);
+    if (!effect.need || !name) return effect.title;
+    switch (effect.need) {
+      case "approval":
+        return `${name} needs your approval`;
+      case "question":
+        return `${name} has a question`;
+      case "password":
+        return `${name} needs your password`;
+    }
+  }
+
   private notifyUser(title: string, body: string, sound = false, threadID?: string): void {
     this.showToast(notice("info", title, body, threadID ?? null));
     if (!this.preferences.notifications) return;
@@ -2112,7 +2150,21 @@ export class AppModel {
 
 export type { ChatMessage };
 
-function agentPath(agent: AgentInfo | null): string {
-  const slug = agent?.name.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "agni";
-  return `/agent/${encodeURIComponent(slug)}`;
+/**
+ * A bot's address is its id: it never changes when the bot is renamed, and no
+ * two bots share one. (Names change and can collide, which left `/agent/new-bot`
+ * pointing at the wrong bot after a rename or a second "New bot".)
+ */
+export function agentPath(agent: AgentInfo | null): string {
+  return `/agent/${encodeURIComponent(agent?.id ?? "ea")}`;
+}
+
+/** The bot a `/agent/<key>` address names: by id, else by a name nobody else shares (old links). */
+export function agentForRoute(key: string, roster: readonly AgentInfo[]): AgentInfo | null {
+  const wanted = key.toLowerCase();
+  const byID = roster.find((agent) => agent.id.toLowerCase() === wanted);
+  if (byID) return byID;
+  const slug = (name: string) => name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  const byName = roster.filter((agent) => slug(agent.name) === wanted);
+  return byName.length === 1 ? (byName[0] ?? null) : null;
 }
