@@ -100,7 +100,7 @@ describe("approvalTarget: what a rule is scoped to", () => {
       "find . -exec rm {} ;", "timeout 5 ls",
       // Gaps a denylist leaves: an interpreter it never heard of, shell syntax, quoting, expansion.
       "py run.py", "if true; then ls; fi", "! ls", "while true; do ls; done", "p''ython run.py", "pyth\on run.py", "$X run.py", "ls $X", "ls ${X}", "$(ls)",
-      "git commit -m x", "git push origin main", "git -c core.pager=./x log", "git log --ext-diff", "git diff --textconv", "git status --exec=x", "git",
+      "git status", "git log --oneline -5", "git diff HEAD~1", "git show abc123", "git commit -m x", "git push origin main", "git -c core.pager=./x log", "git log --ext-diff", "git diff --textconv", "git status --exec=x", "git",
       "jest", "vitest run", "poetry run x", "pipenv run x", "conda run x", "docker run x", "cscript a.vbs", "wscript a.vbs", "mshta x", "gcc x.c", "sed e", "sed -n p",
       "ls > run.py", "echo hi > run.cmd", "echo x >> a.bat", "cat a >run.sh", "ls < in", "cat a | python", "cat a | py", "rm -rf build; py x.py", "ls && py x.py",
       "LS", "ls.exe", "'ls' x", "FOO=1 ls", "mkdir -p out && node x", "unknowntool --flag",
@@ -112,7 +112,7 @@ describe("approvalTarget: what a rule is scoped to", () => {
     const plain = [
       "rm -rf build", "ls -la", "dir", "cat notes.md", "type notes.md", "head -n 5 a.txt", "tail -f a.log", "wc -l a", "mkdir -p out/x", "cp a b", "copy a b",
       "mv old new", "move old new", "del old.txt", "touch a", "echo python", "echo hi there", "ls -la | wc -l", "mv old new && ls", "ls; pwd",
-      "git status", "git log --oneline -5", "git diff HEAD~1", "git show abc123", "rm 'my file.txt'", "del C:\work\old.txt",
+      "rm 'my file.txt'", "del C:\work\old.txt",
     ];
     for (const command of plain) {
       expect({ command, remembered: approvalTarget("bash", { command }) !== null }).toEqual({ command, remembered: true });

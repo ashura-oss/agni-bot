@@ -151,10 +151,6 @@ export function revokeApprovalRule(db: Database, id: string): boolean {
 const PLAIN_PROGRAMS = new Set([
   "ls", "dir", "cat", "type", "head", "tail", "wc", "pwd", "mkdir", "cp", "copy", "mv", "move", "rm", "del", "touch", "echo",
 ]);
-/** Read-only git subcommands, and the flags that make even those run a configured program. */
-const GIT_READ_ONLY = new Set(["status", "log", "diff", "show"]);
-const GIT_RUNS_PROGRAMS = /^(-c|--ext-diff|--textconv|--output|--exec|--upload-pack|--receive-pack|--config|--paginate|-p$)/;
-
 /**
  * An allowlist, not a denylist: "always" may be remembered for a bash command
  * only when every simple command in it is a plain, non-executing program. A
@@ -166,9 +162,8 @@ const GIT_RUNS_PROGRAMS = /^(-c|--ext-diff|--textconv|--output|--exec|--upload-p
  * The whole command may not contain `$`, a backtick, parentheses, braces,
  * `<`, `>` or `!`: no expansion, no substitution, no subshell, no redirection.
  * It is split on `;`, `&`, `|` and newlines, and each segment must start with a
- * bare program name from `PLAIN_PROGRAMS`, or `git` with a read-only
- * subcommand and no flag that names a helper program. Quotes, backslash-escaped
- * names, `.exe` suffixes, paths and `VAR=x` prefixes fail the bare-name test.
+ * bare program name from `PLAIN_PROGRAMS`. Quotes, backslash-escaped names,
+ * `.exe` suffixes, paths and `VAR=x` prefixes fail the bare-name test.
  */
 function isPlainCommand(command: string): boolean {
   if (/[$`(){}<>!]/.test(command)) return false;
@@ -177,13 +172,10 @@ function isPlainCommand(command: string): boolean {
     if (words.length === 0) continue;
     const program = words[0]!;
     if (!/^[A-Za-z]+$/.test(program)) return false;
-    const name = program; // exact: "LS" is not a program this list vouches for
-    if (name === "git") {
-      if (!GIT_READ_ONLY.has(words[1] ?? "")) return false;
-      if (words.slice(2).some((word) => GIT_RUNS_PROGRAMS.test(word))) return false;
-    } else if (!PLAIN_PROGRAMS.has(name)) {
-      return false;
-    }
+    // Exact match: "LS" is not a program this list vouches for. git is not on
+    // it: a repo's own config (core.fsmonitor, diff.external) can make even
+    // `git status` run a program, and a bot can write that config in scratch.
+    if (!PLAIN_PROGRAMS.has(program)) return false;
   }
   return true;
 }
