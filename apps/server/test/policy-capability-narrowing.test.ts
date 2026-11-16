@@ -22,6 +22,7 @@ import { createRunContext } from "../src/policy/context";
 import { narrowCapabilities, readCapabilities } from "../src/policy/narrowing";
 import type { RunContext } from "../src/policy/types";
 import { buildTaskToolRegistry } from "../src/tools/task-registry";
+import { seedRootTurn } from "./policy-fixture";
 
 const provider: ProviderConfig = { id: "test", label: "Test", baseUrl: "https://test.local/v1", apiKey: "test", model: "mock" };
 function streamResponse(events: unknown[]): Response {
@@ -45,6 +46,7 @@ let db: Database | undefined;
 afterEach(() => { db?.close(); db = undefined; });
 
 function parentRun(database: Database, capabilities: Iterable<string>): RunContext {
+  seedRootTurn(database, "trn_root");
   const registry = buildTaskToolRegistry(database);
   return createRunContext({
     db: database, bot: "ea", threadID: "thr_parent", turnID: "trn_parent", rootTurnID: "trn_root",

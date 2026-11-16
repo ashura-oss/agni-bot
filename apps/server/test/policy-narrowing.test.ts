@@ -27,7 +27,7 @@ import { createRunContext, unpackTaint } from "../src/policy/context";
 import { carryTaint, saveTaskTaint, taskTaint } from "../src/policy/carry";
 import type { RunContext, TaintSource } from "../src/policy/types";
 import { buildTaskToolRegistry } from "../src/tools/task-registry";
-import { fullCapabilities } from "./policy-fixture";
+import { fullCapabilities, seedRootTurn } from "./policy-fixture";
 
 const provider: ProviderConfig = { id: "test", label: "Test", baseUrl: "https://test.local/v1", apiKey: "test", model: "mock" };
 function streamResponse(events: unknown[]): Response {
@@ -49,6 +49,7 @@ let db: Database | undefined;
 afterEach(() => { db?.close(); db = undefined; });
 
 function parentRun(database: Database, taint: TaintSource[] = []): RunContext {
+  seedRootTurn(database, "trn_root");
   const registry = buildTaskToolRegistry(database);
   return createRunContext({
     db: database, bot: "ea", threadID: "thr_parent", turnID: "trn_parent", rootTurnID: "trn_root",

@@ -32,7 +32,7 @@ import { taskTaint } from "../src/policy/carry";
 import { decide } from "../src/policy/engine";
 import { addApprovalRule, approvalTarget } from "../src/stores/approval-rules";
 import type { RunContext, TaintSource } from "../src/policy/types";
-import { fullCapabilities, policyRig } from "./policy-fixture";
+import { fullCapabilities, policyRig, seedRootTurn } from "./policy-fixture";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -169,6 +169,7 @@ describe("1b. what a delegated task read reaches the bot that reads the task, an
   async function queuedTask(): Promise<{ taskID: string; registry: ToolRegistry }> {
     const registry = new ToolRegistry();
     const parent = createThread(db, "ea");
+    seedRootTurn(db, "u");
     registerDelegateTaskTool(registry, { db, emit: () => undefined, currentAgentID: "ea", channelID: "main", parentTurnID: "trn_p", parentThreadID: parent.id });
     const run = createRunContext({ db, bot: "ea", threadID: "t", turnID: "u", principal: { kind: "owner" }, capabilities: fullCapabilities(db), registry: buildTaskToolRegistry(db) });
     const out = await (registry.get("delegate_task") as unknown as { handler: (a: unknown, c: unknown) => Promise<{ taskID: string }> }).handler(
@@ -359,6 +360,7 @@ describe("4. an outside reader's error reaches the model, so it marks the run", 
 
 describe("5. a denial follows the work to the bots it is handed to", () => {
   function rootRun(): RunContext {
+    seedRootTurn(db, "trn_root");
     return createRunContext({ db, bot: "ea", threadID: "t", turnID: "trn_parent", rootTurnID: "trn_root", principal: { kind: "owner" }, capabilities: fullCapabilities(db), registry: buildTaskToolRegistry(db) });
   }
   const coderOf = (): ResolvedPersona => ({ ...defaultResolvedPersona(db), id: "coder", name: "Coder", tools: ["write_file"] });
