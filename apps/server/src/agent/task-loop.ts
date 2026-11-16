@@ -6,7 +6,7 @@ import type { PeerIntent, ServerFrameBody, StopReason } from "@agni/protocol";
 import { peerEnvelope, stripPeerTags } from "./peer-message";
 import { ApprovalBroker, waitForApprovalDecision } from "./approval-broker";
 import { abortReasonOf } from "./abort-reason";
-import { closeRequest, isClosureNote } from "./closure";
+import { ABORTED_MID_CALL, closeRequest, isClosureNote, toolErrorCode } from "./closure";
 import { FormBroker } from "./form-broker";
 import type { Decision } from "./approval-broker";
 import type { Persona, ResolvedPersona } from "./personas";
@@ -353,7 +353,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
     createTurn(db, { id: turnID, threadID, agentID: persona.id });
     messages = recentMessages(db, threadID, MAX_HISTORY_MESSAGES)
       // A closure note is stored as a system row (the owner's history leaves it out) but the model reads it as its own words.
-      .filter((message) => message.role === "user" || message.role === "assistant" || isClosureNote(message.role, message.text))
+      .filter((message) => message.role === "user" || message.role === "assistant" || isClosureNote(message.role, message.text, message.kind))
       .map((message) => ({ role: (message.role === "system" ? "assistant" : message.role) as "user" | "assistant", content: message.text, attachmentIDs: messageAttachments(db, message.id).map((file) => file.id) }));
   }
   const inputRole = run.inputRole ?? "user";
@@ -1106,6 +1106,11 @@ interface ToolHooks {
   unattended?: boolean;
 }
 
+/** The error the loop raises when the abort or the call's own time limit cuts a tool call in the middle. */
+class AbortedMidCall extends Error {
+  constructor() { super("tool timed out or was cancelled"); }
+}
+
 async function executeTool(  db: Database, threadID: string, turnID: string, call: ToolCall, allowlist: string[],
   registry: ReturnType<typeof buildTaskToolRegistry>, broker: ApprovalBroker, signal: AbortSignal,
   emit: (frame: ServerFrameBody) => void,
@@ -1219,7 +1224,7 @@ async function executeTool(  db: Database, threadID: string, turnID: string, cal
         },
         hostAllowed: allowedDomains ? (url: URL) => domainAllowed(url.toString(), allowedDomains) : undefined,
       }),
-      new Promise<never>((_, reject) => combined.addEventListener("abort", () => reject(new Error("tool timed out or was cancelled")), { once: true })),
+      new Promise<never>((_, reject) => combined.addEventListener("abort", () => reject(new AbortedMidCall()), { once: true })),
     ]);
     let safeResult = result;
     if (hooks.unattended) safeResult = unattendedWording(result);
@@ -1238,7 +1243,8 @@ async function executeTool(  db: Database, threadID: string, turnID: string, cal
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const content = JSON.stringify({ error: truncate(message, 500) });
-    storeResult(content, false, message);
+    // The abort's own error has its own code; a tool's message that equals a loop code is prefixed (see closure.ts).
+    storeResult(content, false, error instanceof AbortedMidCall ? ABORTED_MID_CALL : toolErrorCode(message));
     emit({ type: "tool.end", callID: call.id, ok: false, preview: truncate(message, 120) });
     return { content, awaiting: false };
   } finally {

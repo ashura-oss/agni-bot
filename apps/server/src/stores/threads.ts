@@ -29,6 +29,8 @@ export interface MessageRow {
   role: string;
   text: string;
   created_at: string;
+  /** Set by the server only (`closure`); never from model text. */
+  kind: string | null;
 }
 
 export interface ThreadListRow extends ThreadRow {
@@ -160,7 +162,7 @@ export function finishTurn(
 
 export function appendMessage(
   db: Database,
-  params: { threadID: string; turnID?: string; role: string; text: string },
+  params: { threadID: string; turnID?: string; role: string; text: string; kind?: "closure" },
 ): MessageRow {
   const row: MessageRow = {
     id: newID("msg"),
@@ -169,14 +171,16 @@ export function appendMessage(
     role: params.role,
     text: params.text,
     created_at: nowISO(),
+    kind: params.kind ?? null,
   };
-  db.run("INSERT INTO messages (id, thread_id, turn_id, role, text, created_at) VALUES (?, ?, ?, ?, ?, ?)", [
+  db.run("INSERT INTO messages (id, thread_id, turn_id, role, text, created_at, kind) VALUES (?, ?, ?, ?, ?, ?, ?)", [
     row.id,
     row.thread_id,
     row.turn_id,
     row.role,
     row.text,
     row.created_at,
+    row.kind,
   ]);
   return row;
 }
@@ -185,7 +189,7 @@ export function appendMessage(
 export function recentMessages(db: Database, threadID: string, limit: number): MessageRow[] {
   const rows = db
     .query<MessageRow, [string, number]>(
-      `SELECT id, thread_id, turn_id, role, text, created_at
+      `SELECT id, thread_id, turn_id, role, text, created_at, kind
        FROM messages WHERE thread_id = ?
        ORDER BY created_at DESC, rowid DESC
        LIMIT ?`,
