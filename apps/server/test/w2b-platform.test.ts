@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { openDatabase } from "../src/db";
 import { agniHome } from "../src/home";
 import { providerKeyEnvNames } from "../src/models/providers";
-import { scrubbedShellEnv } from "../src/util/scrubbed-env";
+import { childEnv } from "../src/util/child-env";
 import { windowsSystemTool } from "../src/util/windows-acl";
 import { browserOpenCommand } from "../src/util/open-url";
 import { isOwnerOnlyDirectory, secureDirectoryIfNeeded } from "../src/util/private-file";
@@ -19,13 +19,14 @@ import { isOwnerOnlyDirectory, secureDirectoryIfNeeded } from "../src/util/priva
 let db: Database | undefined;
 afterEach(() => { db?.close(); db = undefined; });
 
-describe("W2-B 6: the shell scrub is fed by the provider catalog", () => {
-  test("providerKeyEnvNames lists every catalog key variable, and the scrub removes each one", () => {
+describe("W2-B 6: the shell environment never carries a catalog provider key", () => {
+  test("providerKeyEnvNames lists every catalog key variable, and the shell environment has none of them", () => {
     const names = providerKeyEnvNames();
     expect(names).toEqual(expect.arrayContaining(["GROQ_API_KEY", "CEREBRAS_API_KEY", "NVIDIA_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY"]));
     expect(new Set(names).size).toBe(names.length);
     const env = Object.fromEntries(names.map((name) => [name, "x"]));
-    expect(scrubbedShellEnv({ ...env, PATH: "/bin", GROQ_MODEL: "m" })).toEqual({ PATH: "/bin", GROQ_MODEL: "m" });
+    // The shell child is built from an allowlist (S2-14): no key variable passes, and neither does a model variable.
+    expect(Object.keys(childEnv("shell", { source: { ...env, GROQ_MODEL: "m" }, platform: "linux" }))).toEqual(["PATH"]);
   });
 });
 

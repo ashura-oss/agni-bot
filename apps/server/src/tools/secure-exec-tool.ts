@@ -87,6 +87,8 @@ export function registerSecureExecTool(registry: ToolRegistry, deps: SecureExecD
         const result = await runBash({
           command,
           ...(timeoutMs ? { timeoutMs } : {}),
+          // A stopped turn stops the command and everything it started.
+          signal: ctx.signal,
           secret,
         });
         return { ...result, secretUsed: true, authorizedBy: "prompt" };
