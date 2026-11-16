@@ -141,6 +141,8 @@ export interface CallAssessment {
   resources: ToolResource[];
   /** The operation, in plain verbs: reading, changing, deleting, sending to. */
   operation: Operation;
+  /** A shell call the server could not prove to be one allowlisted program on plain files (policy/shell-proof.ts): what it touches is unknown. */
+  unprovenShell?: boolean;
 }
 
 export type EgressKind = "none" | "send" | "fetch";
@@ -162,6 +164,11 @@ export interface ApprovalCard {
   /** The resources the call touches, for a denial. */
   resources: ToolResource[];
   operation: Operation;
+  /**
+   * This run holds a refusal and the call is a shell command the server cannot read file names from: one
+   * sentence naming what the owner refused and saying the command may touch it. The card leads with it.
+   */
+  refusedRun?: string;
 }
 
 /** Why a call was refused, as a stable code for tests, the audit trail and the model's error. */

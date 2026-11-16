@@ -15,7 +15,7 @@ import type { Database } from "bun:sqlite";
 import { newID, nowISO } from "../util/ids";
 import type { Operation, RunContext } from "./types";
 import type { ToolResource } from "./tool-meta";
-import { globCovers, pathsOverlap } from "./resources";
+import { pathsOverlap } from "./resources";
 
 /** Refusals of one resource in one run before the run itself is stopped. */
 export const REFUSALS_BEFORE_STOP = 3;
@@ -62,9 +62,16 @@ interface DenialRow {
   id: string; resource_kind: ToolResource["kind"]; resource_key: string; operation: Operation; tool_name: string; cause: "denied" | "expired"; blocked_count: number;
 }
 
-/** Does this run hold any refusal at all? One indexed read; the shell checks run only when it does. */
-export function runHasDenial(db: Database, run: Pick<RunContext, "rootJob" | "rootTurnID">): boolean {
-  return db.query<{ one: number }, [string]>("SELECT 1 AS one FROM run_denials WHERE run_key = ? LIMIT 1").get(denialScope(run)) !== null;
+/** The first refusal this run holds, whatever it was about, or null. One indexed read. */
+export function anyDenial(db: Database, run: Pick<RunContext, "rootJob" | "rootTurnID">): DenialRecord | null {
+  const row = db
+    .query<DenialRow, [string]>("SELECT id, resource_kind, resource_key, operation, tool_name, cause, blocked_count FROM run_denials WHERE run_key = ? ORDER BY created_at LIMIT 1")
+    .get(denialScope(run));
+  return row ? toRecord(row) : null;
+}
+
+function toRecord(row: DenialRow): DenialRecord {
+  return { id: row.id, kind: row.resource_kind, key: row.resource_key, operation: row.operation, tool: row.tool_name, cause: row.cause, blockedCount: row.blocked_count };
 }
 
 /** The first earlier "no" in this run that covers any of these resources for this operation. */
@@ -73,48 +80,20 @@ export function findDenial(
   run: Pick<RunContext, "rootJob" | "rootTurnID">,
   operation: Operation,
   resources: ToolResource[],
-  command?: string,
 ): DenialRecord | null {
-  if (resources.length === 0 && !command) return null;
+  if (resources.length === 0) return null;
   const rows = db
     .query<DenialRow, [string]>("SELECT id, resource_kind, resource_key, operation, tool_name, cause, blocked_count FROM run_denials WHERE run_key = ? ORDER BY created_at")
     .all(denialScope(run));
-  for (const row of rows) {
-    if (!covers(row.operation, operation)) continue;
-    const hit = resources.some((resource) => resourceCovered(row.resource_kind, row.resource_key, resource))
-      || (command !== undefined && row.resource_kind === "path" && commandMentions(command, row.resource_key));
-    if (hit) return { id: row.id, kind: row.resource_kind, key: row.resource_key, operation: row.operation, tool: row.tool_name, cause: row.cause, blockedCount: row.blocked_count };
-  }
-  return null;
-}
-
-/**
- * The first earlier "no" in this run that covers this operation at all, whatever it was about. For a shell
- * command the server cannot follow to file names: it might reach any of them, so any such "no" applies.
- */
-export function findCoveringDenial(db: Database, run: Pick<RunContext, "rootJob" | "rootTurnID">, operation: Operation): DenialRecord | null {
-  const rows = db
-    .query<DenialRow, [string]>("SELECT id, resource_kind, resource_key, operation, tool_name, cause, blocked_count FROM run_denials WHERE run_key = ? ORDER BY created_at")
-    .all(denialScope(run));
-  const row = rows.find((candidate) => candidate.resource_kind === "path" && covers(candidate.operation, operation));
-  return row ? { id: row.id, kind: row.resource_kind, key: row.resource_key, operation: row.operation, tool: row.tool_name, cause: row.cause, blockedCount: row.blocked_count } : null;
+  const hit = rows.find((row) => covers(row.operation, operation) && resources.some((resource) => resourceCovered(row.resource_kind, row.resource_key, resource)));
+  return hit ? toRecord(hit) : null;
 }
 
 function resourceCovered(kind: ToolResource["kind"], key: string, attempt: ToolResource): boolean {
-  if (attempt.kind === "path" && kind === "path") return pathsOverlap(key, attempt.value) || globCovers(key, attempt.value);
+  if (attempt.kind === "path" && kind === "path") return pathsOverlap(key, attempt.value);
   // An address and a host are the same kind of thing whichever tool reached for it.
   const sameKind = attempt.kind === kind || (kind === "host" && attempt.kind === "url") || (kind === "url" && attempt.kind === "host");
   return sameKind && attempt.value.toLowerCase() === key.toLowerCase();
-}
-
-/**
- * A shell command is covered when its text names the denied file at all, even
- * through a pattern the path reader cannot resolve. A name shorter than three
- * characters would match everything, so it is skipped.
- */
-export function commandMentions(command: string, deniedPath: string): boolean {
-  const name = deniedPath.split(/[\\/]/).pop() ?? "";
-  return name.length >= 3 && command.toLowerCase().includes(name.toLowerCase());
 }
 
 /** Count one more blocked attempt on this denial and return the new total. */

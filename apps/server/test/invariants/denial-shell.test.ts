@@ -2,24 +2,32 @@
  * INV-07 (shell routes): after the owner refuses a delete, no shell spelling
  * of the same file gets through (S2-07, security round).
  *
- * The rule under test: an extractor that feeds a denial over-approximates.
- * Every word of a command, every redirect target, every assignment value and
- * every word inside `$(...)` or backticks is a candidate resource; and a
- * command that holds anything the server cannot resolve to file names
- * (variables, globs, substitution, `eval`, `cd`, `xargs`, `find -exec`, here-docs)
- * is refused while the run holds a refusal, with no card to click through.
+ * The rule under test (the allowlist contract, policy/shell-proof.ts): a shell
+ * command is read for file names only when it is one allowlisted program with
+ * plain literal words. In a run that holds a refusal, every other command
+ * (variables, globs, substitution, wrappers, redirects, `eval`, `cd`, `xargs`,
+ * `find -exec`, here-docs, quotes) is put to the owner with the refusal named,
+ * or refused outright when a proven file matches. Either way it never runs on
+ * its own. These routes were once all refused with no card; some now ask, and
+ * the owner here says no to every card, so what is asserted is that none ran.
  *
- * The refused file is named `q1`: two characters, below the length at which the
- * command text is searched for the denied name, so only the extraction of words
- * and the refusal of what cannot be resolved can defend it.
+ * The refused file is named `q1`: two characters, so nothing leans on a text
+ * search of the command for the name.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect } from "bun:test";
 import { scenarioTest, useScenarios, say, type Scenario } from "../scenarios/harness";
-import { call, playTurn, resultJson, scripted } from "./support";
+import { call, playTurn, resultJson, scripted, type CallRecord } from "./support";
 
 const scenarios = useScenarios();
+
+/** Not run: it came back as an error the model can read, or it was put to the owner (who said no, below). */
+const neverRanOnItsOwn = (record: CallRecord | undefined): boolean =>
+  record !== undefined && (record.card !== null || Object.hasOwn(resultJson(record), "error"));
+
+/** The owner says no to everything that asks, so a command that was put to them did not run. */
+const refuseEveryCard = { answer: () => "reject" as const };
 
 const shell = (path: string): string => path.replaceAll("\\", "/");
 
@@ -66,7 +74,7 @@ const ROUTES: Array<{ id: string; command: (abs: string) => string }> = [
 
 describe("INV-07 a denied delete holds against shell spellings of the same file", () => {
   for (const route of ROUTES) {
-    scenarioTest(`after the owner refuses rm, this is refused with no card: ${route.id}`, async () => {
+    scenarioTest(`after the owner refuses rm, this never runs on its own: ${route.id}`, async () => {
       const s = await scenarios.start();
       const files = setUp(s);
       s.model.queue(...scripted(true, [
@@ -76,12 +84,11 @@ describe("INV-07 a denied delete holds against shell spellings of the same file"
         say("Done."),
       ]));
       const a = await s.connect({ label: "A" });
-      const report = await playTurn(s, a, "clean up q1", refuseTheDeleteOnly);
+      const report = await playTurn(s, a, "clean up q1", refuseEveryCard);
 
       const record = report.calls.find((entry) => entry.callID === "call_route");
       expect(record, "the bot never tried the route; the script is out of step").toBeDefined();
-      expect(record!.card, `${route.id} raised a card for a file the owner already refused`).toBeNull();
-      expect(Object.hasOwn(resultJson(record!), "error"), `${route.id} came back without an error: ${record!.result.slice(0, 120)}`).toBe(true);
+      expect(neverRanOnItsOwn(record), `${route.id} ran with no card and no refusal: ${record!.result.slice(0, 120)}`).toBe(true);
       expect(readFileSync(files.target, "utf8"), "the refused file changed").toBe("original");
       expect(existsSync(files.fresh), "a plain write to a different file was blocked (a denial must not over-reach)").toBe(true);
     });

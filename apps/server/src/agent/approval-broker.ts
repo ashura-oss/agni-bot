@@ -232,6 +232,8 @@ const SOURCE_LINE: Record<string, (bot: string, label: string) => string> = {
  */
 function cardLead(card: ApprovalCard, bot: string): string {
   const lines: string[] = [];
+  // First: the owner said no to something in this run, and this command may reach it (policy/engine.ts).
+  if (card.refusedRun) lines.push(escapeUnsafe(card.refusedRun));
   const [newest, ...older] = card.sources;
   if (newest) {
     const say = SOURCE_LINE[newest.kind] ?? SOURCE_LINE.unknown!;
@@ -243,6 +245,7 @@ function cardLead(card: ApprovalCard, bot: string): string {
     lines.push("This destination is not in your messages or your approved list.");
   }
   if (newest) lines.push("\"Always allow\" is off: this task used outside content.");
+  if (card.refusedRun) lines.push("\"Always allow\" is off: you refused something in this task.");
   return `${lines.join("\n")}\n\n`;
 }
 

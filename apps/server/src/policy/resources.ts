@@ -5,12 +5,11 @@
  * audit trail. Nothing here runs a model or the network; it is string work
  * plus a few `realpath` calls, so it stays well under a millisecond.
  */
-import { basename, dirname, resolve, sep } from "node:path";
-import { homedir } from "node:os";
+import { resolve, sep } from "node:path";
 import type { Operation } from "./types";
 import type { ToolResource } from "./tool-meta";
 import { resolveWritePath, scratchDir } from "../tools/write-file";
-import { chainOf, scanShell } from "./shell-scan";
+import { proveShell } from "./shell-proof";
 
 const CASE_INSENSITIVE = process.platform === "win32";
 
@@ -76,100 +75,30 @@ export function hostResource(raw: unknown): ToolResource[] {
 // Shell commands
 // ---------------------------------------------------------------------------
 
-const DELETE_PROGRAMS = new Set(["rm", "rmdir", "unlink", "del", "erase", "shred", "trash", "rd"]);
-const CHANGE_PROGRAMS = new Set(["mv", "move", "ren", "rename", "cp", "copy", "tee", "dd", "truncate", "touch", "chmod", "chown", "sed", "ln", "install", "rsync"]);
-
 /** The folder a shell command runs in: scratch, or a folder inside it (a relative `cwd` is under scratch, as `isReadOnlyCommand` and the shell tool read it). */
 export function shellWorkingDir(cwd: string | undefined): string {
   return resolve(scratchDir(), (cwd ?? "").trim());
 }
 
-/** Split a shell line into command segments, each a list of words (program first). Quotes are removed. */
-export function shellSegments(command: string): string[][] {
-  return scanShell(command).segments.map((segment) => [...(segment.program === null ? [] : [segment.program]), ...segment.args]);
+/** What the policy knows about a shell command. */
+export interface ShellFacts {
+  /** Was it proven to be one allowlisted program on plain literal words (policy/shell-proof.ts)? */
+  proven: boolean;
+  /** What it does to files. An unproven command is `run`: nothing about it is read. */
+  operation: Operation;
+  /** The files it names, as comparison keys. Empty when unproven: no file name is read out of a line the server cannot follow. */
+  resources: ToolResource[];
 }
 
-/** Split a shell line into words: quotes are removed, separators and redirections split words. */
-export function shellWords(command: string): string[] {
-  return shellSegments(command).flat();
-}
-
-/**
- * What a shell command does to files, by its programs wherever they sit (after `;`, inside `$( )` or
- * backticks, behind `sudo`, `env` or `xargs`): deleting, changing, or something else (run).
- */
-export function commandOperation(command: string): Operation {
-  const scan = scanShell(command);
-  const programs = scan.segments.flatMap((segment) => chainOf(segment).names);
-  if (programs.some((program) => DELETE_PROGRAMS.has(program))) return "delete";
-  if (programs.some((program) => CHANGE_PROGRAMS.has(program)) || scan.segments.some((segment) => segment.redirects.some((redirect) => redirect.kind === "out"))) return "change";
-  return "run";
-}
-
-/** A word as a comparison key: `~` expanded, relative to `cwd`, links followed unless the word holds a pattern. */
-function wordKey(word: string, cwd: string, home: string): string {
-  const expanded = word === "~" ? home : word.startsWith("~/") || word.startsWith("~\\") ? resolve(home, word.slice(2)) : word;
-  const absolute = resolve(cwd, expanded);
-  // A word with a pattern in it cannot be followed to a real file; any other is resolved the way a file tool resolves it, links included.
-  return /[*?[]/.test(word) ? foldPath(absolute) : pathKey(absolute);
-}
-
-/**
- * What a command is working on, for recording a refusal: the words that can name a file or folder. A program's
- * own name is not one unless it is itself a path (`./run.sh`); redirect targets and assignment values always are.
- */
-export function commandPaths(command: string, cwd: string): string[] {
-  const home = homedir();
-  const keys = new Set<string>();
-  const add = (word: string): void => {
-    if (!word) return;
-    const at = word.indexOf("=");
-    const flag = word.startsWith("-");
-    // An option is not a file, but its value can be (`--out=file`); a plain word with an `=` and no path is an assignment-looking word.
-    const value = at >= 0 && (flag || !/[\\/]/.test(word)) ? word.slice(at + 1) : word;
-    if (flag && at < 0) return;
-    if (value) keys.add(wordKey(value, cwd, home));
-  };
-  for (const segment of scanShell(command).segments) {
-    const chain = chainOf(segment);
-    for (const assignment of [...segment.assignments, ...chain.skipped.filter((word) => word.includes("="))]) add(assignment.slice(assignment.indexOf("=") + 1));
-    if (chain.program !== null && /[\\/.~*?]/.test(chain.program)) add(chain.program);
-    for (const word of chain.rest) add(word);
-    for (const redirect of segment.redirects) add(redirect.target);
-  }
-  return [...keys];
-}
-
-export function commandResources(command: string, cwd: string): ToolResource[] {
-  return commandPaths(command, cwd).map((value) => ({ kind: "path" as const, value }));
-}
-
-/**
- * Everything in the command that could be a file or folder, for asking "does this reach what the owner refused":
- * every word, program names and option values and the pieces of quoted strings included. More than
- * `commandResources`, on purpose: a refusal must not be dodged by how the line is written.
- */
-export function shellCandidates(command: string, cwd: string): ToolResource[] {
-  const home = homedir();
-  const keys = new Set<string>();
-  for (const word of scanShell(command).words) keys.add(wordKey(word, cwd, home));
-  return [...keys].map((value) => ({ kind: "path" as const, value }));
+/** The one reading of a shell line the policy uses, for the card, for denials and for the audit trail. */
+export function shellFacts(command: string, cwd: string): ShellFacts {
+  const proof = proveShell(command, cwd);
+  if (!proof.proven) return { proven: false, operation: "run", resources: [] };
+  return { proven: true, operation: proof.operation, resources: proof.paths.map(pathResource) };
 }
 
 /** True when `candidate` is `denied`, lies inside it, or contains it (a command on the folder reaches the file). */
 export function pathsOverlap(denied: string, candidate: string): boolean {
   if (denied === candidate) return true;
   return candidate.startsWith(denied + sep) || denied.startsWith(candidate + sep) || denied.startsWith(candidate + "/") || candidate.startsWith(denied + "/");
-}
-
-/** A shell glob word (`*.txt`) against the base name of a denied file in the same folder. */
-export function globCovers(denied: string, candidate: string): boolean {
-  const name = basename(candidate);
-  if (!/[*?[]/.test(name) || foldPath(dirname(candidate)) !== foldPath(dirname(denied))) return false;
-  const pattern = name.replace(/[.+^${}()|\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
-  try {
-    return new RegExp(`^${pattern}$`, CASE_INSENSITIVE ? "i" : "").test(basename(denied));
-  } catch {
-    return false;
-  }
 }

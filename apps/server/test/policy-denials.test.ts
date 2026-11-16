@@ -15,13 +15,14 @@ import { policyRig, type PolicyRig } from "./policy-fixture";
 let rig: PolicyRig;
 let answers: Array<Decision | "expire">;
 let cards: number;
-beforeEach(() => { rig = policyRig(); answers = []; cards = 0; });
+let shown: Array<{ preview?: string }>;
+beforeEach(() => { rig = policyRig(); answers = []; cards = 0; shown = []; });
 afterEach(() => rig.close());
 
 /** Ask for a call as a turn would: the owner's answers come from `answers`, in order. */
 async function ask(run: RunContext, tool: string, args: Record<string, unknown>): Promise<GateResult> {
   const broker = new ApprovalBroker({
-    db: rig.db, emit: () => { cards += 1; },
+    db: rig.db, emit: (frame) => { cards += 1; shown.push(frame as { preview?: string }); },
     waitForDecision: async (requestID, signal) => {
       const next = answers.shift();
       if (next === "expire" || next === undefined) {
@@ -59,9 +60,7 @@ describe("a denied delete covers the file by every other route", () => {
       ["write_file", { path: join(rig.scratch, "REPORT.TXT"), content: "again" }],
       ["bash", { command: "mv report.txt elsewhere.txt" }],
       ["bash", { command: "cp report.txt copy.txt" }],
-      ["bash", { command: "echo gone > report.txt" }],
       ["bash", { command: "rm -f ./report.txt" }],
-      ["bash", { command: "rm *.txt" }],
       ["bash", { command: "rm -rf ." }],
     ];
     let route = 0;
@@ -74,8 +73,22 @@ describe("a denied delete covers the file by every other route", () => {
       const result = await ask(run, tool, args);
       expect({ tool, args, refused: refused(result) }).toEqual({ tool, args, refused: true });
     }
-    // The only cards were the nine asks about the delete: every other route was answered before it asked.
+    // The only cards were the asks about the delete: every other route was answered before it asked.
     expect(cards).toBe(tries.length);
+  });
+
+  test("a command the server cannot follow to file names asks, naming the refusal, and does not run", async () => {
+    // A redirect and a pattern are not read for file names: the owner is asked, each time, with the refusal on the card.
+    for (const command of ["echo gone > report.txt", "rm *.txt", "rm $F", "sudo -u x rm report.txt"]) {
+      const run = rig.another({ turnID: `trn_open_${command.length}`, rootTurnID: `trn_open_${command.length}` });
+      answers.push("reject");
+      await ask(run, "bash", { command: "rm report.txt" });
+      const before = cards;
+      const result = await ask(run, "bash", { command });
+      expect({ command, ran: result.go, asked: cards - before }).toEqual({ command, ran: false, asked: 1 });
+      expect(shown.at(-1)?.preview, command).toContain("You said no to deleting");
+      expect(shown.at(-1)?.preview, command).toContain("may touch it");
+    }
   });
 
   test("the refusal tells the model it covers every route and what to do instead", async () => {

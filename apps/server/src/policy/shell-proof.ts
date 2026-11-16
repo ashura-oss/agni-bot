@@ -1,0 +1,159 @@
+/**
+ * The shell allowlist contract (S2-07).
+ *
+ * The server does not parse shell. A command is "proven" only when it is exactly one simple command,
+ * its program is on a short list, and every word is a plain literal: no quotes, `$`, backticks,
+ * patterns, braces, `~`, `=`, redirects or separators. What a proven command touches is its literal
+ * path arguments, resolved against the folder the server chose to run it in. Anything else is
+ * "unresolved": no file name is read out of it, and a run that holds a refusal puts it to the owner
+ * every time (policy/engine.ts) instead of guessing what it reaches.
+ *
+ * There are no wrappers (`sudo`, `env`, `timeout`, `nice`, `xargs`, ...) and no option that takes a
+ * folder (`-C`, `-D`, `-t`, `--directory`): the lists below name every option each program may carry,
+ * and a word that is not on them leaves the command unresolved. Adding a program or an option is a
+ * line in `PROGRAMS`, never a new rule in a parser.
+ *
+ * For Sprint 7: unattended (sandboxed) shell is off in any run that holds a refusal. The sandbox
+ * profile, not this module, is the boundary around what a command can reach.
+ */
+import { resolve } from "node:path";
+import type { Operation } from "./types";
+
+export type ShellProof =
+  | {
+      proven: true;
+      program: string;
+      operation: Operation;
+      /** Absolute path of every literal path argument, `C:\...` style on Windows. Not yet followed through links. */
+      paths: string[];
+    }
+  | { proven: false; why: string };
+
+interface ProgramSpec {
+  operation: Operation;
+  /** Every short option the program may carry, as letters. A fused cluster (`-rf`) is read letter by letter. */
+  flags: string;
+  /** Options that take a whole number, as letters (`head -n 5`). */
+  numeric?: string;
+  /** `-5` stands for `-n 5`. */
+  countFlag?: boolean;
+  /** Are the other words files? False for a program whose words are text or nothing. */
+  paths: boolean;
+}
+
+/** The programs a proven command may be. The read-only ones are those `isReadOnlyCommand` (tools/bash.ts) frees, so the two agree. */
+const PROGRAMS: Readonly<Record<string, ProgramSpec>> = {
+  ls: { operation: "read", flags: "aAlhdFRtrSi1sp", paths: true },
+  cat: { operation: "read", flags: "nbsAETv", paths: true },
+  head: { operation: "read", flags: "qv", numeric: "nc", countFlag: true, paths: true },
+  tail: { operation: "read", flags: "qv", numeric: "nc", countFlag: true, paths: true },
+  wc: { operation: "read", flags: "lwcmL", paths: true },
+  stat: { operation: "read", flags: "", paths: true },
+  file: { operation: "read", flags: "bi", paths: true },
+  du: { operation: "read", flags: "shacxk", paths: true },
+  df: { operation: "read", flags: "hTak", paths: true },
+  which: { operation: "read", flags: "a", paths: true },
+  pwd: { operation: "read", flags: "LP", paths: false },
+  uname: { operation: "read", flags: "asnrvmo", paths: false },
+  whoami: { operation: "read", flags: "", paths: false },
+  date: { operation: "read", flags: "u", paths: false },
+  echo: { operation: "run", flags: "neE", paths: false },
+  mkdir: { operation: "change", flags: "pv", paths: true },
+  touch: { operation: "change", flags: "acm", paths: true },
+  cp: { operation: "change", flags: "rRfinvpau", paths: true },
+  mv: { operation: "change", flags: "finvu", paths: true },
+  rm: { operation: "delete", flags: "rRfivd", paths: true },
+};
+
+/** A word of a proven command: letters, digits and `. _ , : @ + / -` only. */
+const PLAIN_WORD = /^[A-Za-z0-9._,:@+/-]+$/;
+/** `date +FORMAT`. */
+const DATE_FORMAT = /^\+[A-Za-z0-9%._,:@+/-]*$/;
+const WHOLE_NUMBER = /^\d+$/;
+const LONG_PATH_PREFIX = /^\/\/\?\/(?=[A-Za-z]:)/;
+
+const unresolved = (why: string): ShellProof => ({ proven: false, why });
+
+/**
+ * Is `command` one allowlisted program with plain literal words, and if so what files does it name?
+ * `cwd` is the absolute folder the server will run it in (the caller chose it, never the model).
+ */
+export function proveShell(command: string, cwd: string, platform: NodeJS.Platform = process.platform): ShellProof {
+  const words = command.trim().split(/[ \t]+/);
+  const program = words[0] ?? "";
+  const spec = Object.hasOwn(PROGRAMS, program) ? PROGRAMS[program] : undefined;
+  if (!spec) return unresolved("the program is not on the allowlist, or the line is more than one plain command");
+  const rest = words.slice(1);
+
+  if (program === "date") {
+    // `date` can set the clock: only the bare command, `-u`, and one `+FORMAT` word are proven.
+    const formats = rest.filter((word) => word !== "-u");
+    return formats.length <= 1 && formats.every((word) => DATE_FORMAT.test(word))
+      ? { proven: true, program, operation: spec.operation, paths: [] }
+      : unresolved("`date` with more than a format");
+  }
+  // `?` is a pattern character, with one exception: the Windows long-path prefix `//?/C:/`. A pattern that
+  // needs a folder named `C:` under a one-letter mount can match nothing (Windows has no such name), and a
+  // pattern that matches nothing reaches the shell's command line as it was typed.
+  const literal = (word: string): string => (platform === "win32" ? word.replace(LONG_PATH_PREFIX, "//") : word);
+  if (!rest.every((word) => PLAIN_WORD.test(literal(word)))) return unresolved("a word that is not a plain literal");
+
+  const operands: string[] = [];
+  let optionsEnded = false;
+  for (let index = 0; index < rest.length; index += 1) {
+    const word = rest[index] as string;
+    if (optionsEnded || !word.startsWith("-")) {
+      operands.push(word);
+      continue;
+    }
+    if (word === "--") { optionsEnded = true; continue; }
+    if (spec.countFlag && /^-\d+$/.test(word)) continue;
+    if (!/^-[A-Za-z][A-Za-z0-9]*$/.test(word)) return unresolved("an option the allowlist does not name");
+    for (let at = 1; at < word.length; at += 1) {
+      const letter = word[at] as string;
+      if (spec.numeric?.includes(letter)) {
+        const fused = word.slice(at + 1);
+        if (fused !== "" ? !WHOLE_NUMBER.test(fused) : !WHOLE_NUMBER.test(rest[(index += 1)] ?? "")) return unresolved("an option value that is not a number");
+        break;
+      }
+      if (!spec.flags.includes(letter)) return unresolved("an option the allowlist does not name");
+    }
+  }
+
+  const paths: string[] = [];
+  if (spec.paths) {
+    for (const operand of operands) {
+      const host = hostPathOf(operand, platform);
+      if (host === null) return unresolved("a path the server cannot place on this computer");
+      paths.push(resolve(cwd, host));
+    }
+  }
+  return { proven: true, program, operation: spec.operation, paths };
+}
+
+/**
+ * The one place a Git Bash style path becomes a Windows one, so a refusal made on `C:\x\q1` is the
+ * same file as `/c/x/q1`, `/cygdrive/c/x/q1`, `/mnt/c/x/q1` and `//?/C:/x/q1`. On Windows any other
+ * path that starts with `/` (`/tmp/x`, `//server/share`, `//./C:/x`) has no place the server can
+ * name, and so does a word that Windows reads another way (`C:x`, `file:stream`, `name.`): null.
+ * Elsewhere a path is what it says.
+ */
+export function hostPathOf(word: string, platform: NodeJS.Platform = process.platform): string | null {
+  if (platform !== "win32") return word;
+  const long = /^\/\/\?\/([A-Za-z]):(?:\/(.*))?$/.exec(word);
+  const mount = /^\/(?:cygdrive\/|mnt\/)?([A-Za-z])(?:\/(.*))?$/.exec(word);
+  const drive = long ?? mount;
+  if (drive) return windowsPath(`${(drive[1] as string).toUpperCase()}:`, drive[2] ?? "");
+  if (word.startsWith("/") || word.includes("\\")) return null;
+  const withDrive = /^([A-Za-z]:)(?:\/(.*))?$/.exec(word);
+  const body = withDrive ? (withDrive[2] ?? "") : word;
+  if (!withDrive && /^[A-Za-z]:/.test(word)) return null;
+  // A colon past the drive is a data stream; a name ending in a dot or space is another name to Windows.
+  if (body.includes(":") || body.split("/").some((part) => part !== "." && part !== ".." && /[. ]$/.test(part))) return null;
+  return word;
+}
+
+function windowsPath(drive: string, rest: string): string | null {
+  if (rest.includes(":") || rest.split("/").some((part) => part !== "." && part !== ".." && /[. ]$/.test(part))) return null;
+  return `${drive}\\${rest.replaceAll("/", "\\")}`;
+}

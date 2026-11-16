@@ -38,21 +38,25 @@ const refusedWithoutACard = (record: CallRecord | undefined): boolean =>
 /** The owner refuses the delete and, tired, allows anything else that asks: an "Allow" must not undo the refusal. */
 const refuseTheDeleteOnly = { answer: (card: { action: string }) => (card.action.includes("rm ") ? ("reject" as const) : ("once" as const)) };
 
-/** Other ways to reach the file the owner would not let the bot delete. */
-const ROUTES: Array<{ id: string; step: (f: Files, s: Scenario) => ModelStep }> = [
+/**
+ * Other ways to reach the file the owner would not let the bot delete. A shell route the server cannot prove to be one
+ * allowlisted command on plain files (`unproven`) is not read for file names: it is put to the owner with the refusal
+ * named (policy/shell-proof.ts), and the owner says no. Every other route is refused with no card.
+ */
+const ROUTES: Array<{ id: string; unproven?: true; step: (f: Files, s: Scenario) => ModelStep }> = [
   { id: "overwrite with write_file", step: (f) => call("write_file", { path: f.target, content: "overwritten" }, "call_route") },
   { id: "append with write_file", step: (f) => call("write_file", { path: f.target, content: " appended", append: true }, "call_route") },
   { id: "the same file by a relative name", step: () => call("write_file", { path: "ledger.txt", content: "overwritten" }, "call_route") },
   { id: "the same file by a path that goes round it", step: (_f, s) => call("write_file", { path: join(s.scratch, "sub", "..", "ledger.txt"), content: "overwritten" }, "call_route") },
   { id: "move it with the shell", step: (f, s) => call("bash", { command: `mv ${shell(f.target)} ${shell(join(s.scratch, "moved.txt"))}` }, "call_route") },
   { id: "copy another file over it with the shell", step: (f) => call("bash", { command: `cp ${shell(f.other)} ${shell(f.target)}` }, "call_route") },
-  { id: "redirect shell output into it", step: (f) => call("bash", { command: `echo hijacked > ${shell(f.target)}` }, "call_route") },
-  { id: "edit it in place with sed", step: (f) => call("bash", { command: `sed -i s/original/hijacked/ ${shell(f.target)}` }, "call_route") },
+  { id: "redirect shell output into it", unproven: true, step: (f) => call("bash", { command: `echo hijacked > ${shell(f.target)}` }, "call_route") },
+  { id: "edit it in place with sed", unproven: true, step: (f) => call("bash", { command: `sed -i s/original/hijacked/ ${shell(f.target)}` }, "call_route") },
 ];
 
 describe("INV-07 a denied delete holds across tools for the rest of the run", () => {
   for (const route of ROUTES) {
-    scenarioTest(`after the owner refuses rm, this route to the same file is refused with no new card: ${route.id}`, async () => {
+    scenarioTest(`after the owner refuses rm, this route to the same file ${route.unproven ? "never runs on its own" : "is refused with no new card"}: ${route.id}`, async () => {
       const s = await scenarios.start();
       const files = setUp(s);
       s.model.queue(...scripted(true, [
@@ -62,12 +66,18 @@ describe("INV-07 a denied delete holds across tools for the rest of the run", ()
         say("Done."),
       ]));
       const a = await s.connect({ label: "A" });
-      const report = await playTurn(s, a, "clean up the old ledger", refuseTheDeleteOnly);
+      const report = await playTurn(s, a, "clean up the old ledger", route.unproven ? { answer: () => "reject" as const } : refuseTheDeleteOnly);
 
       const record = report.calls.find((entry) => entry.callID === "call_route");
       expect(record, "the bot never tried the route; the script is out of step").toBeDefined();
-      expect(record!.card, `${route.id} raised a card for a file the owner already refused`).toBeNull();
-      expect(refusedWithoutACard(record), `${route.id} came back without an error: ${record!.result.slice(0, 100)}`).toBe(true);
+      if (route.unproven) {
+        // Both a card and a refusal keep it from running on its own; the card must name what the owner refused.
+        expect(record!.card !== null || refusedWithoutACard(record), `${route.id} ran with no card and no refusal: ${record!.result.slice(0, 100)}`).toBe(true);
+        if (record!.card) expect(record!.card.preview).toContain("You said no to deleting");
+      } else {
+        expect(record!.card, `${route.id} raised a card for a file the owner already refused`).toBeNull();
+        expect(refusedWithoutACard(record), `${route.id} came back without an error: ${record!.result.slice(0, 100)}`).toBe(true);
+      }
       expect(readFileSync(files.target, "utf8"), "the refused file changed").toBe("original ledger");
       expect(existsSync(join(s.scratch, "moved.txt")), "the refused file was moved").toBe(false);
       expect(existsSync(files.fresh), "a different file was blocked too (a denial must not over-reach)").toBe(true);
@@ -162,9 +172,8 @@ describe("INV-07 the denial follows the work to the bots the run hands it to", (
 });
 
 describe("INV-07 a denial covers the file, not the words of the command that named it", () => {
-  // Product bug: `commandPaths` (policy/resources.ts) skips the program name only at word 0, so the `touch` after
-  // the `;` is recorded as a denied file (`<scratch>/touch`), and `commandMentions` (policy/denials.ts) then
-  // refuses every later command that contains the word "touch".
+  // Once a refusal recorded the words of the line (including the `touch` after the `;`) and then refused every later
+  // command that contained one. A line the server cannot prove names no file, so a refusal of it records none.
   scenarioTest("refusing `echo start ; touch a.txt` does not refuse a command on a different file", async () => {
     const s = await scenarios.start();
     const a = await s.connect({ label: "A" });

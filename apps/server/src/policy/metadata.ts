@@ -20,7 +20,7 @@ import { isReadOnlyCommand } from "../tools/bash";
 import { isOutsideScratch, scratchDir, writeTargetExists } from "../tools/write-file";
 import type { CallAssessment, RiskKind, TaintKind, TaintSource } from "./types";
 import type { ToolClass, ToolMeta, ToolResource, ToolTier } from "./tool-meta";
-import { commandOperation, commandResources, hostResource, pathResource, recipientResources, shellWorkingDir } from "./resources";
+import { hostResource, pathResource, recipientResources, shellFacts, shellWorkingDir } from "./resources";
 
 type Args = Record<string, unknown>;
 
@@ -72,19 +72,24 @@ function assessWrite(args: Args): Partial<CallAssessment> {
   return { tier: 0, risk: "undoable", asks: false, operation: "change", resources };
 }
 
-/** A shell call: one read-only command inside scratch is free, anything else asks at tier 3. */
+/**
+ * A shell call: one read-only command inside scratch is free, anything else asks at tier 3. What the call touches is read
+ * only from a command the server can prove (policy/shell-proof.ts); any other command names no file and is marked unproven,
+ * so a run that holds a refusal puts it to the owner (policy/engine.ts) instead of guessing what it reaches.
+ */
 function assessShell(args: Args): Partial<CallAssessment> {
   const command = String(args.command ?? "");
   const cwd = typeof args.cwd === "string" && args.cwd ? args.cwd : undefined;
-  const resources = commandResources(command, shellWorkingDir(cwd));
-  if (isReadOnlyCommand(command, cwd)) return { tier: 0, risk: "command", asks: false, operation: "read", resources };
-  return { tier: 3, risk: "command", asks: true, operation: commandOperation(command), resources };
+  const facts = shellFacts(command, shellWorkingDir(cwd));
+  const unproven = facts.proven ? {} : { unprovenShell: true };
+  if (isReadOnlyCommand(command, cwd)) return { tier: 0, risk: "command", asks: false, operation: "read", resources: facts.resources, ...unproven };
+  return { tier: 3, risk: "command", asks: true, operation: facts.operation, resources: facts.resources, ...unproven };
 }
 
 /** A command run as administrator: always asks, never read-only, and names the same files a shell call would. */
 function assessPrivileged(args: Args): Partial<CallAssessment> {
-  const command = String(args.command ?? "");
-  return { tier: 3, risk: "command", asks: true, operation: commandOperation(command), resources: commandResources(command, shellWorkingDir(undefined)) };
+  const facts = shellFacts(String(args.command ?? ""), shellWorkingDir(undefined));
+  return { tier: 3, risk: "command", asks: true, operation: facts.operation, resources: facts.resources, ...(facts.proven ? {} : { unprovenShell: true }) };
 }
 
 /** A send from the agent's own mailbox or calendar is free in an untainted run (D1); from the owner's it asks. */
