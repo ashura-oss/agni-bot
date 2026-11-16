@@ -48,6 +48,8 @@ import { deleteJob, enqueueJob, getJobByPrefix, listJobs, requeueStuckJobs, setJ
 import { formatDuration, parseDurationMs, parseWhen } from "./util/time";
 import { startServer, type HealthReport, type RunningServer } from "./ws/server";
 import { agniHome, loadHomeEnv, migrateHomeLayout } from "./home";
+import { browserOpenCommand } from "./util/open-url";
+import { secureDirectory, secureDirectoryIfNeeded, secureFile } from "./util/private-file";
 
 const [command = "help", ...args] = Bun.argv.slice(2);
 
@@ -80,6 +82,12 @@ else {
 // --- server ------------------------------------------------------------------
 
 async function serve(): Promise<void> {
+  // Windows: owner-only ACL on AGNI_HOME, inherited by the config, keys, database
+  // and logs beneath it. Warn rather than refuse to start: every secret write
+  // (provider keys, VAPID key) is protected and fail-closed on its own.
+  mkdirSync(agniHome(), { recursive: true, mode: 0o700 });
+  // Skipped when the ACL is already in place, so a restart does not re-walk the home tree.
+  secureDirectoryIfNeeded(agniHome(), "warn");
   const config = loadConfig();
   const db = openDatabase(config.dbPath);
   setOwnerName(config.userFirstName);
@@ -455,9 +463,8 @@ async function openBrowser(args: string[]): Promise<void> {
   for (const url of urls) console.log(url);
   console.log(`or type this code: ${code}, valid 10 minutes`);
   if (hasFlag(args, "--no-browser")) return;
-  const opener = process.platform === "darwin" ? "open" : "xdg-open";
   try {
-    Bun.spawn([opener, urls[0] as string], { stdout: "ignore", stderr: "ignore" });
+    Bun.spawn(browserOpenCommand(urls[0] as string), { stdout: "ignore", stderr: "ignore" });
   } catch {
     // no browser available; the URL above is enough
   }
@@ -469,13 +476,29 @@ async function openBrowser(args: string[]): Promise<void> {
  */
 async function setup(args: string[]): Promise<void> {
   const home = agniHome();
-  mkdirSync(home, { recursive: true, mode: 0o700 });
-  // An older ~/.agni may be 755; the DB and logs inside rely on this being private.
-  chmodSync(home, 0o700);
   const envPath = join(home, "config.env");
-  if (!existsSync(envPath)) {
-    copyFileSync(resolve(import.meta.dir, "../../../infra/env.example"), envPath);
-    chmodSync(envPath, 0o600);
+  let created = false;
+  try {
+    mkdirSync(home, { recursive: true, mode: 0o700 });
+    // An older ~/.agni may be 755; the DB and logs inside rely on this being private.
+    chmodSync(home, 0o700);
+    // Windows has no mode bits. The directory gets an owner-only ACL before
+    // config.env exists, so the file is created already protected, and the
+    // files already under it (an upgrade) inherit it. Fail closed: the owner is
+    // about to put API keys in here.
+    secureDirectory(home, "throw");
+    if (!existsSync(envPath)) {
+      copyFileSync(resolve(import.meta.dir, "../../../infra/env.example"), envPath);
+      chmodSync(envPath, 0o600);
+      created = true;
+    }
+    // Also on a rerun: a config.env from an older setup may have its own ACL.
+    secureFile(envPath);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
+  if (created) {
     console.log(`created ${envPath} — add a model provider key there (or in the web app's settings)`);
     loadHomeEnv();
   }

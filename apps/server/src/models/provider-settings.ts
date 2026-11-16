@@ -1,9 +1,10 @@
 /** Persist provider credentials on the daemon host and refresh its live router. */
-import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { dirname, resolve } from "node:path";
+import { dirname } from "node:path";
 import { providerConfigPath } from "./providers";
 import { homePath } from "../home";
+import { PrivateFileError, writePrivateFile } from "../util/private-file";
 import {
   loadCustomProviders,
   loadProviders,
@@ -65,9 +66,9 @@ export async function addProviderCredential(
     if (model?.trim()) await saveProviderModel(providerID, validateModel(model));
     router.replaceProviders(loadProviders(Bun.env));
     return { ok: true, providers: router.status() };
-  } catch {
+  } catch (error) {
     // Do not include the key or filesystem content in the response/log path.
-    return { ok: false, code: "provider_storage", message: "Could not save the provider key on the daemon." };
+    return { ok: false, code: "provider_storage", message: storageMessage(error, "Could not save the provider key on the daemon.") };
   } finally {
     await unlink(temporaryPath).catch(() => {});
   }
@@ -104,8 +105,8 @@ async function addCustomProvider(
     await saveCustomProvider(entry);
     router.replaceProviders(loadProviders(Bun.env));
     return { ok: true, providers: router.status() };
-  } catch {
-    return { ok: false, code: "provider_storage", message: "Could not save the endpoint on the daemon." };
+  } catch (error) {
+    return { ok: false, code: "provider_storage", message: storageMessage(error, "Could not save the endpoint on the daemon.") };
   } finally {
     await unlink(temporaryPath).catch(() => {});
   }
@@ -143,9 +144,18 @@ export async function setProviderModel(router: Router, providerID: string, rawMo
     await saveProviderModel(providerID, model);
     router.replaceProviders(loadProviders(Bun.env));
     return { ok: true, providers: router.status() };
-  } catch {
-    return { ok: false, code: "provider_storage", message: "Could not save the model setting on the daemon." };
+  } catch (error) {
+    return { ok: false, code: "provider_storage", message: storageMessage(error, "Could not save the model setting on the daemon.") };
   }
+}
+
+/**
+ * Why a save failed, in words the owner can act on. A file that could not be
+ * made private is named; anything else keeps the generic text so no key or
+ * filesystem detail reaches the client.
+ */
+function storageMessage(error: unknown, generic: string): string {
+  return error instanceof PrivateFileError ? error.message : generic;
 }
 
 /** Read the .env file, or an empty one when it does not exist yet. */
@@ -163,12 +173,15 @@ async function writeEnvValues(envPath: string, values: Record<string, string>): 
   return updateEnv(await readEnvContents(envPath), values);
 }
 
-/** Write the .env file atomically, mode 600, so a key is never half-written. */
+/**
+ * Write the .env file atomically, owner-only, so a key is never half-written
+ * or readable by anyone else. Mode 600 on POSIX; on Windows an owner-only ACL
+ * is set on the empty temporary file before the key goes into it. If that
+ * fails, the key is not written (fail closed).
+ */
 async function writeEnvFile(envPath: string, temporaryPath: string, contents: string): Promise<void> {
   await mkdir(dirname(envPath), { recursive: true, mode: 0o700 });
-  await writeFile(temporaryPath, contents, { encoding: "utf8", mode: 0o600, flag: "wx" });
-  await rename(temporaryPath, envPath);
-  await chmod(envPath, 0o600);
+  await writePrivateFile(envPath, contents, temporaryPath);
 }
 
 async function saveProviderModel(providerID: string, model: string): Promise<void> {
@@ -233,9 +246,9 @@ async function writeProviderConfig(
 ): Promise<void> {
   const body = `${JSON.stringify({ version: 1, models: value.models, custom: value.custom }, null, 2)}\n`;
   try {
-    await writeFile(temporaryPath, body, { encoding: "utf8", mode: 0o600, flag: "wx" });
-    await rename(temporaryPath, path);
-    await chmod(path, 0o600);
+    // Owner-only like config.env: it can name a custom endpoint, and may sit
+    // outside AGNI_HOME when AGNI_PROVIDER_CONFIG_PATH points elsewhere.
+    await writePrivateFile(path, body, temporaryPath);
   } finally {
     await unlink(temporaryPath).catch(() => {});
   }

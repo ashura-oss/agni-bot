@@ -7,8 +7,12 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
+import { scrubbedShellEnv } from "../util/scrubbed-env";
 import { privateTempDir } from "../util/private-temp";
 import { isOutsideScratch, scratchDir } from "./write-file";
+
+/** Kept here so existing callers and tests keep importing it from the shell tool. */
+export { scrubbedShellEnv };
 
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -84,6 +88,7 @@ interface SecretEnv {
   cleanup: () => void;
 }
 
+
 function bashExecutable(): string {
   if (process.platform !== "win32") return "bash";
   // The Windows system32 bash launcher requires WSL. Use the host-native
@@ -127,7 +132,7 @@ function secretEnv(secret: string): SecretEnv {
   writeFileSync(askpass, `#!/bin/sh\ncat ${shellQuote(shellPath(secretPath))}\n`, { mode: 0o700 });
   writeFileSync(sudoWrapper, `#!/bin/sh\nexec /usr/bin/sudo -A "$@"\n`, { mode: 0o700 });
   const env: Record<string, string> = {
-    ...(process.env as Record<string, string>),
+    ...scrubbedShellEnv(),
     PATH: `${dir}${delimiter}${process.env.PATH ?? ""}`,
     SUDO_ASKPASS: shellPath(askpass),
     SSH_ASKPASS: shellPath(askpass),
@@ -183,7 +188,7 @@ export async function runBash(args: BashArgs): Promise<BashResult> {
     let settled = false;
     const child = spawn(executable, ["-c", args.command], {
       cwd,
-      env: secretSetup?.env ?? { ...process.env },
+      env: secretSetup?.env ?? scrubbedShellEnv(),
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     }) as unknown as ChildProcessWithoutNullStreams;
