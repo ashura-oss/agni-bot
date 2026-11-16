@@ -64,6 +64,12 @@ export interface FormRequestSpec {
 export interface FormBrokerDeps {
   db: Database;
   emit: (body: ServerFrameBody) => void;
+  /**
+   * Called while the turn waits on the owner's answer; the returned function
+   * ends the wait. The turn uses it to stop its clock: the owner's time is
+   * not the model's.
+   */
+  hold?: () => () => void;
 }
 
 export class FormBroker {
@@ -89,6 +95,11 @@ export class FormBroker {
       kind: form.kind,
       email: form.email ?? undefined,
     });
-    return waitForFormAnswer(this.deps.db, form.id, signal);
+    const release = this.deps.hold?.();
+    try {
+      return await waitForFormAnswer(this.deps.db, form.id, signal);
+    } finally {
+      release?.();
+    }
   }
 }

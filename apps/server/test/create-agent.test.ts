@@ -34,9 +34,12 @@ function createAgentRouter(args: Record<string, unknown>): Router {
   let call = 0;
   const fetchMock = (async (): Promise<Response> => {
     call += 1;
+    // A deferred tool must be loaded before it can be called.
     return call === 1
-      ? streamResponse([{ choices: [{ delta: { tool_calls: [{ index: 0, id: "call-1", type: "function", function: { name: "create_agent", arguments: JSON.stringify(args) } }] } }] }])
-      : streamResponse([{ choices: [{ delta: { content: "Done." } }] }]);
+      ? streamResponse([{ choices: [{ delta: { tool_calls: [{ index: 0, id: "call-0", type: "function", function: { name: "load_tools", arguments: JSON.stringify({ names: ["create_agent"] }) } }] } }] }])
+      : call === 2
+        ? streamResponse([{ choices: [{ delta: { tool_calls: [{ index: 0, id: "call-1", type: "function", function: { name: "create_agent", arguments: JSON.stringify(args) } }] } }] }])
+        : streamResponse([{ choices: [{ delta: { content: "Done." } }] }]);
   }) as unknown as typeof fetch;
   return new Router([provider], new HealthTracker(), fetchMock);
 }
