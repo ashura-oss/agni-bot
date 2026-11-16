@@ -6,11 +6,16 @@
  *   - At most four delegations are in flight per root job.
  *   - A bot has at most ten active self-scheduled jobs.
  *
- * The root-job wall-time cap (30 minutes) needs a clock the tests can move;
- * there is no seam for one yet, so it is not covered here (listed in the report).
+ *   - A root job (a chat turn, or a job, and everything it delegated) stops once
+ *     30 minutes have passed since the root began. The tests move JavaScript's
+ *     clock (`setSystemTime`) while a run is held between two steps.
+ *   - The owner can change the fan-out and self-scheduled-job numbers
+ *     (`setRunCaps`); the tools read them live.
  */
-import { describe, expect } from "bun:test";
-import { scenarioTest, useScenarios, calls, loadTools, say, type ToolCallSpec } from "../scenarios/harness";
+import { afterEach, describe, expect, setSystemTime } from "bun:test";
+import { enqueueJob } from "../../src/stores/jobs";
+import { setRunCaps } from "../../src/stores/policy-settings";
+import { scenarioTest, useScenarios, calls, gate, loadTools, say, type ModelStep, type ToolCallSpec } from "../scenarios/harness";
 import { allCallsTo, call, playTurn, resultJson } from "./support";
 
 const scenarios = useScenarios();
@@ -71,5 +76,154 @@ describe("INV-14 self-scheduled jobs", () => {
     expect(active, "the cap refused jobs before the tenth").toBeGreaterThanOrEqual(10);
     const refused = specs.filter((spec) => Object.hasOwn(resultJson(report.calls.find((entry) => entry.callID === spec.id)), "error"));
     expect(refused.length, "no call was told it was over the limit").toBeGreaterThanOrEqual(2);
+  });
+});
+
+const minutes = (count: number): number => count * 60_000;
+/** Moves JavaScript's clock forward; `afterEach` puts it back. Timers keep real time. */
+const later = (ms: number): void => { setSystemTime(new Date(Date.now() + ms)); };
+afterEach(() => setSystemTime());
+
+/** A model that takes one held step, then two more: the clock is moved while it is held. */
+function heldRun(): { held: ReturnType<typeof gate>; steps: ModelStep[] } {
+  const held = gate();
+  return {
+    held,
+    steps: [
+      { text: "Looking.", calls: [{ name: "memory_search", args: { query: "first" }, id: "call_first" }], hold: held },
+      { calls: [{ name: "memory_search", args: { query: "second" }, id: "call_second" }] },
+      say("Done."),
+    ],
+  };
+}
+
+const delegations = (count: number, targets: string[]): ToolCallSpec[] => Array.from({ length: count }, (_, index) => ({
+  id: `call_cap_${index}`,
+  name: "delegate_task",
+  args: { toAgentID: targets[index % targets.length], goal: `Independent piece of work number ${index + 1}.` },
+}));
+
+describe("INV-14 delegation and scheduling read the owner's numbers", () => {
+  scenarioTest("with the fan-out cap set to two, the third delegation in one go is refused", async () => {
+    const s = await scenarios.start();
+    const a = await s.connect({ label: "A" });
+    setRunCaps(s.db, { maxConcurrentDelegations: 2 });
+    const specs = delegations(4, ["researcher", "analyst"]);
+    s.model.queue(calls(...specs), say("Started."));
+    const report = await playTurn(s, a, "split this into four pieces");
+    const accepted = specs.filter((spec) => !Object.hasOwn(resultJson(report.calls.find((entry) => entry.callID === spec.id)), "error"));
+    expect(accepted.length, "the owner's lower fan-out cap was not applied").toBe(2);
+  });
+
+  scenarioTest("with the fan-out cap raised to six, all six delegations are accepted", async () => {
+    const s = await scenarios.start();
+    const a = await s.connect({ label: "A" });
+    setRunCaps(s.db, { maxConcurrentDelegations: 6 });
+    const specs = delegations(6, ["researcher", "analyst", "coder"]);
+    s.model.queue(calls(...specs), say("Started."));
+    const report = await playTurn(s, a, "split this into six pieces");
+    const refused = specs.filter((spec) => Object.hasOwn(resultJson(report.calls.find((entry) => entry.callID === spec.id)), "error"));
+    expect(refused.length, "the owner's higher fan-out cap was not applied").toBe(0);
+  });
+
+  scenarioTest("with the self-schedule cap set to three, a bot cannot keep a fourth job", async () => {
+    const s = await scenarios.start();
+    const a = await s.connect({ label: "A" });
+    setRunCaps(s.db, { maxSelfScheduledJobsPerBot: 3 });
+    const specs: ToolCallSpec[] = Array.from({ length: 5 }, (_, index) => ({
+      id: `call_sched_${index}`,
+      name: "job_schedule",
+      args: { text: `Check the warehouse report, round ${index + 1}.`, at: new Date(Date.now() + (index + 2) * 3_600_000).toISOString() },
+    }));
+    s.model.queue(loadTools("job_schedule"), calls(...specs), say("Scheduled."));
+    await playTurn(s, a, "schedule five checks for me");
+    const active = s.get<{ n: number }>("SELECT count(*) AS n FROM jobs WHERE kind = 'turn' AND state = 'queued' AND payload LIKE '%Check the warehouse report%'")!.n;
+    expect(active, "the owner's lower self-schedule cap was not applied").toBe(3);
+  });
+});
+
+describe("INV-14 root-job wall time", () => {
+  scenarioTest("a chat turn stops before its next step once 30 minutes have passed, and says why", async () => {
+    const s = await scenarios.start();
+    const a = await s.connect({ label: "A" });
+    const run = heldRun();
+    s.model.queue(...run.steps);
+    const { turnID, since } = await a.startTurn("look into two things");
+    await s.model.requested(1);
+    later(minutes(31));
+    run.held.open();
+    const end = await a.waitFor("turn.end", { since, match: (frame) => frame.turnID === turnID, why: "the turn to end" });
+    expect(s.model.requests.length, "the turn took another step after its 30 minutes were up").toBe(1);
+    expect(end.stopReason, "the stop reason does not say the run ran out of time").toBe("timeout");
+    const said = a.framesOf("msg.new", since).map((frame) => frame.text).join("\n");
+    expect(said, "the owner was not told the time limit stopped the run").toMatch(/30 minutes/);
+  });
+
+  scenarioTest("29 minutes in, the run goes on", async () => {
+    const s = await scenarios.start();
+    const a = await s.connect({ label: "A" });
+    const run = heldRun();
+    s.model.queue(...run.steps);
+    const { turnID, since } = await a.startTurn("look into two things");
+    await s.model.requested(1);
+    later(minutes(29));
+    run.held.open();
+    const end = await a.waitFor("turn.end", { since, match: (frame) => frame.turnID === turnID, why: "the turn to end" });
+    expect(end.stopReason, "a run was stopped before its time was up").toBe("end");
+    expect(s.model.requests.length).toBe(3);
+  });
+
+  scenarioTest("the owner's own number is used: with the cap at ten minutes, eleven is too long", async () => {
+    const s = await scenarios.start();
+    const a = await s.connect({ label: "A" });
+    setRunCaps(s.db, { rootJobWallMs: minutes(10) });
+    const run = heldRun();
+    s.model.queue(...run.steps);
+    const { turnID, since } = await a.startTurn("look into two things");
+    await s.model.requested(1);
+    later(minutes(11));
+    run.held.open();
+    const end = await a.waitFor("turn.end", { since, match: (frame) => frame.turnID === turnID, why: "the turn to end" });
+    expect(end.stopReason).toBe("timeout");
+    expect(s.model.requests.length).toBe(1);
+  });
+
+  scenarioTest("a background job is stopped the same way, is not retried, and is not marked done", async () => {
+    const s = await scenarios.start();
+    const run = heldRun();
+    s.model.queue(...run.steps);
+    const id = enqueueJob(s.db, { kind: "turn", payload: { text: "look into two things", agentID: "ea", notify: false } }).id;
+    const ticking = s.runner().tick();
+    await s.model.requested(1);
+    later(minutes(31));
+    run.held.open();
+    await ticking;
+    expect(s.model.requests.length, "the job took another step after its 30 minutes were up").toBe(1);
+    expect(s.get<{ state: string }>("SELECT state FROM jobs WHERE id = ?", id)?.state, "a retry would give the job a fresh 30 minutes").toBe("failed");
+  });
+
+  scenarioTest("work delegated by a turn is measured from the turn's start, not its own", async () => {
+    const s = await scenarios.start();
+    const a = await s.connect({ label: "A" });
+    s.model.queue(call("delegate_task", { toAgentID: "researcher", goal: "Count the pallets in the east warehouse." }, "call_delegate"), say("On it."));
+    await playTurn(s, a, "have the researcher count the pallets");
+    const before = s.model.requests.length;
+    later(minutes(31));
+    s.model.queue(say("There are 42 pallets."));
+    await s.runner().tick();
+    expect(s.model.requests.length - before, "the delegated child ran a step after the root's 30 minutes were up").toBe(0);
+    expect(s.get<{ delegate_state: string }>("SELECT delegate_state FROM tasks WHERE owner_agent_id = 'researcher'")?.delegate_state, "the task was not marked failed").toBe("failed");
+  });
+
+  scenarioTest("a run whose root's start cannot be found is stopped, not let through", async () => {
+    const s = await scenarios.start();
+    s.model.queue(say("Done."));
+    const id = enqueueJob(s.db, {
+      kind: "turn",
+      payload: { text: "Do the thing.", agentID: "researcher", notify: false, rootTurnID: "trn_never_existed", rootJob: null },
+    }).id;
+    await s.runner().tick();
+    expect(s.model.requests.length, "a run with an unknown start time called the model").toBe(0);
+    expect(s.get<{ state: string }>("SELECT state FROM jobs WHERE id = ?", id)?.state).not.toBe("done");
   });
 });

@@ -12,7 +12,7 @@ import { registerDelegateTaskTool } from "../src/tools/delegate-task-tool";
 import { buildTaskToolRegistry } from "../src/tools/task-registry";
 import { createRunContext } from "../src/policy/context";
 import type { PrincipalKind, RunContext, TaintSource } from "../src/policy/types";
-import { MAX_CONCURRENT_DELEGATIONS, MAX_SELF_SCHEDULED_JOBS } from "../src/policy/limits";
+import { DEFAULT_MAX_CONCURRENT_DELEGATIONS as MAX_CONCURRENT_DELEGATIONS, DEFAULT_MAX_SELF_SCHEDULED_JOBS as MAX_SELF_SCHEDULED_JOBS } from "../src/agent/guardrails";
 import { createThread } from "../src/stores/threads";
 
 let db: Database | undefined;

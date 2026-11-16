@@ -14,7 +14,7 @@ import { ownerWordsOf, recordOwnerWords } from "../policy/owner-words";
 import { saveTaskTaint } from "../policy/carry";
 import { decide } from "../policy/engine";
 import { budgetRunKey } from "../policy/budget";
-import { budgetStopFromRefusal, budgetStopMessage, pauseStopMessage } from "../policy/budget-messages";
+import { budgetStopFromRefusal, budgetStopMessage, pauseStopMessage, wallTimeStopMessage } from "../policy/budget-messages";
 import { policyHooks } from "../policy/hooks";
 import { policyFor, taintFrom } from "../policy/metadata";
 import type { Principal, RunContext, RunStop, TaintSource } from "../policy/types";
@@ -45,7 +45,7 @@ import { getThread } from "../stores/threads";
 import { listSummaries } from "../stores/summaries";
 import { appendChannelMessage, getChannelSummary } from "../stores/channels";
 import { compactChannelHistory } from "./compactor";
-import { GuardrailError, MAX_DEPTH, enterDelegation, rootGuardrail, stepGuardrail, type GuardrailState } from "./guardrails";
+import { GuardrailError, MAX_DEPTH, checkWallTime, enterDelegation, rootGuardrail, stepGuardrail, type GuardrailState } from "./guardrails";
 import type { MailAccountResolver } from "../plugins/credentials";
 import { mcpApprovalNote } from "../plugins/mcp";
 import { domainAllowed } from "../routines/egress";
@@ -165,6 +165,8 @@ export interface TaskTurnResult {
   turnID: string; text: string; stopReason: StopReason;
   /** The outside text this run read, for the bot that handed it the work. */
   taint: TaintSource[];
+  /** Set when the root job's time limit ended the run: retrying it would only start a fresh clock. */
+  endedBy?: "wall_time";
 }
 
 /**
@@ -925,7 +927,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
 
   if (runStop && stopReason === "end") {
     // Not an error and not the owner's Stop: the policy ended the run, and the owner is told why in plain words.
-    stopReason = runStop.cause === "budget" ? "budget" : runStop.cause === "pause" ? "cancelled" : "error";
+    stopReason = runStop.cause === "budget" ? "budget" : runStop.cause === "pause" ? "cancelled" : runStop.cause === "wall_time" ? "timeout" : "error";
     answerText = runStop.message;
     messages.push({ role: "assistant", content: answerText });
     publish(answerText);
@@ -965,7 +967,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
     state: stopReason === "needs_input" ? "waiting" : "idle",
     ...(run.delegation?.taskID ? { taskId: run.delegation.taskID } : {}),
   });
-  return { turnID, text: answerText, stopReason, taint: packTaint(runCtx) };
+  return { turnID, text: answerText, stopReason, taint: packTaint(runCtx), ...(runStop?.cause === "wall_time" ? { endedBy: "wall_time" as const } : {}) };
 }
 
 /** Did every provider turn the step down because of the max_tokens we sent? */
@@ -1338,12 +1340,15 @@ function stopFromRefusal(error: RouteRefusedError, run: RunContext, botName: str
   return null;
 }
 
-/** The owner's switch or a spend cap, checked before the next model call. */
+/** The owner's switch, a spend cap or the root job's time limit, checked before the next model call. */
 function haltedBeforeStep(run: RunContext): RunStop | null {
   const paused = policyHooks.isRunPaused(run);
   if (paused) return { cause: "pause", message: paused.message };
   const budget = policyHooks.checkBudget(run);
   if (!budget.ok) return { cause: "budget", message: budget.message, ...(budget.detail ? { budget: budget.detail } : {}) };
+  // One clock for the root and everything it delegated, started with the root's turn (S2-09).
+  const wall = checkWallTime(run.services.db, run.rootTurnID);
+  if (!wall.ok) return { cause: "wall_time", message: wallTimeStopMessage(run.services.botName, { wallMs: wall.wallMs, unknown: wall.reason === "unknown" }) };
   return null;
 }
 

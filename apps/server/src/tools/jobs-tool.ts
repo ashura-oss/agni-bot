@@ -20,7 +20,7 @@ import { canonicalAgentID } from "../agent/personas";
 import { describeSchedule, nextDailyRun, parseDay, parseWallClock } from "../jobs/schedule";
 import { isPeerPrincipal, isTainted } from "../policy/context";
 import { CLOSURE_WORDING_REFUSAL, closureWording } from "../agent/closure";
-import { MAX_SELF_SCHEDULED_JOBS } from "../policy/limits";
+import { canSelfSchedule, maxSelfScheduledJobs } from "../agent/guardrails";
 
 export interface JobScheduleArgs {
   /** The prompt the scheduled run executes. */
@@ -97,8 +97,9 @@ export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: 
   if (!text) throw new Error("a scheduled job needs something to do");
   if (closureWording(text)) throw new Error(CLOSURE_WORDING_REFUSAL);
   const mine = selfScheduledCount(db, callerAgentID);
-  if (mine >= MAX_SELF_SCHEDULED_JOBS) {
-    throw new Error(`you already have ${mine} scheduled jobs, which is the most a bot may keep. Cancel one with job_cancel before scheduling another.`);
+  const mostToKeep = maxSelfScheduledJobs(db);
+  if (!canSelfSchedule(mine, mostToKeep)) {
+    throw new Error(`you already have ${mine} scheduled jobs and ${mostToKeep} is the most a bot may keep. Cancel one with job_cancel before scheduling another.`);
   }
   const choices = [args.at, args.dailyAt, args.everyMinutes].filter((value) => value !== undefined && value !== null);
   if (choices.length === 0) throw new Error("say when it should run: `at` (one-off), `dailyAt` (a clock time), or `everyMinutes`");

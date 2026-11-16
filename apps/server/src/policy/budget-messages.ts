@@ -52,6 +52,28 @@ export function pauseStopMessage(botName: string | null | undefined, verdict: { 
   return `Stopped: you paused all bots. ${KEPT} Ask again after you resume to carry on.`;
 }
 
+/** "30 minutes", "1 minute", "45 seconds": a cap the owner set, as they would say it. */
+function spanWords(ms: number): string {
+  if (ms < 60_000) {
+    const seconds = Math.max(1, Math.round(ms / 1000));
+    return `${seconds} second${seconds === 1 ? "" : "s"}`;
+  }
+  const minutes = Math.round(ms / 60_000);
+  return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+}
+
+/**
+ * The stop notice for a root job past its time limit. `unknown` means its start could not be read,
+ * which stops it the same way: a clock that cannot be checked is not one that has not run out.
+ */
+export function wallTimeStopMessage(botName: string | null | undefined, verdict: { wallMs: number | null; unknown?: boolean }): string {
+  const bot = nameOf(botName);
+  if (verdict.unknown || verdict.wallMs === null) {
+    return `${bot} stopped: it could not be checked how long this task has been running, so nothing more was run. ${KEPT}`;
+  }
+  return `${bot} stopped: this task has run for its time limit of ${spanWords(verdict.wallMs)}. ${KEPT}`;
+}
+
 const BUDGET_REASONS = new Set(["over_cap", "cost_unknown", "budget_unreadable"]);
 const SCOPES = new Set(["day", "bot", "job"]);
 

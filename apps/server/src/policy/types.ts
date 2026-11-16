@@ -186,7 +186,7 @@ export type RefusalCode =
 /** The standing rule that let a call through, for the approval row that records it. */
 export interface RuleRef { id: string; agentID: string; toolName: string; createdAt: string }
 
-export type StopCause = "budget" | "pause" | "refused";
+export type StopCause = "budget" | "pause" | "refused" | "wall_time";
 
 /**
  * Which cap stopped a run and how far it got, for the owner's notice and its "Raise" and "Continue once"

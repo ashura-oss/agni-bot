@@ -243,6 +243,12 @@ export function registerTurnJob(runner: JobRunner, deps: TurnJobDeps): void {
       return { result: "waiting for the owner" };
     }
 
+    if (result.endedBy === "wall_time") {
+      // The root job's time limit is the owner's number: a retry would be a new turn with a fresh clock.
+      const message = "stopped: the time limit for this task ran out";
+      if (delegationTaskID) setDelegationState(deps.db, delegationTaskID, "failed", message);
+      throw new JobGiveUp(`not done: ${message}`);
+    }
     if (result.stopReason !== "end") {
       // runTaskTurn already reported the failure as frames; a non-end stop
       // is a failed job so the runner retries it honestly.
@@ -612,7 +618,7 @@ async function runTurn(
   text: string,
   retry = false,
   jobID?: string,
-): Promise<{ turnID: string; text: string; stopReason: string; taint: TaintSource[] }> {
+): Promise<{ turnID: string; text: string; stopReason: string; taint: TaintSource[]; endedBy?: "wall_time" }> {
   const controller = new AbortController();
   const delegationTaskID = payload.delegationTaskID?.trim() || null;
   const task = delegationTaskID ? getTask(deps.db, delegationTaskID) : null;
@@ -658,7 +664,7 @@ async function runTurn(
           }
         : {}),
     });
-    return { turnID: result.turnID, text: result.text, stopReason: result.stopReason, taint: result.taint };
+    return { turnID: result.turnID, text: result.text, stopReason: result.stopReason, taint: result.taint, ...(result.endedBy ? { endedBy: result.endedBy } : {}) };
   } finally {
     untrack();
   }

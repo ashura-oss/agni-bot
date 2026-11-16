@@ -25,13 +25,12 @@ import { enqueueJob } from "../stores/jobs";
 import { readFacts } from "./expand-tool";
 import { checkPeerRequest, fingerprintPeerRequest } from "../stores/peer-chains";
 import { appendChannelMessage } from "../stores/channels";
-import { MAX_DEPTH } from "../agent/guardrails";
+import { MAX_DEPTH, canStartDelegation, maxConcurrentDelegations } from "../agent/guardrails";
 import { listTaskNotes } from "../stores/task-notes";
 import { getArtifact } from "../stores/artifacts";
 import { packTaint, unknownTaint } from "../policy/context";
 import { carryTaint, saveTaskTaint, taskTaint } from "../policy/carry";
 import { denialScope } from "../policy/denials";
-import { MAX_CONCURRENT_DELEGATIONS } from "../policy/limits";
 
 const objectSchema = (properties: Record<string, unknown>, required: string[]): Record<string, unknown> => ({
   type: "object", properties, required, additionalProperties: false,
@@ -182,8 +181,9 @@ export function registerDelegateTaskTool(registry: ToolRegistry, deps: DelegateT
       // At most a few at once under one root: a bot that fans out without limit runs up the bill before anyone can stop it.
       const rootKey = ctx.run ? denialScope(ctx.run) : (deps.parentTurnID ?? chainID);
       const running = activeDelegations(deps.db, rootKey);
-      if (running >= MAX_CONCURRENT_DELEGATIONS) {
-        throw new Error(`not done: ${running} delegations are already running for this task, and ${MAX_CONCURRENT_DELEGATIONS} is the most at once. Wait for one to finish with delegate_wait, or do part of the work yourself.`);
+      const mostAtOnce = maxConcurrentDelegations(deps.db);
+      if (!canStartDelegation(running, mostAtOnce)) {
+        throw new Error(`not done: ${running} delegations are already running for this task, and ${mostAtOnce} is the most at once. Wait for one to finish with delegate_wait, or do part of the work yourself.`);
       }
       brief.chainID = chainID;
       const task = createDelegationTask(deps.db, {
