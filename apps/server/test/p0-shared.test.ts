@@ -8,7 +8,8 @@ import { s3Commands } from "../src/cli/s3-commands";
 import { openDatabase } from "../src/db";
 import { HealthTracker } from "../src/models/health";
 import type { ProviderConfig } from "../src/models/providers";
-import { Router } from "../src/models/router";
+import { Router, setRouteGate } from "../src/models/router";
+import { configureBudget } from "../src/policy/budget";
 import { recordModelUsage, setUsageRecorder, type ModelUsageEvent } from "../src/models/usage-hook";
 import { audit, setAuditSink, type AuditEvent, type AuditSink } from "../src/policy/audit-sink";
 import type { ToolMeta } from "../src/policy/tool-meta";
@@ -24,6 +25,8 @@ const noopSink: AuditSink = { record() {} };
 afterEach(() => {
   setAuditSink(noopSink);
   setUsageRecorder(() => {});
+  setRouteGate(null); // startupS2Ledger installs the router gate; it must not leak into other tests
+  configureBudget(null);
 });
 
 describe("P0 extra CLI commands", () => {

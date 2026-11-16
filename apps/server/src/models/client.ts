@@ -4,6 +4,7 @@
  * place that knows how to talk to a model endpoint.
  */
 import { log } from "../log";
+import { estimateTokens } from "./prices";
 
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
@@ -55,13 +56,16 @@ export class ProviderError extends Error {
   readonly kind: ProviderErrorKind;
   readonly status?: number;
   readonly retryAfterMs?: number;
+  /** Output the provider had already generated when the stream failed, as a token estimate (billed even though the call failed). */
+  readonly estimatedOutputTokens?: number;
 
-  constructor(message: string, options: { kind: ProviderErrorKind; status?: number; retryAfterMs?: number }) {
+  constructor(message: string, options: { kind: ProviderErrorKind; status?: number; retryAfterMs?: number; estimatedOutputTokens?: number }) {
     super(message);
     this.name = "ProviderError";
     this.kind = options.kind;
     this.status = options.status;
     this.retryAfterMs = options.retryAfterMs;
+    this.estimatedOutputTokens = options.estimatedOutputTokens;
   }
 }
 
@@ -92,6 +96,14 @@ export interface ChatResult {
   firstTokenMs: number;
   inputTokens?: number;
   outputTokens?: number;
+  /** Prompt tokens served from the provider's cache (part of `inputTokens`), when the provider says. */
+  cachedInputTokens?: number;
+  /**
+   * What the provider says this call cost, in US dollars (OpenRouter's `usage.cost`).
+   * The bill itself, so it beats any price table: OpenRouter routes one model to
+   * upstream endpoints that price differently.
+   */
+  reportedCostUsd?: number;
   /** Structured tool calls the model emitted, if any. */
   toolCalls?: ToolCall[];
   /**
@@ -161,6 +173,8 @@ export async function streamChat(request: ChatRequest): Promise<ChatResult> {
           ...(message.toolCallID ? { tool_call_id: message.toolCallID } : {}),
         })),
         stream: true,
+        // Without this, OpenAI-compatible providers send no usage in a stream.
+        stream_options: { include_usage: true },
         ...(request.tools?.length ? { tools: request.tools, tool_choice: request.toolChoice ?? "auto" } : {}),
         ...(request.temperature !== undefined ? { temperature: request.temperature } : {}),
         ...(request.maxTokens !== undefined ? { max_tokens: request.maxTokens } : {}),
@@ -196,6 +210,8 @@ export async function streamChat(request: ChatRequest): Promise<ChatResult> {
   let firstTokenMs = -1;
   let inputTokens: number | undefined;
   let outputTokens: number | undefined;
+  let cachedInputTokens: number | undefined;
+  let reportedCostUsd: number | undefined;
   // Tool calls arrive as incremental fragments keyed by index; accumulate them.
   const toolFragments = new Map<number, { id?: string; name?: string; arguments: string }>();
   // A stream that closes without [DONE] or a finish_reason was cut off, not finished.
@@ -224,6 +240,14 @@ export async function streamChat(request: ChatRequest): Promise<ChatResult> {
           payload = JSON.parse(payloadText);
         } catch {
           continue; // keep-alive comments and partial junk are not fatal
+        }
+        // Usage first: the final usage chunk (stream_options.include_usage) has empty `choices`.
+        const usage = (payload as { usage?: UsageChunk | null }).usage;
+        if (usage) {
+          inputTokens = usage.prompt_tokens ?? inputTokens;
+          outputTokens = usage.completion_tokens ?? outputTokens;
+          cachedInputTokens = cachedTokensOf(usage) ?? cachedInputTokens;
+          reportedCostUsd = reportedCostOf(usage) ?? reportedCostUsd;
         }
         const choice = (payload as { choices?: Array<{ delta?: Record<string, unknown>; finish_reason?: unknown }> }).choices?.[0];
         if (choice?.finish_reason) {
@@ -261,27 +285,29 @@ export async function streamChat(request: ChatRequest): Promise<ChatResult> {
             toolFragments.set(index, existing);
           }
         }
-        const usage = (payload as { usage?: { prompt_tokens?: number; completion_tokens?: number } }).usage;
-        if (usage) {
-          inputTokens = usage.prompt_tokens ?? inputTokens;
-          outputTokens = usage.completion_tokens ?? outputTokens;
-        }
       }
     }
   } catch (error) {
+    // Whatever arrived before the failure was generated, and billed; the router prices it as an estimate.
+    const partial = partialOutputTokens(text, reasoning, toolFragments);
     if (timedOut) {
       throw new ProviderError(
         firstTokenMs < 0 ? `no first token within ${request.firstTokenTimeoutMs}ms` : `stream stalled for ${request.firstTokenTimeoutMs}ms`,
-        { kind: "timeout" },
+        { kind: "timeout", estimatedOutputTokens: partial },
       );
     }
-    if (request.signal?.aborted) throw new ProviderError("cancelled", { kind: "aborted" });
-    throw new ProviderError(`stream failed: ${messageOf(error)}`, { kind: "network" });
+    if (request.signal?.aborted) throw new ProviderError("cancelled", { kind: "aborted", estimatedOutputTokens: partial });
+    throw new ProviderError(`stream failed: ${messageOf(error)}`, { kind: "network", estimatedOutputTokens: partial });
   } finally {
     cleanup();
     reader.releaseLock?.();
   }
-  if (!finished) throw new ProviderError("stream ended before the provider finished", { kind: "network" });
+  if (!finished) {
+    throw new ProviderError("stream ended before the provider finished", {
+      kind: "network",
+      estimatedOutputTokens: partialOutputTokens(text, reasoning, toolFragments),
+    });
+  }
 
   if (firstTokenMs < 0) {
     // The stream ended without a single content token.
@@ -291,10 +317,45 @@ export async function streamChat(request: ChatRequest): Promise<ChatResult> {
   const toolCalls = buildToolCalls(toolFragments);
   return {
     text, firstTokenMs, inputTokens, outputTokens,
+    ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
+    ...(reportedCostUsd !== undefined ? { reportedCostUsd } : {}),
     ...(finishReason ? { finishReason } : {}),
     ...(reasoning.trim().length > 0 ? { reasoning: reasoning.trim() } : {}),
     ...(toolCalls.length ? { toolCalls } : {}),
   };
+}
+
+interface UsageChunk {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  /** OpenAI, OpenRouter, Qwen: cached part of the prompt. */
+  prompt_tokens_details?: { cached_tokens?: number } | null;
+  /** DeepSeek's own API. */
+  prompt_cache_hit_tokens?: number;
+  /** OpenRouter: what the call cost. */
+  cost?: unknown;
+  /** OpenRouter: the call ran on the owner's own upstream key, so `cost` is not the real bill. */
+  is_byok?: boolean;
+}
+
+/** The cost the provider reports, when it is a plain non-negative number on a call that was billed by the provider. */
+function reportedCostOf(usage: UsageChunk): number | undefined {
+  if (usage.is_byok === true) return undefined;
+  const value = usage.cost;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+/** Estimated tokens of everything streamed so far: content, reasoning and tool-call text. */
+function partialOutputTokens(text: string, reasoning: string, fragments: Map<number, { id?: string; name?: string; arguments: string }>): number {
+  let tokens = estimateTokens(text) + estimateTokens(reasoning);
+  for (const fragment of fragments.values()) tokens += estimateTokens(`${fragment.name ?? ""}${fragment.arguments}`);
+  return tokens;
+}
+
+/** Cached prompt tokens, however the provider spells them; undefined when it does not say. */
+function cachedTokensOf(usage: UsageChunk): number | undefined {
+  const value = usage.prompt_tokens_details?.cached_tokens ?? usage.prompt_cache_hit_tokens;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
 /**

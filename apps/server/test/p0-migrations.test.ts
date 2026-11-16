@@ -36,29 +36,30 @@ describe("P0 migration aggregation", () => {
   });
 
   test("buildMigrations drops nulls and sorts by id", () => {
-    const merged = buildMigrations([fake(1), fake(2)], [null, fake(60), null], [fake(54)]);
-    expect(merged.map((entry) => entry.id)).toEqual([1, 2, 54, 60]);
+    // Ids 59 and 64 are the spare slots, so they stay free whichever sprint fills its own.
+    const merged = buildMigrations([fake(1), fake(2)], [null, fake(64), null], [fake(59)]);
+    expect(merged.map((entry) => entry.id)).toEqual([1, 2, 59, 64]);
   });
 
   test("buildMigrations refuses a duplicate id", () => {
-    expect(() => buildMigrations([fake(1), fake(54)], [fake(54)])).toThrow(/duplicate migration id 54/);
+    expect(() => buildMigrations([fake(1), fake(59)], [fake(59)])).toThrow(/duplicate migration id 59/);
   });
 });
 
 describe("P0 CLI schema check", () => {
-  test("a database with 60 applied but 54 missing is refused, naming the missing id", () => {
+  test("a database with 64 applied but 59 missing is refused, naming the missing id", () => {
     const path = tempDB();
     openDatabase(path).close(); // applies the real list
-    const list = buildMigrations(MIGRATIONS, [fake(54)], [fake(60)]);
+    const list = buildMigrations(MIGRATIONS, [fake(59)], [fake(64)]);
 
     const seeded = new Database(path);
-    seeded.run("INSERT INTO schema_migrations (id, name, applied_at) VALUES (60, 'fake_60', 'test')");
+    seeded.run("INSERT INTO schema_migrations (id, name, applied_at) VALUES (64, 'fake_64', 'test')");
     seeded.close();
 
-    expect(() => openDatabaseForCLI(path, list)).toThrow(/missing migration.*\b54\b/);
+    expect(() => openDatabaseForCLI(path, list)).toThrow(/missing migration.*\b59\b/);
 
     const fixed = new Database(path);
-    fixed.run("INSERT INTO schema_migrations (id, name, applied_at) VALUES (54, 'fake_54', 'test')");
+    fixed.run("INSERT INTO schema_migrations (id, name, applied_at) VALUES (59, 'fake_59', 'test')");
     fixed.close();
     openDatabaseForCLI(path, list).close();
   });
