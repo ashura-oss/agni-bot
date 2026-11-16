@@ -126,6 +126,88 @@
   .task-composer .select {
     font-size: 16px;
   }
+
+  /* Tasks header and empty state: the controls grow to the 44px target. */
+  .tasks-sidebar-toggle {
+    flex-basis: var(--touch-target);
+    width: var(--touch-target);
+    height: var(--touch-target);
+  }
+
+  .tasks-refresh {
+    width: var(--touch-target);
+    height: var(--touch-target);
+  }
+
+  .tasks-header-actions .btn,
+  .tasks-empty .btn {
+    min-height: var(--touch-target);
+  }
+
+  /* The new-task dialog and the detail sheet (Voice note, Activity, Add subtask, Close, the footer). */
+  .task-composer .btn,
+  .task-composer .icon-btn,
+  .task-composer .text-input,
+  .task-detail-sheet .btn,
+  .task-detail-sheet .icon-btn,
+  .task-detail-sheet .text-input,
+  .task-detail-sheet .select {
+    min-height: var(--touch-target);
+  }
+
+  .task-composer .icon-btn,
+  .task-detail-sheet .icon-btn {
+    min-width: var(--touch-target);
+  }
+
+  /* Native selects everywhere (Add provider, the task dialogs). */
+  .select {
+    min-height: var(--touch-target);
+  }
+
+  /* The Connect page. */
+  .pairing-card .text-input,
+  .pairing-card .btn {
+    min-height: var(--touch-target);
+  }
+
+  /* The command to copy scrolls inside its box instead of widening the card past a 375px screen. */
+  .pairing-command code {
+    min-width: 0;
+    overflow-x: auto;
+  }
+
+  summary.pairing-note {
+    display: flex;
+    align-items: center;
+    min-height: var(--touch-target);
+  }
+
+  /* Settings switches and colour swatches keep their look: the 44px hit area is drawn past the edge. */
+  .switch::after {
+    content: "";
+    position: absolute;
+    inset: -10px 0;
+  }
+
+  .accent-grid > button,
+  .custom-swatch {
+    position: relative;
+  }
+
+  .accent-grid > button::after,
+  .custom-swatch::after {
+    content: "";
+    position: absolute;
+    inset: -7px;
+  }
+}
+
+/* No hover to reveal the pin star: draw it, so the 44px target in the row is something you can see. */
+@media (hover: none) {
+  .sidebar-star {
+    opacity: 1;
+  }
 }
 
 /* The new-task dialog: one column when two would be too narrow for a date field. */

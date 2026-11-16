@@ -53,10 +53,64 @@ describe("phone touch targets", () => {
     expect(declarations(phone, selector)[property]).toMatch(TOUCH);
   });
 
+  it.each([
+    // The Tasks screen header and its empty state.
+    [".tasks-sidebar-toggle", "width"],
+    [".tasks-sidebar-toggle", "height"],
+    [".tasks-refresh", "width"],
+    [".tasks-refresh", "height"],
+    [".tasks-header-actions .btn", "min-height"],
+    [".tasks-empty .btn", "min-height"],
+    // The new-task dialog and the detail sheet: buttons (Voice note, Activity, Add subtask), fields, selects.
+    [".task-composer .btn", "min-height"],
+    [".task-composer .icon-btn", "min-height"],
+    [".task-composer .icon-btn", "min-width"],
+    [".task-composer .text-input", "min-height"],
+    [".task-detail-sheet .btn", "min-height"],
+    [".task-detail-sheet .icon-btn", "min-height"],
+    [".task-detail-sheet .icon-btn", "min-width"],
+    [".task-detail-sheet .text-input", "min-height"],
+    [".task-detail-sheet .select", "min-height"],
+    // Every native select (Add provider's Provider, the dialogs'), and the Connect page.
+    [".select", "min-height"],
+    [".pairing-card .text-input", "min-height"],
+    [".pairing-card .btn", "min-height"],
+    ["summary.pairing-note", "min-height"],
+  ])("%s has a 44px %s on a phone", (selector, property) => {
+    expect(declarations(phone, selector)[property]).toMatch(TOUCH);
+  });
+
+  it.each([
+    // Visual size stays: the 44px hit area is a pseudo-element drawn past the control edge (inset is from its padding box; the border adds the rest).
+    [".switch::after", -10],
+    [".accent-grid > button::after", -7],
+    [".custom-swatch::after", -7],
+  ])("%s extends the hit area to 44px without growing the control", (selector, inset) => {
+    const rule = declarations(phone, selector);
+    expect(rule["content"]).toBe('""');
+    expect(rule["position"]).toBe("absolute");
+    expect(rule["inset"]).toContain(`${inset}px`);
+  });
+
   it("keeps the phone rules in one block that loads after the desktop overrides", () => {
     expect(phone).not.toBe("");
     const order = [...read("app.css").matchAll(/@import "\.\/([\w-]+\.css)"/g)].map((m) => m[1]);
     expect(order.indexOf("phone-touch.css")).toBeGreaterThan(order.indexOf("overrides-v3.css"));
+  });
+});
+
+describe("the pin star on a touch screen", () => {
+  const touch = mediaBlock(read("phone-touch.css"), "hover: none");
+
+  it("is drawn, not hidden, where there is no hover to reveal it", () => {
+    // Hover-only opacity 0 left an invisible 44px button in every row that pinned by accident.
+    expect(declarations(touch, ".sidebar-star")["opacity"]).toBe("1");
+  });
+});
+
+describe("the Connect page on a 375px screen", () => {
+  it("lets the command to copy shrink and scroll, so the open card does not widen past the screen", () => {
+    expect(declarations(phone, ".pairing-command code")["min-width"]).toBe("0");
   });
 });
 
