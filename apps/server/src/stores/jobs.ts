@@ -97,17 +97,25 @@ export function requeueJob(db: Database, id: string, runAt: string): void {
   db.run("UPDATE jobs SET state = 'queued', run_at = ?, updated_at = ? WHERE id = ?", [runAt, nowISO(), id]);
 }
 
+/** What `wakeJob` did: made the job due, left a running copy alone, or found no such job. */
+export type WakeOutcome = "woken" | "running" | "not_found";
+
 /**
  * Make a job (any state) due now — the manual "run it" escape hatch. Running
  * it implies you want it: a paused job is resumed, since a claim would skip it
  * otherwise.
+ *
+ * A job that is already running is left alone. Queueing it again would let
+ * the next tick claim a second copy beside the first (routines and turns run
+ * in parallel), so the caller is told it is running instead.
  */
-export function wakeJob(db: Database, id: string): boolean {
+export function wakeJob(db: Database, id: string): WakeOutcome {
   const result = db.run(
-    "UPDATE jobs SET state = 'queued', enabled = 1, run_at = ?, attempts = 0, result = NULL, updated_at = ? WHERE id = ?",
+    "UPDATE jobs SET state = 'queued', enabled = 1, run_at = ?, attempts = 0, result = NULL, updated_at = ? WHERE id = ? AND state != 'running'",
     [nowISO(), nowISO(), id],
   );
-  return result.changes > 0;
+  if (result.changes > 0) return "woken";
+  return getJob(db, id) ? "running" : "not_found";
 }
 
 export function getJob(db: Database, id: string): JobRow | null {
