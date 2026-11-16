@@ -223,6 +223,22 @@ export const JobInfoSchema = z.object({
 });
 export type JobInfo = z.infer<typeof JobInfoSchema>;
 
+/**
+ * One standing "Always allow" rule, as `approval.rules.list.ok` lists it. A
+ * rule is scoped to one bot, one tool and one target (the exact command, the
+ * resolved path, or the recipient list). `agentName` is null when the bot no
+ * longer exists. Additive in v2.
+ */
+export const ApprovalRuleInfoSchema = z.object({
+  id: z.string().min(1),
+  agentID: z.string(),
+  agentName: z.string().nullable(),
+  toolName: z.string(),
+  target: z.string(),
+  createdAt: z.string(),
+});
+export type ApprovalRuleInfo = z.infer<typeof ApprovalRuleInfoSchema>;
+
 export const TaskStatusSchema = z.enum(["open", "done", "snoozed"]);
 export const TaskWorkflowStatusSchema = z.enum(["not_started", "in_progress", "ai_review"]);
 export const DelegateStateSchema = z.enum(["none", "queued", "running", "needs_input", "done", "failed"]);
@@ -467,6 +483,16 @@ export const ClientFrameSchema = z.discriminatedUnion("type", [
   /** Read the routine list, or act on one routine (pause, resume, run now). */
   z.object({ type: z.literal("job.list"), limit: z.number().int().positive().max(200).optional() }),
   z.object({ type: z.literal("job.set"), jobID: z.string().min(1), action: JobActionSchema }),
+  /**
+   * The standing "Always allow" rules, newest first; answered by
+   * `approval.rules.list.ok`. Additive in v2.
+   */
+  z.object({ type: z.literal("approval.rules.list") }),
+  /**
+   * Revoke one rule; answered by `approval.rule.revoke.ok`, or by an error
+   * `not_found` when the id is unknown or already revoked. Additive in v2.
+   */
+  z.object({ type: z.literal("approval.rule.revoke"), id: z.string().min(1) }),
   /** Owner-only: replace a routine's web domain allowlist (additive v2). Bots cannot send this. */
   z.object({ type: z.literal("routine.domains.set"), jobID: z.string().min(1), domains: z.array(z.string().max(253)).max(20) }),
   /** Delete a task unless it is currently running. */
@@ -828,6 +854,10 @@ export const ServerFrameSchema = z.discriminatedUnion("type", [
     createdAt: z.string(),
   }),
   z.object({ type: z.literal("job.list.ok"), seq, jobs: z.array(JobInfoSchema) }),
+  /** Answer to `approval.rules.list`; addressed to the requester, not replayed. */
+  z.object({ type: z.literal("approval.rules.list.ok"), seq, rules: z.array(ApprovalRuleInfoSchema) }),
+  /** Answer to `approval.rule.revoke`; addressed to the requester, not replayed. */
+  z.object({ type: z.literal("approval.rule.revoke.ok"), seq, id: z.string() }),
   z.object({ type: z.literal("task.list.ok"), seq, tasks: z.array(TaskInfoSchema), lists: z.array(TaskListInfoSchema).optional() }),
   z.object({ type: z.literal("task.create.ok"), seq, task: TaskInfoSchema }),
   z.object({ type: z.literal("task.list.create.ok"), seq, lists: z.array(TaskListInfoSchema) }),

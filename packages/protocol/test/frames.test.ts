@@ -7,6 +7,7 @@ import {
   isSupportedVersion,
   parseClientFrame,
   parseServerFrame,
+  type ServerFrame,
 } from "../src/index";
 
 describe("client frames", () => {
@@ -115,6 +116,32 @@ describe("server frames", () => {
     expect(parseServerFrame({ ...frame, reason: "timeout" }).ok).toBe(false);
     expect(parseServerFrame({ ...frame, seq: undefined }).ok).toBe(false);
     expect(parseServerFrame({ ...frame, requestID: undefined }).ok).toBe(false);
+  });
+
+  test("round-trips the approval rules frames", () => {
+    expect(parseClientFrame({ type: "approval.rules.list" }).ok).toBe(true);
+    expect(parseClientFrame({ type: "approval.rule.revoke", id: "rul_1" }).ok).toBe(true);
+    expect(parseClientFrame({ type: "approval.rule.revoke" }).ok).toBe(false);
+    expect(parseClientFrame({ type: "approval.rule.revoke", id: "" }).ok).toBe(false);
+
+    const list: ServerFrame = {
+      type: "approval.rules.list.ok",
+      seq: 30,
+      rules: [
+        { id: "rul_1", agentID: "agni", agentName: "Agni", toolName: "bash", target: "ls", createdAt: "2026-11-01T10:00:00.000Z" },
+        { id: "rul_2", agentID: "gone", agentName: null, toolName: "write_file", target: "c:/x", createdAt: "2026-11-02T10:00:00.000Z" },
+      ],
+    };
+    const parsedList = parseServerFrame(JSON.parse(encodeFrame(list)));
+    expect(parsedList.ok).toBe(true);
+    if (parsedList.ok) expect(parsedList.frame).toEqual(list);
+    expect(parseServerFrame({ type: "approval.rules.list.ok", seq: 31, rules: [] }).ok).toBe(true);
+    expect(parseServerFrame({ ...list, rules: [{ id: "rul_1" }] }).ok).toBe(false);
+
+    const revoked = { type: "approval.rule.revoke.ok", seq: 32, id: "rul_1" } as const;
+    const parsedRevoked = parseServerFrame(JSON.parse(encodeFrame(revoked)));
+    expect(parsedRevoked.ok).toBe(true);
+    if (parsedRevoked.ok) expect(parsedRevoked.frame).toEqual(revoked);
   });
 
   test("rejects server frames without seq", () => {

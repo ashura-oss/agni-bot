@@ -73,6 +73,8 @@ never reason about thread ids.
 | `job.list` | `{limit?}` | Tasks and routines, newest/next due first. |
 | `job.set` | `{jobID, action}` | `action`: `pause \| resume \| run`. |
 | `job.delete` | `{jobID}` | Deletes a task unless it is running; replies with a refreshed `job.list.ok`. |
+| `approval.rules.list` | `{}` | The standing "Always allow" rules, newest first. Answered by `approval.rules.list.ok`. Additive in v2. |
+| `approval.rule.revoke` | `{id}` | Revokes one rule; it never matches again. Answered by `approval.rule.revoke.ok`, or by an `error` with code `not_found` when the id is unknown or already revoked. Additive in v2. |
 | `task.list` | `{status?, limit?}` | Lists durable tasks and task lists; status is `open \| done \| snoozed \| all`. |
 | `task.create` | `{title, description?, dueAt?, deadlineAt?, reminderAt?, labels?, repeatRule?, priority?, listID?, parentTaskID?, attachmentIDs?}` | Creates a task or subtask, optionally with a schedule, deadline, labels, repeat cadence and uploaded files. |
 | `task.list.create` | `{name}` | Creates a task list and returns the current list navigation data. |
@@ -145,6 +147,8 @@ accountLabel?, error?, connectedAt?}`.
 | `conversation.history.ok` | `{conversationID, messages: [{id, role, text, createdAt, turnID?, sessionID?}]}` | Answer to `conversation.history`; addressed to the requester. Clients render a session divider wherever consecutive `sessionID`s differ. |
 | `thread.export.ok` | `{conversationID, url, token, records, createdAt}` | Answer to `thread.export`; addressed to the requester, not replayed. `url` is absolute and served by this daemon at `GET /share/<token>`; the token is the only access control on the file, so it is never logged or replayed. |
 | `job.list.ok` | `{jobs: [...]}` | Answer to `job.list`, `job.set`, or `job.delete`; addressed to the requester. |
+| `approval.rules.list.ok` | `{rules: [{id, agentID, agentName, toolName, target, createdAt}]}` | Answer to `approval.rules.list`; addressed to the requester, not replayed. A rule is scoped to one bot, one tool and one target (the exact command, the resolved path, or the recipient list). `agentName` is `null` when the bot no longer exists. |
+| `approval.rule.revoke.ok` | `{id}` | Answer to `approval.rule.revoke`; addressed to the requester, not replayed. |
 | `task.list.ok` | `{tasks: [...], lists: [...]}` | Task snapshots include due date, deadline, priority, workflow status (`not_started`, `in_progress`, `ai_review`), current progress note, list/collection, labels, optional parent, notes, reminder time, repeat cadence and attachment IDs. Lists include open task counts. A delegation task also carries `ownerAgentId`, `origin`, `intent`, `delegateState`, `jobId`, `result` and `resultRedacted`. `intent` is what the delegation is for (`request`, `result`, `question`, `status`, `fyi`) and reads as `request` when absent. The owner sees every result; `resultRedacted` is true when a result exists that this viewer may not see. |
 | `task.create.ok` | `{task: {...}}` | Newly persisted task. |
 | `task.list.create.ok` | `{lists: [...]}` | Updated task list navigation. |
@@ -189,7 +193,7 @@ bubble. A client that ignores `reset` still shows the right answer: the sealing
 `bad_task_action`, `capture_failed`, `job_running`, `no_provider`, `provider_failed`,
 `unknown_provider`, `invalid_key`, `provider_exists`, `provider_storage`, `provider_auth`,
 `unknown_plugin`, `unknown_connection`, `plugin_not_configured`, `plugin_unavailable`,
-`plugin_connect_failed`, `unknown_background`, `resync_gap`, `internal`.
+`plugin_connect_failed`, `unknown_background`, `resync_gap`, `not_found`, `internal`.
 
 ## Versioning
 
