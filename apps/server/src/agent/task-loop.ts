@@ -578,6 +578,11 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   let saidSomething = false;
   const offRoadGuard = !persona.id.startsWith("coder") && !CODE_REQUEST.test(run.text) && !FILE_REQUEST.test(run.text);
   let activeStepText = "";
+  // An answer cut at the output ceiling is continued; the pieces so far, and how often.
+  let cutOffText = "";
+  let continuations = 0;
+  const MAX_CONTINUATIONS = 2;
+  const CONTINUE_AFTER_CUT = "Your last reply was cut off at the output limit. Continue exactly where it stopped, without repeating anything.";
   // Every step streams live. A step that ends in tool calls was narration,
   // which stays in the model's context: `reset` clears it from the bubble.
   const emitToken = (delta: string, reset?: true): void => {
@@ -631,7 +636,8 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
         },
       });
       // Every step has an output ceiling, so one runaway response cannot run on unbounded.
-      const stepMaxTokens = tokenLimit === null ? maxOutputTokens() : Math.min(2_048, tokenLimit - tokenCount);
+      // A budgeted turn gets the same ceiling, or what is left of its budget if that is less.
+      const stepMaxTokens = tokenLimit === null ? maxOutputTokens() : Math.max(1, Math.min(maxOutputTokens(), tokenLimit - tokenCount));
       let result: Awaited<ReturnType<typeof routeStep>>;
       try {
         result = await routeStep(stepMaxTokens);
@@ -655,11 +661,27 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
         publish(answerText);
         break;
       }
+      if (!result.toolCalls?.length && result.finishReason === "length") {
+        // Cut at the output ceiling: not a finished answer. Carry on where it stopped, a couple of times at most.
+        cutOffText += result.text;
+        messages.push(assistantMessage(result.text, result.reasoning));
+        if (continuations < MAX_CONTINUATIONS) {
+          continuations += 1;
+          messages.push({ role: "user", content: CONTINUE_AFTER_CUT });
+          continue;
+        }
+        stopReason = "budget";
+        answerText = `${cutOffText}
+
+[The reply was cut off at the output limit and is not complete.]`;
+        publish(answerText);
+        break;
+      }
       if (!result.toolCalls?.length) {
-        answerText = result.text;
+        answerText = cutOffText + result.text;
         messages.push(assistantMessage(result.text, result.reasoning));
         consecutiveNonTextSteps = 0;
-        publish(result.text);
+        publish(answerText);
         break;
       }
 
