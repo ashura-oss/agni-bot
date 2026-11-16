@@ -37,6 +37,7 @@ import type { Router } from "../models/router";
 import { addProviderCredential, setProviderModel } from "../models/provider-settings";
 import { ChatGPTAuthError, type ChatGPTAuth } from "../models/chatgpt-auth";
 import {
+  getJob,
   getJobByPrefix,
   listFinishedJobs,
   listJobs,
@@ -1322,6 +1323,9 @@ function handleTaskAnswer(deps: DispatchDeps, session: Session, frame: Extract<C
   appendMessage(deps.db, { threadID: childThreadID, role: "user", text: answer });
   clearPendingQuestion(deps.db, task.id);
   setDelegationState(deps.db, task.id, "running");
+  // The resumed run may call what the first run was allowed to (S2-06); a first run that left no readable record leaves none here.
+  const first = task.job_id ? getJob(deps.db, task.job_id) : null;
+  const capabilities = first ? parseJobPayload<{ capabilities?: unknown }>(first).capabilities : undefined;
   const job = enqueueJob(deps.db, {
     kind: "turn",
     payload: {
@@ -1333,6 +1337,7 @@ function handleTaskAnswer(deps: DispatchDeps, session: Session, frame: Extract<C
       // The answer resumes the task inside the chain it started in, so a
       // stopped chain stays stopped.
       chainID: briefChainID(task.brief),
+      ...(capabilities !== undefined ? { capabilities } : {}),
     },
   });
   setDelegationJob(deps.db, task.id, job.id);

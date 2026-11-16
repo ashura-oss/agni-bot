@@ -15,6 +15,7 @@ import { defaultResolvedPersona } from "../src/agent/personas";
 import { rootGuardrail } from "../src/agent/guardrails";
 import { createRunContext, type RunContextInput } from "../src/policy/context";
 import type { RunContext } from "../src/policy/types";
+import { TOOL_POLICY } from "../src/policy/metadata";
 import type { Router } from "../src/models/router";
 
 export interface PolicyRig {
@@ -57,4 +58,21 @@ export function policyRig(options: Partial<RunContextInput> = {}): PolicyRig {
       rmSync(root, { recursive: true, force: true });
     },
   };
+}
+
+/**
+ * Every tool name a parent could hold: the table's tools (the per-turn ones included) and whatever the registry
+ * has built (MCP tools among them). Pass it as a child's `policy.capabilities` so a test of the child is not cut down
+ * to the inert tools, which is what a child with no readable parent gets.
+ */
+export function fullCapabilities(db: Database): string[] {
+  return [...new Set([...Object.keys(TOOL_POLICY), ...buildTaskToolRegistry(db).list().map((tool) => tool.name)])];
+}
+
+/** A parent run that can call every tool: what the owner's own assistant turn holds. Pass it as the `run` of a handoff. */
+export function fullCapabilityRun(db: Database, input: Partial<RunContextInput> = {}): RunContext {
+  return createRunContext({
+    db, bot: "ea", threadID: "thr_parent", turnID: "trn_parent", principal: { kind: "owner" },
+    capabilities: fullCapabilities(db), registry: buildTaskToolRegistry(db), ...input,
+  });
 }

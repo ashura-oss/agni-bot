@@ -648,6 +648,24 @@ describe("websocket end-to-end", () => {
     expect(child).toBeDefined();
   });
 
+  test("a resumed task keeps the capabilities its first run was given (S2-06)", async () => {
+    await startTestServer();
+    const threadID = createThreadFor(db!, "researcher");
+    db!.run(
+      "INSERT INTO jobs (id, kind, payload, state, run_at, attempts, created_at, updated_at) VALUES ('job_first', 'turn', ?, 'done', datetime('now'), 1, datetime('now'), datetime('now'))",
+      [JSON.stringify({ text: "brief", capabilities: ["recall_fact", "say"], taint: [] })],
+    );
+    db!.run(
+      `INSERT INTO tasks (id,title,due_at,priority,status,created_at,updated_at,snoozed_until,owner_device_id,owner_agent_id,origin,delegate_state,brief,result,job_id,parent_turn_id,child_thread_id,parent_thread_id,parent_channel_id,parent_agent_id,pending_question,pending_question_id,result_delivered_at,artifact_id)
+       VALUES ('tsk_cap','Find it',NULL,'normal','open',datetime('now'),datetime('now'),NULL,NULL,'researcher','ea_delegated','needs_input',NULL,NULL,'job_first',NULL,?,?,?,'ea','Which account?','qst_cap',NULL,NULL)`,
+      [threadID, threadID, "main"],
+    );
+    client!.send({ type: "task.answer", taskID: "tsk_cap", questionID: "qst_cap", text: "Use the second account" });
+    await client!.next("task.answer.ok");
+    const resumed = db!.query<{ payload: string }, []>("SELECT j.payload FROM jobs j JOIN tasks t ON t.job_id = j.id WHERE t.id = 'tsk_cap'").get();
+    expect(JSON.parse(resumed!.payload).capabilities).toEqual(["recall_fact", "say"]);
+  });
+
   test("a normal message never resumes a task", async () => {
     await startTestServer();
     const threadID = createThreadFor(db!, "researcher");

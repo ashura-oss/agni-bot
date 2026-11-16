@@ -18,6 +18,7 @@ import { canonicalAgentID, getPersona, resolvePersona, type ResolvedPersona } fr
 import { DEFAULT_VISIBILITY, MISSING_AGENT_VISIBILITY, RESULT_MAX_CHARS, redactResultForCaller } from "../agent/visibility";
 import { rootGuardrail } from "../agent/guardrails";
 import { asksWhenClean } from "../policy/metadata";
+import { readCapabilities } from "../policy/narrowing";
 import { readTaint, unknownTaint } from "../policy/context";
 import { saveTaskTaint, taskTaint } from "../policy/carry";
 import type { TaintSource } from "../policy/types";
@@ -102,6 +103,8 @@ export interface TurnJobPayload {
   }>;
   /** What the run that queued this job had read from outside text, for a delegated child (S2-06). */
   taint?: unknown;
+  /** What the run that queued this job could call; a delegated child may call only these (S2-06). Missing or unreadable: the inert tools only. */
+  capabilities?: unknown;
   /** The run this job belongs to: set on a delegated child so a refusal earlier in the chain still holds. */
   rootTurnID?: string;
   rootJob?: string | null;
@@ -636,6 +639,7 @@ async function runTurn(
         ...(payload.taint !== undefined || payload.wakeKey ? { taint: [...(payload.taint !== undefined ? readTaint(payload.taint) : []), ...wakeTaint(deps.db, payload.results)] } : {}),
         ...(payload.rootTurnID ? { rootTurnID: payload.rootTurnID, rootJob: payload.rootJob ?? null } : {}),
         jobID: jobID ?? null,
+        capabilities: readCapabilities(payload.capabilities),
       },
       facts: payload.facts,
       ...(channelID ? { channelID } : {}),

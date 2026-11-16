@@ -9,6 +9,7 @@ import { gateToolCall } from "./tool-gate";
 import { abortReasonOf } from "./abort-reason";
 import { markRun } from "../policy/carry";
 import { createRunContext, isTainted, packTaint, readTaint, unknownTaint } from "../policy/context";
+import { narrowCapabilities } from "../policy/narrowing";
 import { ownerWordsOf, recordOwnerWords } from "../policy/owner-words";
 import { saveTaskTaint } from "../policy/carry";
 import { decide } from "../policy/engine";
@@ -152,7 +153,7 @@ export interface TaskTurnRun {
    * parent carried down, or what the finished tasks it is told about read), and the
    * root it belongs to, so an owner's "no" earlier in the chain still holds.
    */
-  policy?: { taint?: TaintSource[]; rootTurnID?: string; rootJob?: string | null; jobID?: string | null };
+  policy?: { taint?: TaintSource[]; rootTurnID?: string; rootJob?: string | null; jobID?: string | null; capabilities?: string[] };
   /** Restrict task tools to this list, intersected with the persona's tools. */
   toolAllowlist?: string[];
   /** Optional output-token budget for bounded background work such as routines. */
@@ -423,17 +424,24 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   // separate messages; `run_privileged` is only meaningful next to `bash`.
   // `ask` puts a question to the owner — every agent may do that. A draft
   // only makes sense to an agent that can send the mail.
-  const effectiveTools = run.toolAllowlist
+  const ownTools = run.toolAllowlist
     ? [...new Set(run.toolAllowlist.filter((name) => memoryTools.includes(name)))]
     : [...new Set([
-      // A delegated task's bots share its scratchpad.
-      ...(run.delegation ? SCRATCH_TOOLS : []),
       ...memoryTools,
       "say",
       "ask",
       ...(memoryTools.includes("bash") ? ["run_privileged"] : []),
       ...(memoryTools.includes("mail_send") ? ["draft_email"] : []),
     ])];
+  // S2-06: a bot another bot started (a handoff, a delegated task) may call only what its own persona, the grant and
+  // its parent could call. The parent's set rides in `run.policy.capabilities`; none readable means the inert tools only.
+  const startedByBot = Boolean(run.peer || run.delegation);
+  const parentCapabilities = run.policy?.capabilities;
+  const narrowedTools = startedByBot ? [...narrowCapabilities(ownTools, parentCapabilities)] : ownTools;
+  const effectiveTools = run.toolAllowlist
+    ? narrowedTools
+    // A delegated task's bots share its scratchpad: the task's own notes, not the parent's reach. Kept only when the parent could be read.
+    : [...new Set([...(run.delegation && parentCapabilities !== undefined ? SCRATCH_TOOLS : []), ...narrowedTools])];
   // Most turns have no generated-token ceiling. Scheduled routines may set an
   // explicit per-run cap so their own cost bound survives the shared loop.
   const tokenLimit = run.maxTokens === undefined ? null : Math.max(1, run.maxTokens);

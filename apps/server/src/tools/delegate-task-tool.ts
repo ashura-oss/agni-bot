@@ -219,6 +219,8 @@ export function registerDelegateTaskTool(registry: ToolRegistry, deps: DelegateT
           // The list is always there when the sender is known: an empty one says "read nothing outside"; none says "unknown".
           ...(ctx.run ? { taint: packTaint(ctx.run) } : {}),
           ...(ctx.run ? { rootTurnID: ctx.run.rootTurnID, rootJob: ctx.run.rootJob } : {}),
+          // What this run could call: the child's tools are cut down to it (S2-06). None says the sender is unknown, and the child gets only the inert tools.
+          ...(ctx.run ? { capabilities: [...ctx.run.effectiveCapabilities] } : {}),
           rootKey,
         },
       });
