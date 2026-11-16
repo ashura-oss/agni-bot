@@ -133,12 +133,28 @@ export function addApprovalRule(
   return toRule(db.query("SELECT * FROM approval_rules WHERE id = ?").get(id) as RuleRow);
 }
 
-/** Active rules, newest first; revoked ones too when asked. */
+/**
+ * Whether a stored rule could ever match a call. A rule written before shell
+ * commands and writes outside scratch stopped being remembered is still in the
+ * table but `approvalTarget` can no longer produce its target, so it is dead
+ * weight that would read as active in Settings.
+ */
+function canStillMatch(rule: ApprovalRule): boolean {
+  if (NEVER_REMEMBER.has(rule.toolName)) return false;
+  if (rule.toolName === "write_file") return !isOutsideScratch(rule.target, scratchDir());
+  return true;
+}
+
+/**
+ * Active rules that can still match, newest first; with `includeRevoked`, the
+ * whole history (revoked and unmatchable rows too).
+ */
 export function listApprovalRules(db: Database, options: { includeRevoked?: boolean } = {}): ApprovalRule[] {
   const rows = db
     .query(`SELECT * FROM approval_rules ${options.includeRevoked ? "" : "WHERE revoked_at IS NULL"} ORDER BY created_at DESC, id`)
     .all() as RuleRow[];
-  return rows.map(toRule);
+  const rules = rows.map(toRule);
+  return options.includeRevoked ? rules : rules.filter(canStillMatch);
 }
 
 /** Revoke a rule. True when an active rule was revoked; false for an unknown or already revoked id. */

@@ -358,6 +358,23 @@ describe("the broker uses rules", () => {
     expect(h.frames).toHaveLength(1);
   });
 
+  test("rules that can never match are not listed as active (stored before shell and outside-scratch writes stopped being remembered)", () => {
+    mkdirSync(join(root, "outside"), { recursive: true });
+    const lower = (path: string): string => (process.platform === "win32" ? path.toLowerCase() : path);
+    const insert = (id: string, tool: string, target: string): void => {
+      db.run("INSERT INTO approval_rules (id, agent_id, tool_name, target, created_at) VALUES (?, 'ea', ?, ?, ?)", [id, tool, target, new Date().toISOString()]);
+    };
+    insert("rul_bash", "bash", "ls");
+    insert("rul_priv", "run_privileged", "sudo ls");
+    insert("rul_out", "write_file", lower(join(root, "outside", "startup.cmd")));
+    insert("rul_in", "write_file", lower(join(root, "scratch", "notes.md")));
+    insert("rul_mcp", "mcp_files_delete", '{"path":"/x"}');
+
+    expect(listApprovalRules(db).map((rule) => rule.id).sort()).toEqual(["rul_in", "rul_mcp"]);
+    // The full history (revoked rows are asked for) still has every row.
+    expect(listApprovalRules(db, { includeRevoked: true })).toHaveLength(5);
+  });
+
   test("always on a tool that is never remembered stores nothing", async () => {
     const h = harness(["always", "once"]);
     expect(await h.ask("run_privileged", { command: "sudo ls", purpose: "list" })).toBe("always");
