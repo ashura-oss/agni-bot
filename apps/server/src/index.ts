@@ -48,6 +48,7 @@ import { deleteJob, enqueueJob, getJobByPrefix, listJobs, requeueStuckJobs, setJ
 import { formatDuration, parseDurationMs, parseWhen } from "./util/time";
 import { startServer, type HealthReport, type RunningServer } from "./ws/server";
 import { agniHome, loadHomeEnv, migrateHomeLayout } from "./home";
+import { browserOpenCommand } from "./util/open-url";
 
 const [command = "help", ...args] = Bun.argv.slice(2);
 
@@ -455,9 +456,8 @@ async function openBrowser(args: string[]): Promise<void> {
   for (const url of urls) console.log(url);
   console.log(`or type this code: ${code}, valid 10 minutes`);
   if (hasFlag(args, "--no-browser")) return;
-  const opener = process.platform === "darwin" ? "open" : "xdg-open";
   try {
-    Bun.spawn([opener, urls[0] as string], { stdout: "ignore", stderr: "ignore" });
+    Bun.spawn(browserOpenCommand(urls[0] as string), { stdout: "ignore", stderr: "ignore" });
   } catch {
     // no browser available; the URL above is enough
   }
