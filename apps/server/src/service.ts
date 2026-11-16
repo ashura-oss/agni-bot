@@ -5,7 +5,7 @@ import { dirname, join, resolve } from "node:path";
 import type { Config } from "./config";
 import { daemonStatus, fetchHealth } from "./daemon";
 import { agniHome } from "./home";
-import { PASSPHRASE_CREDENTIAL_NAME } from "./secrets/passphrase";
+import { assertPassphraseFilePrivate, PASSPHRASE_CREDENTIAL_NAME } from "./secrets/passphrase";
 import type { KeyStoreKind } from "./secrets/types";
 import { vaultStatus } from "./secrets/unlock";
 
@@ -163,6 +163,8 @@ export async function serviceCommand(sub: string | undefined, config: Config): P
         if (!existsSync(o.passphraseFile)) {
           throw new Error(`the vault passphrase file ${o.passphraseFile} does not exist; create it (readable only by you) and run \`service install\` again`);
         }
+        // systemd copies this file into the service's credential directory; a copy of an open file would be open too.
+        assertPassphraseFilePrivate(o.passphraseFile);
       }
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, systemdUnit(o));

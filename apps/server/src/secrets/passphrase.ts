@@ -12,6 +12,8 @@
 import { randomBytes, scryptSync } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { log } from "../log";
+import { checkPosixPrivate, isOwnerOnlyFile, PrivateFileError, secureFile, type PosixFs } from "../util/private-file";
 import { VaultError, type KeyStore, type KeyStoreMeta } from "./types";
 
 export const PASSPHRASE_CREDENTIAL_NAME = "agni-vault-passphrase";
@@ -91,10 +93,46 @@ export function passphraseFileExists(env: Record<string, string | undefined>): b
   return path !== undefined && existsSync(path);
 }
 
-/** Read the passphrase file; one trailing newline is dropped. `undefined` when there is none. */
-export function readPassphraseFile(env: Record<string, string | undefined>): string | undefined {
+export interface PassphraseFileOptions {
+  /** Tests only: pretend to be this platform. */
+  platform?: NodeJS.Platform;
+  /** Tests only: the file system the mode check uses (macOS and Linux). */
+  fs?: PosixFs;
+}
+
+/**
+ * The passphrase file must be readable by its owner only, like the vault it
+ * opens: mode 600 (or the 400 systemd gives a credential) on macOS and Linux,
+ * an owner-only ACL on Windows. A file that is open to other accounts is
+ * closed when that is possible; when it cannot be closed the vault stays
+ * locked (`PASSPHRASE_REJECTED`) and the server refuses to start. A file that
+ * was open may already have been read, so a warning says to change the passphrase.
+ */
+export function assertPassphraseFilePrivate(path: string, options: PassphraseFileOptions = {}): void {
+  const platform = options.platform ?? process.platform;
+  try {
+    let fixed: boolean;
+    if (platform === "win32") {
+      fixed = !isOwnerOnlyFile(path);
+      if (fixed) {
+        secureFile(path);
+        if (!isOwnerOnlyFile(path)) throw new PrivateFileError("the access rules were set but reading them back did not show an owner-only file");
+      }
+    } else {
+      fixed = checkPosixPrivate(path, 0o600, options.fs) === "fixed";
+    }
+    if (fixed) log.warn(`the vault passphrase file ${path} was readable by other accounts; it is now private. Change the passphrase if you cannot rule out that it was read.`);
+  } catch (error) {
+    const why = error instanceof Error ? error.message : String(error);
+    throw new VaultError("PASSPHRASE_REJECTED", `The vault passphrase file ${path} is not private to your account, so the vault stays locked. ${why} ${HOW_TO_PROVIDE}`, { cause: error });
+  }
+}
+
+/** Read the passphrase file; one trailing newline is dropped. `undefined` when there is none. A file open to other accounts is closed or refused first. */
+export function readPassphraseFile(env: Record<string, string | undefined>, options: PassphraseFileOptions = {}): string | undefined {
   const path = passphraseFilePath(env);
   if (!path || !existsSync(path)) return undefined;
+  assertPassphraseFilePrivate(path, options);
   try {
     return readFileSync(path, "utf8").replace(/\r?\n$/, "");
   } catch (error) {
