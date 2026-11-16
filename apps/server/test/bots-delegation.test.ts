@@ -314,9 +314,14 @@ describe("S1-19: handoff", () => {
     const parent = createThread(db, "ea");
     let calls = 0;
     const target = join(tmpdir(), "agni-t4-never-written.txt");
-    const router = routerOf(async () => calls++ === 0
-      ? sse({ choices: [{ delta: { tool_calls: [{ index: 0, id: "c-write", type: "function", function: { name: "write_file", arguments: JSON.stringify({ path: target, content: "x" }) } }] } }] })
-      : textReply("The owner said no; I stopped."));
+    // The coder has many tools, so write_file is deferred: load it first, as the loop now requires.
+    const toolCall = (id: string, name: string, args: unknown): Response => sse({ choices: [{ delta: { tool_calls: [{ index: 0, id, type: "function", function: { name, arguments: JSON.stringify(args) } }] } }] });
+    const router = routerOf(async () => {
+      const step = calls++;
+      if (step === 0) return toolCall("c-load", "load_tools", { names: ["write_file"] });
+      if (step === 1) return toolCall("c-write", "write_file", { path: target, content: "x" });
+      return textReply("The owner said no; I stopped.");
+    });
     const seen: Array<{ type: string; requestID?: string }> = [];
     const result = await handoff({
       db: db!, router, settings: { firstTokenTimeoutMs: 1000, turnTimeoutMs: 5000 },
