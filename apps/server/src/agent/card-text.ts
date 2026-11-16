@@ -65,3 +65,18 @@ export function clip(text: string, max: number): string {
 export function multiLine(text: string): string {
   return escapeUnsafe(text.replace(/\r\n/g, "\n"), true);
 }
+
+/**
+ * One entry on one line whose escaped text is at most `max` characters long. An escape is longer than the
+ * character it shows (`\u202E` is six), so a cap on the raw text is not a cap on what is sent; this keeps
+ * the start and the end and narrows the raw cap until the escaped text fits. For frame fields that have a
+ * length limit in the protocol.
+ */
+export function fitEntry(value: unknown, max: number): string {
+  let raw = max;
+  for (;;) {
+    const shown = entry(value, raw);
+    if (shown.length <= max || raw <= 8) return shown.length <= max ? shown : shown.slice(0, max);
+    raw = Math.max(8, Math.floor(raw * (max / shown.length)) - 1);
+  }
+}

@@ -9,6 +9,7 @@ import { APPROVAL_SOURCE_KINDS, type ApprovalSource, type ServerFrameBody } from
 import { log } from "../log";
 import { audit } from "../policy/audit-sink";
 import { nowISO } from "../util/ids";
+import { fitEntry } from "./card-text";
 
 /**
  * How long any owner wait (an approval card or a question) lasts. Past this
@@ -45,6 +46,11 @@ export interface CardMeta {
   canRemember?: boolean;
 }
 
+/** A time the way `toISOString` writes it. Anything else is not a time and is not shown as one. */
+function isIsoTime(value: unknown): value is string {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/.test(value) && !Number.isNaN(Date.parse(value));
+}
+
 export function saveCardMeta(db: Database, approvalID: string, meta: CardMeta): void {
   db.run("UPDATE approvals SET card_meta = ? WHERE id = ?", [JSON.stringify(meta), approvalID]);
 }
@@ -68,12 +74,12 @@ export function loadCardMeta(db: Database, approvalID: string): CardMeta | null 
       if (typeof item !== "object" || item === null) continue;
       const { kind, label } = item as { kind?: unknown; label?: unknown };
       if (!APPROVAL_SOURCE_KINDS.some((known) => known === kind)) continue;
-      source.push({ kind: kind as ApprovalSource["kind"], ...(typeof label === "string" ? { label: label.slice(0, 300) } : {}) });
+      source.push({ kind: kind as ApprovalSource["kind"], ...(typeof label === "string" ? { label: fitEntry(label, 300) } : {}) });
     }
     if (source.length > 0) meta.source = source.slice(0, 20);
   }
   if (record.tier === 0 || record.tier === 1 || record.tier === 2 || record.tier === 3) meta.tier = record.tier;
-  if (typeof record.expiresAt === "string") meta.expiresAt = record.expiresAt;
+  if (isIsoTime(record.expiresAt)) meta.expiresAt = record.expiresAt;
   if (typeof record.truncated === "boolean") meta.truncated = record.truncated;
   if (typeof record.canRemember === "boolean") meta.canRemember = record.canRemember;
   return Object.keys(meta).length > 0 ? meta : null;

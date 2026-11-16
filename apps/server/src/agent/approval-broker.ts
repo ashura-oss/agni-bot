@@ -18,7 +18,7 @@ import type { Database } from "bun:sqlite";
 import type { ApprovalSource } from "@agni/protocol";
 import { newID, nowISO } from "../util/ids";
 import { redact } from "../util/redact";
-import { clip, entry, escapeUnsafe, quoted } from "./card-text";
+import { clip, entry, escapeUnsafe, fitEntry, quoted } from "./card-text";
 import { saveCardMeta } from "./pending-cards";
 import type { ApprovalCard, RiskKind, TaintKind } from "../policy/types";
 import { isOutsideScratch, resolveWritePath, scratchDir, writeTargetExists } from "../tools/write-file";
@@ -201,9 +201,9 @@ const SOURCE_KIND: Record<TaintKind, ApprovalSource["kind"]> = {
   web: "web", email: "email", peer: "agent", attachment: "attachment", mcp: "connector", routine: "scheduled", scheduled: "scheduled", unknown: "unknown",
 };
 
-/** The card's sources as the frame carries them: newest first, one clean line each. */
+/** The card's sources as the frame carries them: newest first, one line each, hidden characters shown as escapes (a label is a page title or a sender name: outside text). */
 function approvalSources(card: ApprovalCard): ApprovalSource[] {
-  return card.sources.slice(0, 20).map((source) => ({ kind: SOURCE_KIND[source.kind] ?? "unknown", ...(source.label ? { label: source.label.slice(0, 300) } : {}) }));
+  return card.sources.slice(0, 20).map((source) => ({ kind: SOURCE_KIND[source.kind] ?? "unknown", ...(source.label ? { label: fitEntry(source.label, 300) } : {}) }));
 }
 
 const RISK_LINE: Record<RiskKind, string> = {
@@ -228,14 +228,14 @@ const SOURCE_LINE: Record<string, (bot: string, label: string) => string> = {
 /**
  * The lines above the call on a card that the engine added: where the outside
  * content came from, how risky the call is, and why there is no "always".
- * Plain server text; the labels were cleaned when they were taken.
+ * The labels are outside text (a page title, a sender), so each goes through the card text escape here, whatever was done to it when it was taken.
  */
 function cardLead(card: ApprovalCard, bot: string): string {
   const lines: string[] = [];
   const [newest, ...older] = card.sources;
   if (newest) {
     const say = SOURCE_LINE[newest.kind] ?? SOURCE_LINE.unknown!;
-    lines.push(`${say(bot, newest.label)}${older.length > 0 ? ` (and ${older.length} more)` : ""}`);
+    lines.push(`${say(bot, entry(newest.label, 300))}${older.length > 0 ? ` (and ${older.length} more)` : ""}`);
   }
   lines.push(RISK_LINE[card.risk]);
   if (card.unnamedDestinations.length > 0) {

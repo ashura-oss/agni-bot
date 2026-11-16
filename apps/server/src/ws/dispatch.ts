@@ -22,6 +22,7 @@ import {
 } from "@agni/protocol";
 import { defaultPersona, getPersona, personaInfo, mentionRoster, defaultResolvedPersona, resolvePersona, canonicalAgentID, updatePersona } from "../agent/personas";
 import { createAgentPersona } from "../agent/creation";
+import { escapeUnsafe } from "../agent/card-text";
 import { answerFormAndWake } from "../agent/form-broker";
 import { getForm } from "../stores/forms";
 import { renameAgent } from "../agent/identity";
@@ -1743,11 +1744,12 @@ function handleApprovalRulesList(deps: DispatchDeps): void {
   const rules = listApprovalRules(deps.db).map((rule) => ({
     id: rule.id,
     agentID: rule.agentID,
-    agentName: resolvePersona(deps.db, rule.agentID)?.name ?? null,
-    toolName: rule.toolName,
-    target: rule.target,
+    // A target is what the model asked for (a path, a recipient list) and a bot may have named itself: shown as escapes.
+    agentName: ((name) => (name === undefined ? null : escapeUnsafe(name)))(resolvePersona(deps.db, rule.agentID)?.name),
+    toolName: escapeUnsafe(rule.toolName),
+    target: escapeUnsafe(rule.target),
     createdAt: rule.createdAt,
-    ...(rule.resourcePattern ? { resourcePattern: rule.resourcePattern } : {}),
+    ...(rule.resourcePattern ? { resourcePattern: escapeUnsafe(rule.resourcePattern) } : {}),
   }));
   deps.reply({ type: "approval.rules.list.ok", rules });
 }
