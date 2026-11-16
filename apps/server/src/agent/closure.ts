@@ -27,7 +27,18 @@ export const INTERRUPTED_REQUEST_NOTE =
 export const REVOKED_REQUEST_NOTE =
   `[My previous request came from a device that has since been revoked. Some of its steps may already have run. That request is closed: I will not resume it, retry its actions, or ask for its approvals again. ${CHECK_STATE}]`;
 
-const CLOSURE_NOTES: ReadonlySet<string> = new Set([STOPPED_REQUEST_NOTE, INTERRUPTED_REQUEST_NOTE, REVOKED_REQUEST_NOTE]);
+/**
+ * Notes already stored under earlier wordings stay recognised, so a thread that
+ * holds one still shows it to the model and still keeps it out of the summariser's
+ * reach of untrusted system rows.
+ */
+const EARLIER_WORDINGS = [
+  "[The owner pressed Stop on my previous request, so I did not finish it. That request is closed: I will not resume it, retry its actions, or ask for its approvals again unless the owner asks for it again in a new message.]",
+  "[My previous request was interrupted by a restart and was not completed. That request is closed: I will not resume it, re-run its tool calls, or ask for its approvals again unless the owner asks for it again in a new message.]",
+  "[My previous request came from a device that has since been revoked. That request is closed: I will not resume it, retry its actions, or ask for its approvals again.]",
+];
+
+const CLOSURE_NOTES: ReadonlySet<string> = new Set([STOPPED_REQUEST_NOTE, INTERRUPTED_REQUEST_NOTE, REVOKED_REQUEST_NOTE, ...EARLIER_WORDINGS]);
 
 /** True for a stored row that is one of these notes (and not, say, a scheduled job's instruction). */
 export function isClosureNote(role: string, text: string): boolean {

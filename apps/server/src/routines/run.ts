@@ -164,17 +164,21 @@ export async function executeRoutine(deps: RoutineRunDeps, routine: Routine): Pr
 }
 
 /**
- * What a routine's replies look like once stored: the state block is cut so a reload shows only what
- * the routine had to say, and a reply that is NOTHING_TO_REPORT is not stored at all.
+ * What the turn's last reply looks like once stored: the state block (and its label) is cut so a reload
+ * shows only what the routine had to say; a reply that is NOTHING_TO_REPORT is not stored at all; a reply
+ * that was nothing but state says the run completed rather than vanishing. Earlier replies are left as written.
  */
-function hideRoutineState(db: Database, turnID: string): void {
-  const rows = db.query<{ id: string; text: string }, [string]>("SELECT id, text FROM messages WHERE turn_id = ? AND role = 'assistant'").all(turnID);
-  for (const row of rows) {
-    const visible = stripRoutineState(row.text);
-    if (!visible || /^\s*NOTHING_TO_REPORT\b/.test(visible)) { db.run("DELETE FROM messages WHERE id = ?", [row.id]); continue; }
-    if (visible !== row.text.trim()) db.run("UPDATE messages SET text = ? WHERE id = ?", [visible, row.id]);
-  }
+export function hideRoutineState(db: Database, turnID: string): void {
+  const last = db.query<{ id: string; text: string }, [string]>("SELECT id, text FROM messages WHERE turn_id = ? AND role = 'assistant' ORDER BY created_at DESC, rowid DESC LIMIT 1").get(turnID);
+  if (!last) return;
+  const visible = stripRoutineState(last.text);
+  if (/^\s*NOTHING_TO_REPORT\b/.test(visible)) { db.run("DELETE FROM messages WHERE id = ?", [last.id]); return; }
+  if (!visible) { db.run("UPDATE messages SET text = ? WHERE id = ?", [STATE_ONLY_REPLY, last.id]); return; }
+  if (visible !== last.text.trim()) db.run("UPDATE messages SET text = ? WHERE id = ?", [visible, last.id]);
 }
+
+/** What stays of a last reply that held nothing but the state block. */
+const STATE_ONLY_REPLY = "Routine completed; state saved.";
 
 function safeJson(value: string): unknown {
   try { return JSON.parse(value); } catch { return value; }
