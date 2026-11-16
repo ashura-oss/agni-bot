@@ -9,12 +9,12 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApprovalBroker } from "../src/agent/approval-broker";
+import { asksWhenClean } from "../src/policy/metadata";
 import { openDatabase } from "../src/db";
 import { readFile } from "../src/tools/read-file";
 import { glob, grep } from "../src/tools/search";
 import { isOutsideScratch } from "../src/tools/write-file";
 
-const broker = new ApprovalBroker({ db: null as unknown as Database, emit: () => undefined, waitForDecision: async () => null });
 const root = mkdtempSync(join(tmpdir(), "agni-sandbox-"));
 const scratch = join(root, "scratch");
 const outside = join(root, "outside");
@@ -56,7 +56,7 @@ describe("C1/M13: file tools stay in scratch", () => {
   test("write_file scratch check follows symlinked parents", () => {
     expect(isOutsideScratch(join(scratch, "new", "file.txt"))).toBe(false);
     expect(isOutsideScratch(join(scratch, "linkdir", "x.txt"))).toBe(true);
-    expect(broker.requiresApproval("write_file", { path: join(scratch, "linkdir", "x.txt"), content: "x" })).toBe(true);
+    expect(asksWhenClean("write_file", { path: join(scratch, "linkdir", "x.txt"), content: "x" })).toBe(true);
   });
 
   test("grep/glob reject roots outside scratch and never follow symlinks", () => {
@@ -94,28 +94,28 @@ describe("C2: bash is allowlisted", () => {
       "cat /etc/passwd", "cat ../outside/secret.txt", fileSymlink ? "cat link.txt" : "cat linkdir/secret.txt",
       "ls; rm x", "echo $(id)", "env",
     ]) {
-      expect({ command, gated: broker.requiresApproval("bash", { command }) }).toEqual({ command, gated: true });
+      expect({ command, gated: asksWhenClean("bash", { command }) }).toEqual({ command, gated: true });
     }
   });
 
   test("a single read-only command in scratch runs free; other cwds gate", () => {
-    expect(broker.requiresApproval("bash", { command: "ls -la" })).toBe(false);
-    expect(broker.requiresApproval("bash", { command: "cat notes.md" })).toBe(false);
-    expect(broker.requiresApproval("bash", { command: "ls -la", cwd: outside })).toBe(true);
+    expect(asksWhenClean("bash", { command: "ls -la" })).toBe(false);
+    expect(asksWhenClean("bash", { command: "cat notes.md" })).toBe(false);
+    expect(asksWhenClean("bash", { command: "ls -la", cwd: outside })).toBe(true);
   });
 });
 
 describe("C2/H6/H7: approval defaults and preview", () => {
   test("unknown tools need approval", () => {
-    expect(broker.requiresApproval("mcp__someserver__delete_everything", {})).toBe(true);
-    expect(broker.requiresApproval("run_privileged", { command: "sudo true" })).toBe(true);
+    expect(asksWhenClean("mcp__someserver__delete_everything", {})).toBe(true);
+    expect(asksWhenClean("run_privileged", { command: "sudo true" })).toBe(true);
   });
 
   test("mail_send gates every account but the agent's own", () => {
     for (const account of ["Owner", "owner", "OWNER", " owner", "agni", ""]) {
-      expect(broker.requiresApproval("mail_send", { account, to: "a@b.c", subject: "s", body: "b" })).toBe(true);
+      expect(asksWhenClean("mail_send", { account, to: "a@b.c", subject: "s", body: "b" })).toBe(true);
     }
-    expect(broker.requiresApproval("mail_send", { account: "agent", to: "a@b.c", subject: "s", body: "b" })).toBe(false);
+    expect(asksWhenClean("mail_send", { account: "agent", to: "a@b.c", subject: "s", body: "b" })).toBe(false);
   });
 
   test("the card shows the command's tail and the mail body", async () => {

@@ -17,7 +17,7 @@ import { runTaskTurn, isThreadActive, type TaskTurnSettings } from "../agent/tas
 import { canonicalAgentID, defaultResolvedPersona, getPersona, resolvePersona, type ResolvedPersona } from "../agent/personas";
 import { DEFAULT_VISIBILITY, RESULT_MAX_CHARS, redactResultForCaller } from "../agent/visibility";
 import { rootGuardrail } from "../agent/guardrails";
-import { ApprovalBroker } from "../agent/approval-broker";
+import { asksWhenClean } from "../policy/metadata";
 import type { Router } from "../models/router";
 import { getThread } from "../stores/threads";
 import { ensureDMChannel } from "../stores/channels";
@@ -49,8 +49,6 @@ const WAKE_RETRY_MAX_MS = 60_000;
 export const MAX_WAKE_DEFERRALS = 40;
 /** Tools whose effect a retry would repeat even though they are not approval-gated. */
 const NON_IDEMPOTENT_TOOLS = new Set(["mail_send", "run_privileged", "delegate_task"]);
-// requiresApproval reads no broker state, so one inert instance serves the check.
-const gatePolicy = new ApprovalBroker(null as never);
 /** Daily-cap notices already sent, `${agentID}:${day}`. */
 const capNotified = new Set<string>();
 
@@ -296,7 +294,7 @@ function giveUpIfSideEffects(db: Database, threadID: string, since: string, mess
   const acted = calls.find((call) => {
     let args: Record<string, unknown> = {};
     try { args = JSON.parse(call.args) as Record<string, unknown>; } catch { /* treat as no args */ }
-    return NON_IDEMPOTENT_TOOLS.has(call.tool_name) || gatePolicy.requiresApproval(call.tool_name, args);
+    return NON_IDEMPOTENT_TOOLS.has(call.tool_name) || asksWhenClean(call.tool_name, args);
   });
   return acted ? new JobGiveUp(`${message}; not retried because it already ran ${acted.tool_name}`) : null;
 }

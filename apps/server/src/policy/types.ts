@@ -69,6 +69,8 @@ export interface RunServices {
   validateArgs: (tool: string, args: Record<string, unknown>) => string | null;
   /** True when the tool is registered in this turn. */
   hasTool: (tool: string) => boolean;
+  /** What a tool says about itself (a connector tool's own meta), when it says anything. */
+  metaOf?: (tool: string) => ToolMeta | undefined;
   /** A deferred tool the model has not loaded yet: its schema was never sent. */
   isUnloaded: (tool: string) => boolean;
   /** A routine's domain allowlist for web tools; absent outside routines. */
@@ -117,7 +119,7 @@ export interface PolicyInput {
 // ---------------------------------------------------------------------------
 
 /** What the owner's card should say about the harm, in words: the tier alone is not precise enough. */
-export type RiskKind = "undoable" | "egress" | "irreversible" | "command";
+export type RiskKind = "undoable" | "egress" | "irreversible" | "either" | "command";
 
 /** What a call does once its arguments are read: the engine's own view of one call. */
 export interface CallAssessment {
@@ -126,8 +128,11 @@ export interface CallAssessment {
   risk: RiskKind;
   /** Would an untainted run be asked? False means free until the run is tainted. */
   asks: boolean;
-  /** The call sends data out of the app: a tainted run needs the owner, and its destinations must be named. */
-  egress: boolean;
+  /**
+   * Does the call send data out of the app? `send` (a mail, an invite, a connector call) needs the owner in
+   * a tainted run; `fetch` (opening a site) needs the owner only for a destination the owner did not name.
+   */
+  egress: EgressKind;
   /** Where an egress call goes (recipients, hosts). */
   destinations: ToolResource[];
   /** What the call touches, for denials and rules. */
@@ -135,6 +140,8 @@ export interface CallAssessment {
   /** The operation, in plain verbs: reading, changing, deleting, sending to. */
   operation: Operation;
 }
+
+export type EgressKind = "none" | "send" | "fetch";
 
 export type Operation = "read" | "change" | "delete" | "send" | "run";
 
@@ -163,14 +170,17 @@ export type RefusalCode =
   | "domain_not_allowed"
   | "protected_write"
   | "denied_resource"
-  | "repeated_refusals"
+  | "audit_unavailable"
   | "off";
 
-export type StopCause = "budget" | "pause";
+/** The standing rule that let a call through, for the approval row that records it. */
+export interface RuleRef { id: string; agentID: string; toolName: string; createdAt: string }
+
+export type StopCause = "budget" | "pause" | "refused";
 
 export type Decision =
   /** Run it. `via` says what let it through: nothing needed asking, or a stored rule. */
-  | { action: "run"; via: "free" | "rule"; reason: string; assessment: CallAssessment; ruleID?: string }
+  | { action: "run"; via: "free" | "rule"; reason: string; assessment: CallAssessment; ruleID?: string; rule?: RuleRef }
   /** Do not run it; the model gets `error` as the tool result. */
   | { action: "refuse"; code: RefusalCode; error: string; reason: string }
   /** Ask the owner with a card; the call runs only on an allowing answer. */

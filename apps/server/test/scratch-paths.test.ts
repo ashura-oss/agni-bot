@@ -10,15 +10,9 @@ import type { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ApprovalBroker } from "../src/agent/approval-broker";
+import { asksWhenClean } from "../src/policy/metadata";
 import { confineToScratch, createExclusive, isInsidePath, isOutsideScratch, resolveWritePath, writeFile } from "../src/tools/write-file";
 import { glob, grep } from "../src/tools/search";
-
-const broker = new ApprovalBroker({
-  db: null as unknown as Database,
-  emit: () => undefined,
-  waitForDecision: async () => null,
-});
 
 let root: string;
 let scratch: string;
@@ -101,34 +95,34 @@ describe("S1-36: Windows paths compare case-insensitively", () => {
 
 describe("S1-06: inside scratch only overwriting asks", () => {
   test("writing a new file inside scratch is free", () => {
-    expect(broker.requiresApproval("write_file", { path: join(scratch, "new.md"), content: "x" })).toBe(false);
-    expect(broker.requiresApproval("write_file", { path: "new.md", content: "x" })).toBe(false);
-    expect(broker.requiresApproval("write_file", { path: "deep/new/dir/new.md", content: "x" })).toBe(false);
+    expect(asksWhenClean("write_file", { path: join(scratch, "new.md"), content: "x" })).toBe(false);
+    expect(asksWhenClean("write_file", { path: "new.md", content: "x" })).toBe(false);
+    expect(asksWhenClean("write_file", { path: "deep/new/dir/new.md", content: "x" })).toBe(false);
   });
 
   test("overwriting an existing file inside scratch asks", () => {
     writeFileSync(join(scratch, "keep.md"), "precious");
-    expect(broker.requiresApproval("write_file", { path: join(scratch, "keep.md"), content: "" })).toBe(true);
+    expect(asksWhenClean("write_file", { path: join(scratch, "keep.md"), content: "" })).toBe(true);
     // The same file named relatively, and with a case change on Windows.
-    expect(broker.requiresApproval("write_file", { path: "keep.md", content: "x" })).toBe(true);
-    expect(broker.requiresApproval("write_file", { path: "./sub/../keep.md", content: "x" })).toBe(true);
+    expect(asksWhenClean("write_file", { path: "keep.md", content: "x" })).toBe(true);
+    expect(asksWhenClean("write_file", { path: "./sub/../keep.md", content: "x" })).toBe(true);
     if (process.platform === "win32") {
-      expect(broker.requiresApproval("write_file", { path: join(scratch, "KEEP.MD"), content: "x" })).toBe(true);
+      expect(asksWhenClean("write_file", { path: join(scratch, "KEEP.MD"), content: "x" })).toBe(true);
     }
   });
 
   test("appending to an existing file inside scratch asks like an overwrite; a new file by append is free", () => {
     // An appended script is a changed script: "ask when changing an existing file".
     writeFileSync(join(scratch, "log.md"), "one\n");
-    expect(broker.requiresApproval("write_file", { path: "log.md", content: "two\n", append: true })).toBe(true);
-    expect(broker.requiresApproval("write_file", { path: "log.md", content: "two\n", append: false })).toBe(true);
-    expect(broker.requiresApproval("write_file", { path: "fresh.md", content: "two\n", append: true })).toBe(false);
+    expect(asksWhenClean("write_file", { path: "log.md", content: "two\n", append: true })).toBe(true);
+    expect(asksWhenClean("write_file", { path: "log.md", content: "two\n", append: false })).toBe(true);
+    expect(asksWhenClean("write_file", { path: "fresh.md", content: "two\n", append: true })).toBe(false);
   });
 
   test("outside scratch always asks, new file or not", () => {
-    expect(broker.requiresApproval("write_file", { path: join(root, "elsewhere", "brand-new.txt"), content: "x" })).toBe(true);
-    expect(broker.requiresApproval("write_file", { path: "../elsewhere/brand-new.txt", content: "x" })).toBe(true);
-    expect(broker.requiresApproval("write_file", { path: "", content: "x" })).toBe(true);
+    expect(asksWhenClean("write_file", { path: join(root, "elsewhere", "brand-new.txt"), content: "x" })).toBe(true);
+    expect(asksWhenClean("write_file", { path: "../elsewhere/brand-new.txt", content: "x" })).toBe(true);
+    expect(asksWhenClean("write_file", { path: "", content: "x" })).toBe(true);
   });
 });
 
