@@ -29,8 +29,7 @@ export interface DelegationBrief {
   chainID?: string;
   /**
    * The run this delegation belongs to: the root turn and, for a job, the root job. Whatever the owner refused
-   * under that root still holds in the child, in its resumed runs and in the wake that reports back, and one time
-   * limit covers them all.
+   * under that root still holds in the child and in the wake that reports back, and one time limit covers them.
    */
   rootTurnID?: string;
   rootJob?: string | null;

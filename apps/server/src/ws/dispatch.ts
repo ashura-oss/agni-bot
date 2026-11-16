@@ -79,7 +79,7 @@ import { appendChannelMessage, channelAgentIDs, createGroupChannel, ensureDMChan
 import { groupContextBlock, groupHistory, groupResponder } from "../agent/group";
 import { canonicalURL, saveLink, searchLinks } from "../stores/links";
 import { buildShareDocument, publishShare, shareBaseURL } from "../share/document";
-import { createTask, createTaskList, editTask, getTask, listTaskActivity, listTaskLists, listTasks, setTaskStatus, snoozeTask, cancelDelegation, clearPendingQuestion, setDelegationJob, setDelegationState, taskInfo, briefChainID, briefRoot } from "../stores/tasks";
+import { createTask, createTaskList, editTask, getTask, listTaskActivity, listTaskLists, listTasks, setTaskStatus, snoozeTask, cancelDelegation, clearPendingQuestion, setDelegationJob, setDelegationState, taskInfo, briefChainID } from "../stores/tasks";
 import { fetchPage } from "../tools/fetch-url";
 import { scheduleTaskReminder } from "../jobs/task-reminders";
 import type { PluginService } from "../plugins/service";
@@ -1340,8 +1340,6 @@ function handleTaskAnswer(deps: DispatchDeps, session: Session, frame: Extract<C
       // The answer resumes the task inside the chain it started in, so a
       // stopped chain stays stopped.
       chainID: briefChainID(task.brief),
-      // Still part of the request it was started under: its refusals and its time limit carry on.
-      ...briefRoot(task.brief),
       ...(capabilities !== undefined ? { capabilities } : {}),
     },
   });
