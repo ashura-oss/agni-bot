@@ -4,6 +4,7 @@ import { createCipheriv, randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { scanFile, walkFiles } from "../../../../scripts/canary-scan";
 import { openDatabase } from "../../src/db";
 import { rememberFact } from "../../src/tools/facts";
 
@@ -229,6 +230,41 @@ describe("a scan that could not look is not a pass", () => {
 
   test("--secrets with no home to look in", async () => {
     expect((await scan(null, ["--secrets", `--canary=${CANARY}`])).code).toBe(2);
+  });
+});
+
+describe("a file or folder the scan skipped is not a clean pass", () => {
+  test("a file over the size limit: exit 2, naming the file", async () => {
+    const home = makeHome();
+    writeFileSync(join(home.home, "scratch", "big.bin"), Buffer.alloc(4096, 1));
+    const run = await scan(home, ["--secrets", `--canary=${CANARY}`, "--require-vault"], { AGNI_CANARY_MAX_FILE_BYTES: "1024" });
+    expect(run.code).toBe(2);
+    expect(run.err).toContain("big.bin");
+    expect(run.out).not.toContain("clean");
+  });
+
+  test("a skipped file does not hide a leak: the hit still exits 1", async () => {
+    const home = makeHome();
+    writeFileSync(join(home.home, "scratch", "big.bin"), Buffer.alloc(4096, 1));
+    writeFileSync(join(home.home, "config.env"), `KEY=${CANARY}
+`);
+    const run = await scan(home, ["--secrets", `--canary=${CANARY}`, "--require-vault"], { AGNI_CANARY_MAX_FILE_BYTES: "1024" });
+    expect(run.code).toBe(1);
+    expect(run.err).toContain("big.bin");
+  });
+
+  test("a file that cannot be statted is reported as skipped, not as clean", () => {
+    const skipped: string[] = [];
+    expect(scanFile(join(tmpdir(), "agni-canary-no-such-file.bin"), [CANARY], "file", undefined, skipped)).toEqual([]);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]).toContain("agni-canary-no-such-file.bin");
+  });
+
+  test("a folder that cannot be listed is reported as skipped, not as empty", () => {
+    const skipped: string[] = [];
+    expect(walkFiles(join(tmpdir(), "agni-canary-no-such-folder"), skipped)).toEqual([]);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]).toContain("agni-canary-no-such-folder");
   });
 });
 

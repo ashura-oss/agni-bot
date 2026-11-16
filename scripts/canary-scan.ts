@@ -32,7 +32,10 @@
  *   --frames=FILE     a captured frame log; the file must exist
  *   --require-vault   exit 2 when there is no vault file (so a scan of nothing cannot pass)
  *
- * Exit: 0 clean, 1 a hit, 2 the scan could not run (no canary, a named file missing).
+ * Exit: 0 clean, 1 a hit, 2 the scan could not run (no canary, a named file missing) or
+ * could not look at everything: a file it could not stat or read, a folder it could not
+ * list, a file over the size limit. Each is named on stderr. A hit still exits 1 (the leak
+ * is proven), but a scan that skipped something never says "clean".
  * In `--secrets` mode a hit never prints the value, only its first four characters and length.
  */
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
@@ -48,7 +51,12 @@ export interface FileHit {
   canary: string;
 }
 
-const MAX_FILE_BYTES = 512 * 1024 * 1024;
+const DEFAULT_MAX_FILE_BYTES = 512 * 1024 * 1024;
+/** The size above which a file is not read. `AGNI_CANARY_MAX_FILE_BYTES` lowers it (the tests do). A skipped file fails the scan. */
+const maxFileBytes = (): number => {
+  const value = Number(process.env.AGNI_CANARY_MAX_FILE_BYTES);
+  return Number.isFinite(value) && value > 0 ? value : DEFAULT_MAX_FILE_BYTES;
+};
 const MIN_CANARY_LENGTH = 8;
 
 /** Every byte pattern a value could be stored as. A canary shorter than a few characters would match noise, so callers reject those. */
@@ -86,28 +94,41 @@ export function scanBuffer(bytes: Buffer, canaries: string[], sink: string, path
   return hits;
 }
 
-export function scanFile(path: string, canaries: string[], sink: string, root?: string): FileHit[] {
+/**
+ * One file against every canary. A file that cannot be statted or read, or is over the size limit, is not
+ * scanned: it is recorded in `skipped` (with the reason) so the caller can refuse to call the scan clean.
+ */
+export function scanFile(path: string, canaries: string[], sink: string, root?: string, skipped: string[] = []): FileHit[] {
   let size: number;
   try {
     size = statSync(path).size;
-  } catch {
+  } catch (error) {
+    skipped.push(`${path}: cannot stat (${(error as NodeJS.ErrnoException).code ?? "error"})`);
     return [];
   }
-  if (size > MAX_FILE_BYTES) {
-    console.error(`skipped ${path}: larger than ${MAX_FILE_BYTES} bytes`);
+  if (size > maxFileBytes()) {
+    skipped.push(`${path}: larger than ${maxFileBytes()} bytes`);
     return [];
   }
-  return scanBuffer(readFileSync(path), canaries, sink, root ? relative(root, path) || path : path);
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(path);
+  } catch (error) {
+    skipped.push(`${path}: cannot read (${(error as NodeJS.ErrnoException).code ?? "error"})`);
+    return [];
+  }
+  return scanBuffer(bytes, canaries, sink, root ? relative(root, path) || path : path);
 }
 
-/** Every file under `dir`, found without following links out of it. */
-export function walkFiles(dir: string): string[] {
+/** Every file under `dir`, found without following links out of it. A folder that cannot be listed is recorded in `skipped`. */
+export function walkFiles(dir: string, skipped: string[] = []): string[] {
   const files: string[] = [];
   const visit = (current: string): void => {
     let entries;
     try {
       entries = readdirSync(current, { withFileTypes: true });
-    } catch {
+    } catch (error) {
+      skipped.push(`${current}: cannot list (${(error as NodeJS.ErrnoException).code ?? "error"})`);
       return;
     }
     for (const entry of entries) {
@@ -211,21 +232,28 @@ async function main(): Promise<number> {
   // --- 2. raw bytes of the named sources, and (secrets mode) all of the home ---
   const known = { ...(vault ? { vault } : {}), db: dbPath, ...(frames ? { frames } : {}) };
   const seen = new Set<string>();
-  const scan = (path: string, sink: string): void => {
+  const skipped: string[] = [];
+  // `optional`: a named source that may not exist (the database's write-ahead log). A file the walk found must be scannable.
+  const scan = (path: string, sink: string, optional = true): void => {
     const abs = resolve(path);
-    if (seen.has(abs) || !existsSync(abs)) return;
+    if (seen.has(abs) || (optional && !existsSync(abs))) return;
     seen.add(abs);
-    fileHits.push(...scanFile(abs, canaries, sink, homeDir));
+    fileHits.push(...scanFile(abs, canaries, sink, homeDir, skipped));
   };
   if (vault) scan(vault, "vault");
   if (frames) scan(frames, "frame-log");
   if (secretsMode) {
     for (const path of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`, `${dbPath}-journal`]) scan(path, "database");
     if (existsSync(logPath)) scan(logPath, "log");
-    if (homeDir) for (const path of walkFiles(homeDir)) scan(path, classify(path, homeDir, known));
+    if (homeDir) for (const path of walkFiles(homeDir, skipped)) scan(path, classify(path, homeDir, known), false);
   }
 
   const total = textHits.length + fileHits.length;
+  if (skipped.length > 0) {
+    console.error(`${skipped.length} file(s) or folder(s) could not be scanned${total === 0 ? ", so this scan cannot say the home is clean" : ""}:`);
+    for (const reason of skipped) console.error(`  skipped ${reason}`);
+    if (total === 0) return 2;
+  }
   if (total === 0) {
     const where = secretsMode ? `anywhere under ${homeDir}, in the log or in the frame capture` : "in any model-visible sink";
     console.log(`clean — ${canaries.length} canary string(s) found ${where}`);
