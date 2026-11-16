@@ -103,8 +103,9 @@ describe("a rule whose target is no longer inside scratch never matches", () => 
 
     process.env.AGNI_SCRATCH_DIR = join(root, "somewhere-else");
     expect(findApprovalRule(db, "ea", "write_file", target)).toBeNull();
-    // Back where it was, the rule is alive: finding it did not revoke it.
+    // Finding it dead revoked it: moving the folder back does not bring it back.
+    expect(db.query<{ revoked_at: string | null }, []>("SELECT revoked_at FROM approval_rules WHERE id = 'rul_in'").get()!.revoked_at).not.toBeNull();
     process.env.AGNI_SCRATCH_DIR = join(root, "scratch");
-    expect(findApprovalRule(db, "ea", "write_file", target)?.id).toBe("rul_in");
+    expect(findApprovalRule(db, "ea", "write_file", target)).toBeNull();
   });
 });

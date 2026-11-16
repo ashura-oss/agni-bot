@@ -122,7 +122,7 @@ client can show it and keep the draft.
 | `channel.list` | `{}` | Phase 4. The group channels; answered by `channel.list.ok`. |
 | `channel.history` | `{channelId, limit?}` | Phase 4. A group channel's messages, last N chronological (default 200, max 500); answered by `channel.history.ok`. |
 | `form.answer` | `{requestID, answer}` | The owner answered a question the agent asked — the option they chose, or their own words if they typed instead of choosing. The answer lands on the `forms` row and the turn waiting on it carries on with it. |
-| `msg.cancel` | `{turnID}` | Interrupts the turn: providers abort, partial output is kept. |
+| `msg.cancel` | `{turnID}` | Interrupts the turn: providers abort, partial output is kept. When no turn with that ID is running (it already finished, never existed, or the server restarted) the asker gets an `error` with code `not_running`; the client can treat it as "already finished". Additive in v2. |
 | `approve.reply` | `{requestID, decision}` | `decision`: `once \| always \| reject`. |
 | `secret.reply` | `{requestID, value}` | The owner's one-time password for a `secret.request`. Consumed server-side; never persisted, replayed, logged, or sent to the model. |
 | `secret.cancel` | `{requestID}` | Dismisses a pending secret prompt; the waiting tool fails as cancelled. |
@@ -258,7 +258,7 @@ bubble. A client that ignores `reset` still shows the right answer: the sealing
 `unknown_provider`, `invalid_key`, `provider_exists`, `provider_storage`, `provider_auth`,
 `unknown_plugin`, `unknown_connection`, `plugin_not_configured`, `plugin_unavailable`,
 `plugin_connect_failed`, `unknown_background`, `unknown_channel`, `invalid_attachment`,
-`invalid_domains`, `resync_gap`, `not_found`, `internal`.
+`invalid_domains`, `resync_gap`, `not_found`, `not_running`, `internal`.
 
 ## Versioning
 
