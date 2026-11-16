@@ -18,7 +18,7 @@ import { ChatGPTAuth } from "../src/models/chatgpt-auth";
 import { emptyPluginsFile, savePluginsFile, type PluginsFile } from "../src/plugins/config";
 import { completeConnect, deleteConnection, startPending, updateTokens } from "../src/plugins/store";
 import { lockVault, unlockVault } from "../src/secrets";
-import { RETIRED_PER_SLOT, redact, releaseRetiredSecrets, secretCount } from "../src/util/redact";
+import { RETIRED_PER_SLOT, redact, releaseExpiredSecrets, secretCount } from "../src/util/redact";
 
 const ROUNDS = 1_000;
 // A vault write is an encrypted, fsynced file replace (about 60 ms): 1,000 of them per store is minutes.
@@ -74,7 +74,7 @@ describe.each(MODES)("%s", (_name, enter, rounds) => {
     expect(redact("ya29.access-token-round-5-zzzz")).toBe("ya29.access-token-round-5-zzzz");
   }, 120_000);
 
-  test("plugins.json: removing a plugin keeps its secrets masked, until they are known to be dead", async () => {
+  test("plugins.json: removing a plugin keeps its secrets masked (a password has no expiry)", async () => {
     await enter();
     const path = join(home, "plugins.json");
     const withPlugin = emptyPluginsFile();
@@ -84,9 +84,9 @@ describe.each(MODES)("%s", (_name, enter, rounds) => {
     expect(secretCount()).toBeGreaterThan(before);
     savePluginsFile(path, emptyPluginsFile());
     expect(redact("gone-with-the-plugin-1234")).toBe("[redacted]");
-    releaseRetiredSecrets("gone-with-the-plugin-1234");
-    expect(redact("gone-with-the-plugin-1234")).toBe("gone-with-the-plugin-1234");
-    expect(secretCount()).toBe(before);
+    // A password has no expiry: only the queue's age lets it go, so it is still masked a day later.
+    releaseExpiredSecrets(Date.now() + 24 * 3_600_000);
+    expect(redact("gone-with-the-plugin-1234")).toBe("[redacted]");
   });
 
   test("plugin connections: refreshed token blobs (1,000 in file mode) keep the registry the same size once the queue is full", async () => {

@@ -9,7 +9,7 @@ import { ProviderError } from "./client";
 import type { ProviderConfig } from "./providers";
 import { chatGPTPage } from "./chatgpt-page";
 import { entryName, eraseFile, inVaultMode, vaultForReads, vaultForWrites } from "../credentials/vault-mode";
-import { forgetSecretSlots, releaseRetiredSecrets, rememberSecretsAt, stageSecretsAt } from "../util/redact";
+import { forgetSecretSlots, rememberSecretsAt, stageSecretsAt } from "../util/redact";
 import { log } from "../log";
 import { VaultError } from "../secrets/types";
 import { restrictToOwnerOnWindowsAsync } from "../util/windows-acl";
@@ -261,9 +261,7 @@ export class ChatGPTAuth {
         } catch { /* Retry once; never expose endpoint bodies or credentials. */ }
         if (!revoked && retry === 0) await new Promise((resolve) => setTimeout(resolve, 250));
       }
-      // Unconfirmed, the tokens (let go of by the save above) stay masked until they expire; confirmed, they are dead.
-      if (revoked) releaseRetiredSecrets(tokens.accessToken, tokens.refreshToken);
-      else this.message = "Signed out locally. Remote sign-out could not be confirmed; disconnect Agni in ChatGPT Settings → Apps.";
+      if (!revoked) this.message = "Signed out locally. Remote sign-out could not be confirmed; disconnect Agni in ChatGPT Settings → Apps.";
     }
     this.changed();
   }
@@ -450,8 +448,8 @@ class TerminalRefreshError extends ChatGPTAuthError {}
 /**
  * Make `redact()` mask every token this store holds, so none can reach a log line or a frame.
  * `settle` makes each account's slot hold exactly its tokens now: tokens a refresh replaced, or a
- * disconnect or removed account dropped, are queued (still masked, until they expire or a revoke
- * is confirmed). Without it the tokens are only staged.
+ * disconnect or removed account dropped, are queued (still masked until they expire: a revoke does not
+ * kill an access token already issued). Without it the tokens are only staged.
  */
 function rememberTokens(store: Store, settle = true): void {
   const prefix = `chatgpt:${store.hostID}:`;

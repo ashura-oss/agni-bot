@@ -1,17 +1,19 @@
 /**
  * A secret a store replaces or drops is not unmasked at once: it may still be valid until it
- * expires or until the provider confirms a revoke, and unmasking a live credential leaks it
- * while masking a dead one costs nothing. A slot keeps a short, bounded queue of the values it
- * let go of; they leave it at their known expiry, on a confirmed revoke, or (only when more than
- * RETIRED_PER_SLOT pile up) oldest first.
+ * expires, and unmasking a live credential leaks it while masking a dead one costs nothing. A
+ * revoke does not change that (a revoked refresh token does not kill an access token already
+ * issued), so nothing a store lets go of is ever unmasked because of one. A slot keeps a bounded
+ * queue of the values it let go of; they leave it at their known expiry or, with no known expiry,
+ * only by age: oldest first once more than RETIRED_PER_SLOT pile up in the slot, or RETIRED_MAX
+ * across all slots.
  */
 import { describe, expect, setSystemTime, test } from "bun:test";
 import {
+  RETIRED_MAX,
   RETIRED_PER_SLOT,
   forgetSecretSlots,
   redact,
   releaseExpiredSecrets,
-  releaseRetiredSecrets,
   rememberSecretsAt,
   secretCount,
   stageSecretsAt,
@@ -95,25 +97,6 @@ describe("a replaced secret is let go at its expiry", () => {
   });
 });
 
-describe("a confirmed revoke releases the queued values", () => {
-  test("only the named values, and only those a slot let go of", () => {
-    rememberSecretsAt("conn", "access-token-one-aaaa", "refresh-token-one-aaaa");
-    rememberSecretsAt("conn", "access-token-two-bbbb");
-    releaseRetiredSecrets("access-token-one-aaaa", "refresh-token-one-aaaa", "access-token-two-bbbb");
-    expect(masked("access-token-one-aaaa")).toBe(false);
-    expect(masked("refresh-token-one-aaaa")).toBe(false);
-    expect(masked("access-token-two-bbbb")).toBe(true); // still the live one
-  });
-
-  test("a value another slot holds live stays masked", () => {
-    rememberSecretsAt("conn", "shared-token-aaaaaaa");
-    rememberSecretsAt("plugins.json:gmail:access_token", "shared-token-aaaaaaa");
-    rememberSecretsAt("conn");
-    releaseRetiredSecrets("shared-token-aaaaaaa");
-    expect(masked("shared-token-aaaaaaa")).toBe(true);
-  });
-});
-
 describe("the queue is bounded", () => {
   test("1,000 replacements keep the registry at the live values plus the queue", () => {
     const rounds = 1_000;
@@ -141,6 +124,22 @@ describe("the queue is bounded", () => {
   });
 });
 
+describe("the bound across slots", () => {
+  test("many slots with full queues keep the registry within RETIRED_MAX retired values, oldest first", () => {
+    const slots = Math.ceil(RETIRED_MAX / RETIRED_PER_SLOT) + 20;
+    const name = (slot: number, i: number): string => `token-${slot}-number-${i}-zzzzzz`;
+    for (let slot = 0; slot < slots; slot += 1) {
+      for (let i = 0; i <= RETIRED_PER_SLOT + 1; i += 1) rememberSecretsAt(`conn-${slot}`, name(slot, i));
+    }
+    // Each slot holds one live value and its queue is full; together they would be over the bound.
+    expect(slots * RETIRED_PER_SLOT).toBeGreaterThan(RETIRED_MAX);
+    expect(secretCount()).toBeLessThanOrEqual(RETIRED_MAX + slots);
+    expect(masked(name(slots - 1, RETIRED_PER_SLOT + 1))).toBe(true); // the newest live value
+    expect(masked(name(slots - 1, RETIRED_PER_SLOT))).toBe(true); // the newest queued one
+    expect(masked(name(0, 2))).toBe(false); // the oldest queued value of the oldest slot went first
+  });
+});
+
 describe("staging a value before the save that will hold it", () => {
   test("a staged value is masked, and a failed save (no settle) keeps the old values masked too", () => {
     rememberSecretsAt("conn", "access-token-one-aaaa");
@@ -154,9 +153,8 @@ describe("staging a value before the save that will hold it", () => {
     stageSecretsAt("conn", "access-token-two-bbbb");
     rememberSecretsAt("conn", "access-token-two-bbbb");
     expect(masked("access-token-one-aaaa")).toBe(true);
-    releaseRetiredSecrets("access-token-two-bbbb", "access-token-one-aaaa");
-    expect(masked("access-token-one-aaaa")).toBe(false);
     expect(masked("access-token-two-bbbb")).toBe(true);
+    expect(secretCount()).toBe(2); // the old one (queued) and the new one (live), each once
   });
 
   test("staged values do not push a queued value out before the save has succeeded", () => {

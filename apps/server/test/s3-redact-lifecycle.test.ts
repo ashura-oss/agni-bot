@@ -1,8 +1,9 @@
 /**
  * What the stores do with the redaction registry when a credential is replaced, disconnected,
  * or a save fails (the Sprint 3 fix round): a replaced or disconnected credential stays masked
- * until it is known dead (its expiry has passed, or the provider confirmed a revoke), a failed
- * write keeps every old value masked, and a store lets go only after its write succeeded.
+ * until its own expiry has passed (a revoke, confirmed or not, unmasks nothing: it does not kill an
+ * access token already issued), a failed write keeps every old value masked, and a store lets go
+ * only after its write succeeded.
  *
  * Each store is driven through its own public path. Throwaway homes, in-memory keystore, no
  * network (a fake token and revoke endpoint).
@@ -178,12 +179,16 @@ describe("disconnecting an OAuth plugin", () => {
     }
   });
 
-  test("a confirmed revoke releases both tokens", async () => {
+  test("a confirmed revoke of the refresh token keeps every token of the row masked until its own expiry", async () => {
     const { service, db, id } = await connected(() => new Response("{}", { status: 200 }));
     try {
       expect((await service.disconnect(id)).error).toBeUndefined();
-      expect(masked(ACCESS)).toBe(false);
-      expect(masked(REFRESH)).toBe(false);
+      // The revoke named the refresh token: an access token already issued stays valid until it expires.
+      expect(masked(ACCESS)).toBe(true);
+      expect(masked(REFRESH)).toBe(true);
+      setSystemTime(new Date(Date.now() + 2 * HOUR));
+      expect(masked(ACCESS)).toBe(false); // its own expiry has passed
+      expect(masked(REFRESH)).toBe(true); // no known expiry: only the queue's age lets it go
     } finally {
       db.close();
     }
@@ -258,6 +263,7 @@ describe("plugins.json", () => {
 describe("ChatGPT accounts", () => {
   const OLD_ACCESS = "chatgpt-lifecycle-access-old-1";
   const OLD_REFRESH = "chatgpt-lifecycle-refresh-old-1";
+  const OLD_ID = "chatgpt-lifecycle-id-token-1";
   const NEW_ACCESS = "chatgpt-lifecycle-access-new-2";
   const NEW_REFRESH = "chatgpt-lifecycle-refresh-new-2";
 
@@ -274,7 +280,7 @@ describe("ChatGPT accounts", () => {
           {
             id: "acc1", clientID: "client-1", subject: "sub-1", email: "owner@example.test", model: "m1",
             models: [{ id: "m1", label: "Model one", vision: false }],
-            tokens: { accessToken: OLD_ACCESS, refreshToken: OLD_REFRESH, idToken: "chatgpt-lifecycle-id-token-1", expiresAt, earliestRefreshAt: 0, scopes: ["resource.invoke", "chatgpt.tokens.use.direct"] },
+            tokens: { accessToken: OLD_ACCESS, refreshToken: OLD_REFRESH, idToken: OLD_ID, expiresAt, earliestRefreshAt: 0, scopes: ["resource.invoke", "chatgpt.tokens.use.direct"] },
             needsLogin: false, permissionDisabled: false, welcomed: false,
           },
         ],
@@ -380,12 +386,17 @@ describe("ChatGPT accounts", () => {
     }
   });
 
-  test("a confirmed revoke releases the access and refresh tokens", async () => {
-    const auth = open(seed(Date.now() + HOUR), () => new Response("{}", { status: 200 }));
+  test("a confirmed revoke of the refresh token keeps the access token masked until it expires", async () => {
+    const expiresAt = Date.now() + HOUR;
+    const auth = open(seed(expiresAt), () => new Response("{}", { status: 200 }));
     try {
       await auth.disconnect("acc1");
-      expect(masked(OLD_ACCESS)).toBe(false);
-      expect(masked(OLD_REFRESH)).toBe(false);
+      // The revoke named the refresh token: the access token already issued stays valid until it expires.
+      for (const value of [OLD_ACCESS, OLD_REFRESH, OLD_ID]) expect(masked(value)).toBe(true);
+      setSystemTime(new Date(expiresAt + 1));
+      expect(masked(OLD_ACCESS)).toBe(false); // its own expiry has passed
+      expect(masked(OLD_REFRESH)).toBe(true); // no known expiry: only the queue's age lets it go
+      expect(masked(OLD_ID)).toBe(true);
     } finally {
       auth.stop();
     }

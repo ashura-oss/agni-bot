@@ -21,7 +21,8 @@
  * holder "anonymous"), and a holder lets go of its own hold only. So a store that stops using a
  * value cannot unmask one a vault entry, an environment variable or a provider key still has.
  * Nothing outside this file removes a value from the registry. A store that replaces or drops a
- * token does not unmask it at once either (it may still be valid): see "secrets a store replaces".
+ * token does not unmask it at once either (it may still be valid), and no revoke unmasks it: see
+ * "secrets a store replaces".
  *
  * A value shorter than `MIN_SECRET_LENGTH` is not registered: masking a
  * four-letter word everywhere would wreck ordinary text and protect nothing.
@@ -46,7 +47,7 @@ export const MIN_SECRET_LENGTH = 8;
  * Reaching it throws: a secret that cannot be registered is a secret that would go out unmasked.
  * Sized for a real home (provider keys, plugin credentials, OAuth tokens, a device token per
  * paired device); a refreshed token's old values leave the registry after a bounded wait
- * (`RETIRED_PER_SLOT` per slot), so refreshing does not fill it.
+ * (`RETIRED_PER_SLOT` per slot, `RETIRED_MAX` in all), so refreshing does not fill it.
  */
 export const MAX_SECRETS = 10_000;
 
@@ -185,23 +186,37 @@ export function secretCount(): number {
 // A token that is refreshed replaces an earlier one, and one that is disconnected goes away.
 // A store registers such a secret under a named slot. A slot is one holder, and it is
 // conservative about letting go: a value the slot replaces or drops is not unmasked at once,
-// because it may still be valid until it expires or until the provider confirms a revoke.
-// Masking a dead value costs nothing; unmasking a live one leaks it. So the slot queues what
-// it let go of, and a value leaves the queue when
-//   - its known expiry has passed (`releaseExpiredSecrets`, which `redact` runs by itself),
-//   - the provider confirmed a revoke (`releaseRetiredSecrets`), or
-//   - more than `RETIRED_PER_SLOT` values have piled up in the slot: then the oldest goes.
-// The last one is the only way a value that might still be valid is unmasked, and it is the
-// price of a registry that cannot grow without bound (a hundred refreshes without a restart
-// would otherwise leave a hundred dead tokens, each with about fifty masked forms).
+// because it may still be valid until it expires. Masking a dead value costs nothing;
+// unmasking a live one leaks it. So the slot queues what it let go of, and a value leaves the
+// queue when
+//   - its known expiry has passed (`releaseExpiredSecrets`, which `redact` runs by itself), or
+//   - it is the oldest of too many: more than `RETIRED_PER_SLOT` in its slot, or more than
+//     `RETIRED_MAX` in all slots.
+// A revoke is not on that list, on purpose. A provider that confirms it revoked a refresh token
+// says nothing about an access token it already issued, which works until it expires, and a
+// store cannot tell which of its values a given revoke killed. So nothing is unmasked because
+// of a revoke, and no caller can unmask the wrong value by getting that wrong.
+// A value with no known expiry (a refresh token, a password) is let go only by age. That is the
+// only way a value that might still be valid is unmasked, and it is the price of a registry that
+// cannot grow without bound (a hundred refreshes without a restart would otherwise leave a hundred
+// dead tokens, each with about fifty masked forms). The bounds are generous for that reason.
 // A value is only ever released by the slot's own hold: one another holder also holds stays masked.
 
 /**
- * How many values one slot keeps masked after letting go of them. Eight is about three or four
- * refreshes of a token set (an access and a refresh token each, sometimes an identity token),
- * far more than a refresh that is still being used somewhere can lag behind.
+ * How many values one slot keeps masked after letting go of them (and, separately, how many it
+ * keeps staged ahead of a save). A refresh of a token set replaces two or three values, so this
+ * is about ten refreshes: far more than a refresh that is still in use somewhere can lag behind.
  */
-export const RETIRED_PER_SLOT = 8;
+export const RETIRED_PER_SLOT = 32;
+
+/**
+ * How many retired values, in all slots together, stay masked: when more pile up, the oldest (by
+ * when it was queued) goes, whichever slot it is in. This keeps the registry under `MAX_SECRETS`
+ * however many slots there are (one per plugin, account and connection). It is a fifth of
+ * `MAX_SECRETS`, so the live values of the vault, the environment and every store always fit in
+ * the other four fifths.
+ */
+export const RETIRED_MAX = 2_000;
 
 /** A value to hold for a slot, with the time (epoch ms) after which it is known to be dead, when known. */
 export type SlotSecret = string | undefined | null | { value: string | undefined | null; expiresAt?: number };
@@ -209,14 +224,18 @@ export type SlotSecret = string | undefined | null | { value: string | undefined
 interface Queued {
   value: string;
   until?: number;
+  /** When it was queued (a counter, not a time), so the oldest across all slots can be found. */
+  seq: number;
 }
+
+let nextSeq = 0;
 
 interface Slot {
   /** What the slot holds now, with each value's known expiry. */
   live: Map<string, number | undefined>;
-  /** What it let go of, oldest first: at most `RETIRED_PER_SLOT`. */
+  /** What it let go of, oldest first: at most `RETIRED_PER_SLOT` (and `RETIRED_MAX` in all slots). */
   queue: Queued[];
-  /** Values masked ahead of a save that has not succeeded (yet), oldest first: at most `RETIRED_PER_SLOT` too. */
+  /** Values masked ahead of a save that has not succeeded (yet), oldest first: bounded the same way. */
   staged: Queued[];
 }
 
@@ -266,7 +285,7 @@ function slotOf(name: string): Slot {
 const holds = (slot: Slot, value: string): boolean =>
   slot.live.has(value) || slot.queue.some((queued) => queued.value === value) || slot.staged.some((staged) => staged.value === value);
 
-/** Keep both queues within their bound (oldest out), then drop the slot's hold on every value it no longer has. */
+/** Keep both queues within their bounds (oldest out), then drop the slot's hold on every value it no longer has. */
 function settleSlot(name: string, slot: Slot, candidates: Iterable<string>): void {
   const gone = [...candidates];
   for (const list of [slot.queue, slot.staged]) {
@@ -275,6 +294,26 @@ function settleSlot(name: string, slot: Slot, candidates: Iterable<string>): voi
   for (const value of gone) if (!holds(slot, value)) releaseSecretFor(slotHolder(name), value);
   if (slot.live.size === 0 && slot.queue.length === 0 && slot.staged.length === 0) slots.delete(name);
   for (const queued of [...slot.queue, ...slot.staged]) if (queued.until !== undefined) nextExpiry = Math.min(nextExpiry, queued.until);
+  trimRetired();
+}
+
+/** Keep the retired values of all slots together within `RETIRED_MAX`: the oldest queued goes first, whichever slot it is in. */
+function trimRetired(): void {
+  let total = 0;
+  for (const slot of slots.values()) total += slot.queue.length + slot.staged.length;
+  while (total > RETIRED_MAX) {
+    let oldest: { name: string; slot: Slot; list: Queued[] } | undefined;
+    for (const [name, slot] of slots) {
+      for (const list of [slot.queue, slot.staged]) {
+        if (list.length > 0 && (!oldest || list[0]!.seq < oldest.list[0]!.seq)) oldest = { name, slot, list };
+      }
+    }
+    if (!oldest) return;
+    const { value } = oldest.list.shift()!;
+    total -= 1;
+    if (!holds(oldest.slot, value)) releaseSecretFor(slotHolder(oldest.name), value);
+    if (oldest.slot.live.size === 0 && oldest.slot.queue.length === 0 && oldest.slot.staged.length === 0) slots.delete(oldest.name);
+  }
 }
 
 /**
@@ -291,7 +330,7 @@ export function stageSecretsAt(slot: string, ...secrets: SlotSecret[]): void {
     if (state.live.has(value) || state.queue.some((entry) => entry.value === value)) continue;
     const staged = state.staged.find((entry) => entry.value === value);
     if (staged) staged.until = until ?? staged.until;
-    else state.staged.push({ value, until });
+    else state.staged.push({ value, until, seq: nextSeq++ });
   }
   settleSlot(slot, state, []);
 }
@@ -312,9 +351,9 @@ export function rememberSecretsAt(slot: string, ...secrets: SlotSecret[]): void 
   state.live = next;
   state.staged = [];
   state.queue = state.queue.filter((entry) => !next.has(entry.value));
-  for (const { value, until } of [...dropped.map(([value, until]) => ({ value, until })), ...unsettled]) {
-    if (until !== undefined && until <= now) continue;
-    state.queue.push({ value, until });
+  for (const entry of [...dropped.map(([value, until]) => ({ value, until, seq: nextSeq++ })), ...unsettled]) {
+    if (entry.until !== undefined && entry.until <= now) continue;
+    state.queue.push(entry);
   }
   settleSlot(slot, state, [...dropped.map(([value]) => value), ...unsettled.map((entry) => entry.value)]);
 }
@@ -333,20 +372,6 @@ export function releaseExpiredSecrets(now: number = Date.now()): void {
     slot.queue = slot.queue.filter((entry) => !due(entry));
     slot.staged = slot.staged.filter((entry) => !due(entry));
     settleSlot(name, slot, expired.map((entry) => entry.value));
-  }
-}
-
-/**
- * The provider confirmed these values are dead (a revoke that succeeded): release them from every
- * slot's queue. A value still held live, or by another holder, stays masked.
- */
-export function releaseRetiredSecrets(...values: string[]): void {
-  const dead = new Set(values);
-  nextExpiry = Infinity;
-  for (const [name, slot] of [...slots]) {
-    slot.queue = slot.queue.filter((entry) => !dead.has(entry.value));
-    slot.staged = slot.staged.filter((entry) => !dead.has(entry.value));
-    settleSlot(name, slot, dead);
   }
 }
 

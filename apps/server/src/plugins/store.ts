@@ -74,7 +74,7 @@ function holdsCredential(tokens: TokenBlob): boolean {
  */
 /**
  * The redaction slot of one connection's tokens (see `rememberSecretsAt`). A refresh replaces the
- * tokens; what they replace stays masked until it is known dead, so a caller stages the new ones
+ * tokens; what they replace stays masked until it has expired, so a caller stages the new ones
  * before the write (`saveTokens`) and settles the slot after it (`settleTokens`).
  */
 const tokenSlot = (id: string): string => `plugin-connection:${id}`;
@@ -158,7 +158,7 @@ export function startPending(db: Database, patch: ConnectPatch): PluginConnectio
     ],
   );
   if (existing?.token_ref) tryDeleteVaultEntry(existing.token_ref);
-  rememberSecretsAt(tokenSlot(id)); // a re-connect wipes the old tokens: queued, masked until known dead
+  rememberSecretsAt(tokenSlot(id)); // a re-connect wipes the old tokens: queued, masked until they expire
   return getConnection(db, id)!;
 }
 
@@ -197,7 +197,7 @@ export function deleteConnection(db: Database, id: string): boolean {
   const ref = getConnection(db, id)?.token_ref;
   const deleted = db.run("DELETE FROM plugin_connections WHERE id = ?", [id]).changes > 0;
   if (ref) tryDeleteVaultEntry(ref);
-  // The row is gone, the tokens are not necessarily dead: they stay masked until they expire or the caller confirms a revoke.
+  // The row is gone, the tokens are not necessarily dead: they stay masked until they expire (no revoke unmasks them).
   rememberSecretsAt(tokenSlot(id));
   return deleted;
 }

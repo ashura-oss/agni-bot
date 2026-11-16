@@ -261,7 +261,7 @@ function registerPluginSecrets(config: PluginsFile): void {
 /**
  * After the config is saved: each secret's slot now holds exactly what was saved, so a token
  * that was refreshed, or a plugin that was removed, is no longer the live one. It is queued, not
- * unmasked: it stays masked until it expires or a revoke is confirmed (`releaseRetiredSecrets`).
+ * unmasked: it stays masked until it expires (a password, with no expiry, until the queue ages it out).
  * Done after the write, not before: a save that fails leaves the old values in the file.
  */
 function settlePluginSecrets(config: PluginsFile): void {
