@@ -30,14 +30,27 @@ function escapeUnsafe(text: string, keepLineBreaks: boolean): string {
   });
 }
 
-/** One entry on one line: line breaks become visible escapes. Cut at `max` characters, saying how many are missing. */
+/**
+ * A cap that keeps both ends. What a bot hides is at the end as often as at the start (a thousand
+ * harmless lines, then the command that matters), so a cut never takes only the tail.
+ */
+function middleCut(value: string, max: number, keepLineBreaks: boolean): string {
+  const head = Math.ceil(max / 2);
+  const tail = Math.floor(max / 2);
+  const hidden = value.length - head - tail;
+  const note = `… (${hidden} characters not shown) …`;
+  const marker = keepLineBreaks ? `\n${note}\n` : ` ${note} `;
+  return `${escapeUnsafe(value.slice(0, head), keepLineBreaks)}${marker}${escapeUnsafe(value.slice(value.length - tail), keepLineBreaks)}`;
+}
+
+/** One entry on one line: line breaks become visible escapes. Longer than `max` characters, the start and the end are kept. */
 export function safeLine(value: string, max?: number): string {
-  if (max !== undefined && value.length > max) return `${escapeUnsafe(value.slice(0, max), false)}… (+${value.length - max} chars)`;
+  if (max !== undefined && value.length > max) return middleCut(value, max, false);
   return escapeUnsafe(value, false);
 }
 
-/** Several lines (a mail body, a command's preview): line breaks stay, everything else unsafe is escaped. */
+/** Several lines (a mail body, a command's preview): line breaks stay, everything else unsafe is escaped. Start and end are kept past `max`. */
 export function safeText(value: string, max?: number): string {
-  if (max !== undefined && value.length > max) return `${escapeUnsafe(value.slice(0, max), true)}\n… (+${value.length - max} chars)`;
+  if (max !== undefined && value.length > max) return middleCut(value, max, true);
   return escapeUnsafe(value, true);
 }

