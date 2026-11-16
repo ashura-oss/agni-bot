@@ -1,0 +1,253 @@
+/**
+ * Where Git Bash is, on Windows. The shell tools run commands through it, so
+ * whichever `bash.exe` is chosen runs with the owner's rights.
+ *
+ * It is never found through PATH (`Bun.which("git")` made whatever came first
+ * on PATH the shell). The fixed locations are, in order: `%ProgramW6432%\Git`,
+ * `%ProgramFiles%\Git`, `%ProgramFiles(x86)%\Git` (installed for all users,
+ * which only administrators can write), then `%LOCALAPPDATA%\Programs\Git`
+ * (installed for one user). The per-user install is a folder the user's own
+ * account can rewrite, so it is used only when no other account can write
+ * there either and the owner is the current user, SYSTEM or Administrators
+ * (see `inspectPathAcl`); otherwise the shell refuses with a message that
+ * says which of "writable", "wrong owner" or "could not check" it was, and how
+ * to fix it. The result is remembered for the process. Same-account tampering is not a boundary
+ * this check claims: a command the owner approved can already do anything the
+ * account can.
+ */
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, win32 } from "node:path";
+import { envValue, isWindowsDrivePath, type Env } from "./env-lookup";
+import { currentUserSid, windowsSystemTool } from "./windows-acl";
+
+export interface GitInstall {
+  /** The Git for Windows root, for example `C:\Program Files\Git`. */
+  root: string;
+  bash: string;
+  scope: "machine" | "user";
+}
+
+export class GitBashError extends Error {}
+
+export interface GitInstallCandidate {
+  root: string;
+  scope: GitInstall["scope"];
+}
+
+/** The fixed install roots to try, in order. PATH is never read. */
+export function gitInstallCandidates(env: Env = process.env): GitInstallCandidate[] {
+  const raw: Array<{ base: string | undefined; scope: GitInstall["scope"]; sub: string[] }> = [
+    { base: envValue(env, "ProgramW6432"), scope: "machine", sub: ["Git"] },
+    { base: envValue(env, "ProgramFiles"), scope: "machine", sub: ["Git"] },
+    { base: envValue(env, "ProgramFiles(x86)"), scope: "machine", sub: ["Git"] },
+    { base: envValue(env, "LOCALAPPDATA"), scope: "user", sub: ["Programs", "Git"] },
+  ];
+  const seen = new Set<string>();
+  const result: GitInstallCandidate[] = [];
+  for (const { base, scope, sub } of raw) {
+    if (!isWindowsDrivePath(base)) continue;
+    const root = win32.join(base, ...sub);
+    const key = root.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push({ root, scope });
+  }
+  return result;
+}
+
+/**
+ * What the check of a per-user install found:
+ *  - "ok": nobody but the owner, SYSTEM and Administrators can write, and one of those owns it;
+ *  - "writable": another account can change it;
+ *  - "owner": an account other than those three owns it (it could rewrite the permissions);
+ *  - "unverifiable": the permissions could not be read, so nothing is known.
+ */
+export type InstallCheck = "ok" | "writable" | "owner" | "unverifiable";
+
+export interface FindGitBashOptions {
+  env?: Env;
+  exists?: (path: string) => boolean;
+  /** Checks a per-user install. Defaults to the ACL check, remembered for the process. */
+  userInstallCheck?: (root: string, bash: string) => InstallCheck;
+}
+
+/** The chosen Git Bash, or a `GitBashError` whose message says what to do. */
+export function findGitBash(options: FindGitBashOptions = {}): GitInstall {
+  const env = options.env ?? process.env;
+  const exists = options.exists ?? existsSync;
+  const check = options.userInstallCheck ?? defaultUserInstallCheck;
+  const refused: Array<{ root: string; why: Exclude<InstallCheck, "ok"> }> = [];
+  for (const { root, scope } of gitInstallCandidates(env)) {
+    const bash = [win32.join(root, "bin", "bash.exe"), win32.join(root, "usr", "bin", "bash.exe")].find((path) => exists(path));
+    if (!bash) continue;
+    if (scope === "user") {
+      const result = check(root, bash);
+      if (result !== "ok") {
+        refused.push({ root, why: result });
+        continue;
+      }
+    }
+    return { root, bash, scope };
+  }
+  const first = refused[0];
+  if (first) {
+    const fix = "Reinstall Git for Windows for all users (it installs under C:\\Program Files\\Git) and restart Agni.";
+    const reason = {
+      writable: "other accounts can change files there, so Agni will not run commands with it.",
+      owner: "it is owned by another account, so Agni will not run commands with it.",
+      unverifiable: "Agni could not check who can change files there (reading its permissions failed), so it will not run commands with it.",
+    }[first.why];
+    throw new GitBashError(`Git Bash was found in ${first.root}, but ${reason} ${fix}`);
+  }
+  throw new GitBashError("Shell tools on Windows require Git Bash. Install Git for Windows (for all users) and restart Agni.");
+}
+
+let cached: GitInstall | null = null;
+const checkResults = new Map<string, InstallCheck>();
+
+/** `findGitBash` for the real machine, remembered once it succeeds. A missing Git is looked up again next time. */
+export function gitInstall(): GitInstall {
+  if (cached) return cached;
+  cached = findGitBash();
+  return cached;
+}
+
+/** For tests. */
+export function resetGitInstallCache(): void {
+  cached = null;
+  checkResults.clear();
+}
+
+/**
+ * The result of checking a per-user install, success or failure, remembered
+ * for the process: the check starts two programs (icacls and PowerShell), and
+ * the shell tool asks on every command. A reinstall needs a restart.
+ */
+export function cachedUserInstallCheck(root: string, inspect: () => InstallCheck): InstallCheck {
+  const key = root.toLowerCase();
+  const known = checkResults.get(key);
+  if (known) return known;
+  const result = inspect();
+  checkResults.set(key, result);
+  return result;
+}
+
+function defaultUserInstallCheck(root: string, bash: string): InstallCheck {
+  return cachedUserInstallCheck(root, () => {
+    const places = new Set([root, win32.join(root, "bin"), win32.join(root, "usr", "bin"), dirname(bash), bash]);
+    let worst: InstallCheck = "ok";
+    for (const place of [...places].filter((path) => existsSync(path))) {
+      const result = inspectPathAcl(place);
+      if (result === "writable") return "writable"; // the most specific finding wins at once
+      if (result !== "ok") worst = worst === "unverifiable" ? worst : result;
+    }
+    return worst;
+  });
+}
+
+/** Whether a path's owner may be trusted: the current user, SYSTEM, Administrators, or a service account (TrustedInstaller). */
+export function ownerSidTrusted(ownerSid: string, currentSid: string): boolean {
+  const sid = ownerSid.trim();
+  if (sid === "") return false;
+  return sid === currentSid || TRUSTED_TRUSTEES.has(sid) || sid.startsWith(SERVICE_SID_PREFIX);
+}
+
+/** The owner's SID of `path`, through Windows PowerShell by absolute path. Throws when it cannot be read. */
+function ownerSidOf(path: string): string {
+  const root = [envValue(process.env, "SystemRoot"), envValue(process.env, "windir")].find(isWindowsDrivePath);
+  if (!root) throw new Error("SystemRoot is not set");
+  const output = execFileSync(
+    win32.join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    ["-NoProfile", "-NonInteractive", "-Command", "(Get-Acl -LiteralPath $env:AGNI_ACL_PATH).GetOwner([System.Security.Principal.SecurityIdentifier]).Value"],
+    {
+      encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], windowsHide: true, timeout: 20_000,
+      env: { SystemRoot: root, windir: root, AGNI_ACL_PATH: win32.resolve(path), ...(process.env.TEMP ? { TEMP: process.env.TEMP } : {}), ...(process.env.TMP ? { TMP: process.env.TMP } : {}) },
+    },
+  );
+  const sid = output.trim();
+  if (!/^S-1-\d+(?:-\d+)+$/.test(sid)) throw new Error("PowerShell did not return an owner SID");
+  return sid;
+}
+
+/** Looks at the permissions and the owner of `path` (not cached). A failure to read either is "unverifiable". */
+export function inspectPathAcl(path: string): InstallCheck {
+  if (process.platform !== "win32") return "unverifiable";
+  let scratch: string | undefined;
+  try {
+    scratch = mkdtempSync(join(tmpdir(), "agni-git-acl-"));
+    const out = join(scratch, "acl.txt");
+    execFileSync(windowsSystemTool("icacls"), [win32.resolve(path), "/save", out, "/q"], { stdio: "pipe", windowsHide: true });
+    const currentSid = currentUserSid();
+    if (sddlWritableByOthers(readFileSync(out, "utf16le"), currentSid)) return "writable";
+    return ownerSidTrusted(ownerSidOf(path), currentSid) ? "ok" : "owner";
+  } catch {
+    return "unverifiable";
+  } finally {
+    if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/** True when `inspectPathAcl` says "ok". */
+export function isOwnerSystemOnly(path: string): boolean {
+  return inspectPathAcl(path) === "ok";
+}
+
+/** Trustees that may hold write access: the owner is passed in; the rest are well-known and administrator-controlled. */
+const TRUSTED_TRUSTEES = new Set(["SY", "BA", "CO", "OW", "S-1-5-18", "S-1-5-32-544", "S-1-3-0", "S-1-3-4"]);
+const SERVICE_SID_PREFIX = "S-1-5-80-"; // NT SERVICE\* (TrustedInstaller)
+
+/** What a right adds up to, for the rights icacls writes: hex masks and a few named ones. Null when a name is not known. */
+const NAMED_RIGHTS: Record<string, number> = {
+  GA: 0x10000000, GR: 0x80000000, GW: 0x40000000, GX: 0x20000000,
+  FA: 0x1f01ff, FR: 0x120089, FW: 0x100116, FX: 0x1200a0,
+  RC: 0x20000, SD: 0x10000, WD: 0x40000, WO: 0x80000,
+};
+/** Write data, append, write extended attributes, delete child, write attributes, delete, change permissions, take ownership, generic write and all. */
+const WRITE_BITS = 0x2 | 0x4 | 0x10 | 0x40 | 0x100 | 0x10000 | 0x40000 | 0x80000 | 0x40000000 | 0x10000000;
+
+function rightsMask(rights: string): number | null {
+  if (/^0x[0-9a-f]+$/i.test(rights)) return Number.parseInt(rights.slice(2), 16);
+  if (rights === "" || rights.length % 2 !== 0) return rights === "" ? 0 : null;
+  let mask = 0;
+  for (let index = 0; index < rights.length; index += 2) {
+    const named = NAMED_RIGHTS[rights.slice(index, index + 2)];
+    if (named === undefined) return null;
+    mask |= named;
+  }
+  return mask;
+}
+
+/**
+ * True when the SDDL's DACL lets a trustee other than the owner, SYSTEM,
+ * Administrators, TrustedInstaller or a service account change the object
+ * (write, append, delete, change permissions, take ownership). Deny entries
+ * and read-only grants never count. Fails closed: no DACL (everyone has full
+ * access), a malformed entry or an unknown right all count as writable.
+ */
+export function sddlWritableByOthers(sddl: string, ownerSid: string): boolean {
+  const start = sddl.indexOf("D:");
+  if (start === -1) return true;
+  let depth = 0;
+  let end = sddl.length;
+  for (let index = start + 2; index < sddl.length; index++) {
+    const char = sddl[index];
+    if (char === "(") depth++;
+    else if (char === ")") depth--;
+    else if (depth === 0 && char === "S" && sddl[index + 1] === ":") { end = index; break; }
+  }
+  const aces = sddl.slice(start + 2, end).match(/\([^)]*\)/g) ?? [];
+  for (const ace of aces) {
+    const fields = ace.slice(1, -1).split(";");
+    if (fields.length < 6) return true;
+    const type = fields[0] ?? "";
+    if (type === "D" || type === "OD" || type === "XD" || type === "ZD") continue;
+    if (type !== "A" && type !== "OA" && type !== "XA" && type !== "ZA") return true;
+    const trustee = (fields[5] ?? "").trim();
+    if (trustee === ownerSid || TRUSTED_TRUSTEES.has(trustee) || trustee.startsWith(SERVICE_SID_PREFIX)) continue;
+    const mask = rightsMask(fields[2] ?? "");
+    if (mask === null || (mask & WRITE_BITS) !== 0) return true;
+  }
+  return false;
+}

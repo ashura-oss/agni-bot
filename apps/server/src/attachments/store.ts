@@ -6,7 +6,7 @@ import { imageSize } from "image-size";
 import { MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, type AttachmentInfo } from "@agni/protocol";
 import { newID, nowISO } from "../util/ids";
 import { ensurePrivateDirectory } from "../util/private-file";
-import { scrubbedShellEnv } from "../util/scrubbed-env";
+import { childEnv } from "../util/child-env";
 import type { ChatMessage } from "../models/client";
 
 interface AttachmentRow {
@@ -76,8 +76,8 @@ export async function saveAttachment(db: Database, dbPath: string, deviceID: str
     kind = "pdf"; mimeType = "application/pdf";
     const child = Bun.spawn([process.execPath, fileURLToPath(new URL("./pdf-worker.ts", import.meta.url))], {
       stdin: bytes, stdout: "pipe", stderr: "ignore",
-      // Untrusted PDF content is parsed here: the worker needs no provider key.
-      env: scrubbedShellEnv(),
+      // Untrusted PDF content is parsed here: the worker gets the core allowlist and a fixed PATH, no keys.
+      env: childEnv("pdf-worker"),
     });
     const timer = setTimeout(() => child.kill(), 15_000);
     try {
