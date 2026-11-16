@@ -181,7 +181,7 @@ describe("task lane loop", () => {
     db = openDatabase(":memory:");
     const thread = createThread(db, taskPersona.id);
     // The model only ever calls a tool. There is no 16-call budget any more,
-    // so the backstop is the chain step ceiling (24 model calls).
+    // so the backstop is the chain step ceiling (48 model calls).
     const fetchMock = (async () => streamResponse([
       { choices: [{ delta: { tool_calls: [{ index: 0, id: "call-loop", type: "function", function: { name: "tasks_list", arguments: "{\"status\":\"open\",\"limit\":5}" } }] } }] },
     ])) as unknown as typeof fetch;
@@ -192,11 +192,11 @@ describe("task lane loop", () => {
     });
 
     expect(result.stopReason).toBe("error");
-    expect(result.text).toContain("chain step ceiling reached (24/24)");
+    expect(result.text).toBe("I stopped: this chain of work hit its step limit.");
     // It went past the old 16-call limit before the guardrail stopped it.
-    expect(db.query<{ step_count: number }, [string]>("SELECT step_count FROM agent_sessions WHERE thread_id = ?").get(thread.id)?.step_count).toBe(24);
+    expect(db.query<{ step_count: number }, [string]>("SELECT step_count FROM agent_sessions WHERE thread_id = ?").get(thread.id)?.step_count).toBe(48);
     // The message is durable: it is what the thread shows after a reload.
-    expect(db.query<{ text: string }, [string]>("SELECT text FROM messages WHERE thread_id = ? AND role = 'assistant'").get(thread.id)?.text).toContain("chain step ceiling");
+    expect(db.query<{ text: string }, [string]>("SELECT text FROM messages WHERE thread_id = ? AND role = 'assistant'").get(thread.id)?.text).toContain("step limit");
   });
 
   test("a turn that reads the app's own source is stopped, and told what it can do", async () => {
@@ -358,10 +358,11 @@ describe("task lane loop", () => {
     });
 
     expect(result.stopReason).toBe("error");
-    expect(result.text).toContain("This turn failed:");
-    expect(result.text).toContain("no model providers configured");
-    expect(emitted.find((frame) => frame.type === "error")).toMatchObject({ code: "no_provider" });
-    expect(db.query<{ text: string }, [string]>("SELECT text FROM messages WHERE thread_id = ? AND role = 'assistant'").get(thread.id)?.text).toContain("This turn failed:");
+    // A short plain sentence, not the raw error; the failure itself is in turn.end.
+    expect(result.text).toContain("no model provider");
+    expect(emitted.some((frame) => frame.type === "error")).toBe(false);
+    expect(emitted.find((frame) => frame.type === "turn.end")).toMatchObject({ stopReason: "error" });
+    expect(db.query<{ text: string }, [string]>("SELECT text FROM messages WHERE thread_id = ? AND role = 'assistant'").get(thread.id)?.text).toBe(result.text);
   });
 });
 
