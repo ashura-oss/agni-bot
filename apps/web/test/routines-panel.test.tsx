@@ -92,7 +92,7 @@ describe("the routines panel", () => {
     renderInspector(modelWithJobs([routineJob()]));
     fireEvent.click(screen.getByRole("button", { name: /Morning brief/ }));
 
-    expect(screen.getByText("2 of last 3 runs skipped, 0 tokens")).toBeInTheDocument();
+    expect(screen.getByText("2 of the last 3 runs found nothing new")).toBeInTheDocument();
   });
 
   it("expands to show the runs, the config and the actions", () => {

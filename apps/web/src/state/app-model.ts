@@ -295,6 +295,12 @@ export class AppModel {
    * ones left over from the old one.
    */
   private connectionEpoch = 0;
+  /** When Stop and a rule revoke were last sent: both can be answered `not_found`, for different reasons. */
+  private lastCancelAt = 0;
+  private lastRevokeAt = 0;
+  /** When a frame last arrived, and the last one before the current connection attempt began. */
+  private lastFrameAt = Date.now();
+  private outageStart = Date.now();
   private cardEpoch = new Map<string, number>();
 
   private connection: AgniConnection | null = null;
@@ -1050,6 +1056,7 @@ export class AppModel {
     const turnID = this.conversation.inFlightTurnID;
     const connection = this.connection;
     if (!turnID || !connection) return;
+    this.lastCancelAt = Date.now();
     void connection.send({ type: "msg.cancel", turnID }).catch(() => undefined);
   }
 
@@ -1343,6 +1350,7 @@ export class AppModel {
       this.showToast(notice("failure", "Not revoked", "Reconnect to the daemon first."));
       return;
     }
+    this.lastRevokeAt = Date.now();
     void connection.send({ type: "approval.rule.revoke", id }).catch(() => undefined);
   }
 
@@ -1608,6 +1616,7 @@ export class AppModel {
             break;
           case "handshaking":
             this.connectionEpoch += 1;
+            this.outageStart = this.lastFrameAt;
             break;
           case "waiting":
             this.stopHealthPolling();
@@ -1629,22 +1638,11 @@ export class AppModel {
         return;
 
       case "durableReloadRequired": {
-        // The daemon could not replay (it restarted, or its log moved on): what a turn was in the
-        // middle of is gone with it. Forget the running turn and the cards of the old process;
-        // the cards the new one re-sent after this connection's hello are kept.
-        const current = new Set([...this.cardEpoch].filter(([, epoch]) => epoch === this.connectionEpoch).map(([id]) => id));
-        // Tokens still queued for the next animation frame belong to the turn that just died;
-        // applied after the reset they would bring its bubble, and the Stop button, back.
-        if (this.tokenTimer !== null) {
-          if (this.tokenIsFrame) cancelAnimationFrame(this.tokenTimer as number);
-          else clearTimeout(this.tokenTimer as ReturnType<typeof setTimeout>);
-          this.tokenTimer = null;
-        }
-        this.tokenQueue = [];
-        // "Working" and "waiting" were the old process's word; it sends no presence on connect.
-        this.agentStates = {};
-        this.conversation.resetLive({ keepCards: current });
-        for (const id of [...this.cardEpoch.keys()]) if (!current.has(id)) this.cardEpoch.delete(id);
+        // The daemon could not replay. Only a restart kills what it was running; a replay log that
+        // merely moved on while this browser slept leaves the running turn alive and streaming.
+        const deadTurn = this.conversation.inFlightTurnID;
+        if (event.restarted) this.resetAfterRestart(deadTurn);
+        else void this.confirmRestart(deadTurn, Date.now() - this.outageStart);
         this.conversation.note(
           notice(
             "info",
@@ -1663,6 +1661,44 @@ export class AppModel {
         this.saveSettingsSoon();
         return;
     }
+  }
+
+  /**
+   * Did the daemon boot while this browser was away? Its uptime says so: a daemon that has been
+   * up longer than the outage never stopped, and its running turns are still running.
+   */
+  private async confirmRestart(deadTurn: string | null, outageMs: number): Promise<void> {
+    const url = healthURL(this.settings);
+    if (!url) return;
+    try {
+      const report = await this.healthFetch(url);
+      if (report.uptimeMs + 2000 < outageMs) this.resetAfterRestart(deadTurn);
+    } catch {
+      // No answer: assume nothing, keep what is on screen.
+    }
+  }
+
+  /**
+   * The daemon behind this view restarted: whatever it was in the middle of is gone with it.
+   * Forget the running turn and the cards of the old process; the cards the new one re-sent
+   * after this connection's hello are kept. Skipped if a different turn has begun since.
+   */
+  private resetAfterRestart(deadTurn: string | null): void {
+    if (this.conversation.inFlightTurnID !== deadTurn) return;
+    const current = new Set([...this.cardEpoch].filter(([, epoch]) => epoch === this.connectionEpoch).map(([id]) => id));
+    // Tokens still queued for the next animation frame belong to the turn that just died;
+    // applied after the reset they would bring its bubble, and the Stop button, back.
+    if (this.tokenTimer !== null) {
+      if (this.tokenIsFrame) cancelAnimationFrame(this.tokenTimer as number);
+      else clearTimeout(this.tokenTimer as ReturnType<typeof setTimeout>);
+      this.tokenTimer = null;
+    }
+    this.tokenQueue = [];
+    // "Working" and "waiting" were the old process's word; it sends no presence on connect.
+    this.agentStates = {};
+    this.conversation.resetLive({ keepCards: current });
+    for (const id of [...this.cardEpoch.keys()]) if (!current.has(id)) this.cardEpoch.delete(id);
+    this.publish();
   }
 
   private activeChannel(): string {
@@ -1697,6 +1733,7 @@ export class AppModel {
   };
 
   private handleFrame(frame: IncomingFrame): void {
+    this.lastFrameAt = Date.now();
     // A frame type this build does not know is data, not an instruction.
     if (!isKnownFrame(frame)) return;
 
@@ -1989,6 +2026,17 @@ export class AppModel {
     if (frame.type === "hello.ok") return;
 
     if (frame.type === "error") {
+      if (
+        frame.code === "not_running" ||
+        (frame.code === "not_found" && this.lastCancelAt > this.lastRevokeAt && Date.now() - this.lastCancelAt < 10_000)
+      ) {
+        // Stop pressed just as the turn finished: there was nothing left to stop. Not an error.
+        this.lastCancelAt = 0;
+        this.conversation.finishTurnLocally();
+        this.reloadConversation();
+        this.publish();
+        return;
+      }
       if (frame.code === "not_found") {
         // A rule that was already revoked (here or on another device): show what is true now.
         this.showToast(notice("info", "Already gone", frame.message));

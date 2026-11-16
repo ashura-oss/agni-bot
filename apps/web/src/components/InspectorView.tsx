@@ -10,7 +10,7 @@ import type { RoutineInfo, RoutineRunInfo } from "@agni/protocol";
 import { useAppModel, useAppSnapshot } from "../state/use-app-model";
 import { AgentAvatar, PresenceDot } from "./bits";
 import { AddProviderView } from "./AddProviderView";
-import { jobKindLabel, plainJobResult, providerLabel } from "../state/display";
+import { jobKindLabel, memorySourceLabel, memoryScopeLabel, plainJobResult, plainPreview, providerLabel } from "../state/display";
 
 export function InspectorView() {
   const model = useAppModel();
@@ -197,8 +197,9 @@ export function InspectorView() {
           <Row label="Usage" value="unknown" />
         )}
         <p className="settings-note">
-          Free-tier providers are the default; if a NIM pay-as-you-go key is set, spend is
-          capped by the daemon's daily limits.
+          {snapshot.health && snapshot.health.providers.length > 0
+            ? `Requests go to ${snapshot.health.providers.map((provider) => providerLabel(provider)).join(", ")}, chosen by the daemon. Spend limits are set on the daemon.`
+            : "No model provider is connected yet. Spend limits are set on the daemon."}
         </p>
       </section>
 
@@ -274,9 +275,9 @@ function MemoryRow({ memory }: { memory: MemoryItem }) {
     <div className="memory-row">
       <div className="memory-text">{memory.text}</div>
       <div className="memory-meta">
-        <span>{memory.scope}</span>
+        <span>{memoryScopeLabel(memory.scope)}</span>
         <span>·</span>
-        <span>{memory.source}</span>
+        <span>{memorySourceLabel(memory.source)}</span>
         <span>·</span>
         <span title="How sure the agent is">{(memory.confidence * 100).toFixed(0)}%</span>
         {used ? (
@@ -371,6 +372,10 @@ function humanCadence(cron: string, timezone: string): string {
   }
   if (minute === "0" && hourStep && dom === "*" && month === "*" && dow === "*") {
     return `Every ${format.count(Number(hourStep[1]), "hour")}${zone}`;
+  }
+  if (/^\d+$/u.test(minute) && /^\d+(,\d+)+$/u.test(hour) && Number(minute) < 60 && dom === "*" && month === "*" && (dow === "*" || dow === "0-6" || dow === "1-5")) {
+    const times = hour.split(",").map((value) => `${value.padStart(2, "0")}:${minute.padStart(2, "0")}`).join(", ");
+    return `${dow === "1-5" ? "Weekdays" : "Daily"} at ${times}${zone}`;
   }
   if (/^\d+$/u.test(minute) && /^\d+$/u.test(hour) && Number(minute) < 60 && Number(hour) < 24 && dom === "*" && month === "*") {
     const clock = `${hour.padStart(2, "0")}:${minute.padStart(2, "0")}`;
@@ -535,9 +540,9 @@ function CronRoutineRow({ job, routine }: { job: JobInfo; routine: RoutineInfo }
       </button>
       {expanded ? (
         <div className="routine-detail">
-          {runs.length > 0 ? (
+          {skipped.length > 0 ? (
             <div className="routine-meta">
-              {`${skipped.length} of last ${runs.length} runs skipped, ${skippedTokens.toLocaleString()} tokens`}
+              {`${skipped.length} of the last ${runs.length} ${runs.length === 1 ? "run" : "runs"} found nothing new${skippedTokens > 0 ? `, using ${skippedTokens.toLocaleString()} tokens` : ""}`}
             </div>
           ) : null}
           {runs.map((run, index) => (
@@ -585,7 +590,7 @@ function RoutineRunLine({ run }: { run: RoutineRunInfo }) {
           .filter(Boolean)
           .join(" · ")}
       </div>
-      {run.summary ? <div className="routine-meta tertiary">{format.preview(run.summary, 200)}</div> : null}
+      {run.summary ? <div className="routine-meta tertiary">{format.preview(plainPreview(run.summary), 200)}</div> : null}
     </div>
   );
 }

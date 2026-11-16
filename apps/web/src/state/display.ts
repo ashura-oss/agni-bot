@@ -139,3 +139,16 @@ export function jobKindLabel(kind: string): string {
 export function plainJobResult(result: string): string {
   return result.replace(/^thread\s+\S+:\s*/u, "");
 }
+
+/** Where a memory applies, in words. */
+export function memoryScopeLabel(scope: string): string {
+  if (scope === "global_user") return "About you";
+  if (scope === "agent") return "This bot's own";
+  return scope.replace(/_/gu, " ");
+}
+
+/** How a memory came to be, in words. */
+export function memorySourceLabel(source: string): string {
+  if (source === "user") return "from you";
+  return source.replace(/[._]+/gu, " ");
+}
