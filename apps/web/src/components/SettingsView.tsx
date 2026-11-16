@@ -27,8 +27,9 @@ import { AppearanceView } from "./AppearanceView";
 import { ApprovalRulesView } from "./ApprovalRulesView";
 import { useDialog } from "./use-dialog";
 import { providerLabel } from "../state/display";
+import type { SettingsSection } from "../state/router";
 
-type Section = "general" | "appearance" | "plugins" | "approvals" | "models" | "device";
+type Section = SettingsSection;
 
 const SECTIONS: { id: Section; title: string; icon: typeof Settings; subtitle: string }[] = [
   {
@@ -72,7 +73,8 @@ const SECTIONS: { id: Section; title: string; icon: typeof Settings; subtitle: s
 export function SettingsView() {
   const model = useAppModel();
   const snapshot = useAppSnapshot();
-  const [section, setSection] = useState<Section>("plugins");
+  // The section is part of the address, so a link or a reload lands on the same one.
+  const section: Section = snapshot.settingsSection ?? "plugins";
   const [addingProvider, setAddingProvider] = useState(false);
   const [editingProvider, setEditingProvider] = useState<ProviderStatus | null>(null);
   const [connectingPlugin, setConnectingPlugin] = useState<PluginInfo | null>(null);
@@ -99,7 +101,7 @@ export function SettingsView() {
                 type="button"
                 key={item.id}
                 className={`settings-tab${section === item.id ? " active" : ""}`}
-                onClick={() => setSection(item.id)}
+                onClick={() => model.selectSettingsSection(item.id)}
               >
                 <Icon size={14} />
                 {item.title}

@@ -1,0 +1,431 @@
+/* Sidebar --------------------------------------------------------------- */
+
+.sidebar {
+  display: flex;
+  flex: 0 0 var(--sidebar-width);
+  flex-direction: column;
+  width: var(--sidebar-width);
+  height: 100%;
+  background: var(--sidebar);
+  border-right: 1px solid var(--hairline);
+}
+
+/* The bar at the top of the roster: collapse, search, and make an agent. */
+.sidebar-bar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  height: 52px;
+  padding: 0 10px;
+}
+
+.sidebar-bar .icon-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--ink-secondary);
+}
+
+.sidebar-bar .icon-btn:hover:not(:disabled) {
+  background: var(--surface-raised);
+  color: var(--ink);
+}
+
+.sidebar-bar .icon-btn.active {
+  background: var(--surface-raised);
+  color: var(--accent);
+}
+
+.sidebar-bar-spacer {
+  flex: 1;
+}
+
+/* Only the phone drawer carries a close button. */
+.sidebar-close {
+  display: none;
+}
+
+.sidebar-sections {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 8px 12px;
+}
+
+.task-nav {
+  padding: 12px 10px;
+}
+
+.task-nav-primary {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.task-nav-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  min-height: 37px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink-secondary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.task-nav-row:hover,
+.task-nav-row.selected {
+  background: var(--surface-raised);
+  color: var(--ink);
+}
+
+.task-nav-row.selected {
+  font-weight: 600;
+}
+
+.task-nav-icon {
+  display: grid;
+  width: 19px;
+  flex: 0 0 19px;
+  place-items: center;
+  color: var(--accent);
+}
+
+.task-nav-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-meta);
+}
+
+.task-nav-count {
+  color: var(--ink-tertiary);
+  font-size: var(--text-caption);
+}
+
+.task-nav-list-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 14px 2px 6px 10px;
+  color: var(--ink-tertiary);
+  font-size: var(--text-caption);
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.task-nav-list-heading .icon-btn {
+  width: 26px;
+  height: 26px;
+}
+
+.task-list-mark {
+  width: 9px;
+  height: 9px;
+  border: 2px solid currentColor;
+  border-radius: 3px;
+}
+
+/* The agents you keep, as a grid of marks: one is centred, two sit side by
+   side, and the rest wrap — always centred. */
+.sidebar-grid {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 4px 14px;
+}
+
+.sidebar-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  width: 104px;
+  padding: 10px 6px 12px;
+  border: none;
+  border-radius: 16px;
+  background: transparent;
+  color: var(--ink);
+  text-align: center;
+}
+
+.sidebar-tile:hover {
+  background: rgb(255 255 255 / 5%);
+}
+
+.sidebar-tile.selected {
+  background: var(--surface-raised);
+}
+
+.sidebar-tile-mark {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  margin-bottom: 5px;
+  border-radius: 18px;
+  background: var(--surface);
+}
+
+/* The star in the corner of the mark. */
+.sidebar-tile-star {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--amber);
+  color: #1a1206;
+  box-shadow: 0 0 0 2px var(--sidebar);
+}
+
+.sidebar-tile-name {
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.sidebar-tile-tag {
+  color: var(--ink-tertiary);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.sidebar-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border: none;
+  border-radius: var(--row-radius);
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  transition: background var(--motion-snappy);
+}
+
+.sidebar-row:hover {
+  background: rgb(255 255 255 / 4%);
+}
+
+.sidebar-row.selected {
+  background: color-mix(in srgb, var(--agent-accent, #ff3146) 14%, var(--surface-raised));
+}
+
+.sidebar-row-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* The tag the owner gave this agent, as a small chip beside its name. */
+.sidebar-tag-chip {
+  max-width: 130px;
+  overflow: hidden;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--surface-raised);
+  color: var(--ink-tertiary);
+  font-size: 11px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-row.selected .sidebar-tag-chip {
+  background: rgb(255 255 255 / 6%);
+}
+
+/* Pin an agent to the top of the roster. */
+.sidebar-star {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  color: var(--ink-tertiary);
+  opacity: 0;
+  transition: opacity var(--motion-snappy), color var(--motion-snappy);
+}
+
+.sidebar-row:hover .sidebar-star,
+.sidebar-star.on {
+  opacity: 1;
+}
+
+.sidebar-star:hover {
+  color: var(--amber);
+}
+
+.sidebar-star.on {
+  color: var(--amber);
+}
+
+.sidebar-row-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.sidebar-row-title {
+  overflow: hidden;
+  font-size: var(--text-row-title);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-row-subtitle {
+  overflow: hidden;
+  color: var(--ink-secondary);
+  font-size: var(--text-meta);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.unread-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ember);
+}
+
+.sidebar-empty {
+  padding: 8px 12px;
+  color: var(--ink-tertiary);
+  font-size: var(--text-meta);
+}
+
+/* The footer: who is here, and what is connected. */
+.sidebar-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--hairline);
+}
+
+.sidebar-owner {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--ember);
+  color: var(--accent-ink, #ffffff);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  transition: filter var(--motion-snappy);
+}
+
+.sidebar-owner-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.sidebar-owner-row .presence-dot {
+  margin-left: 2px;
+}
+
+.sidebar-owner:hover {
+  filter: brightness(1.1);
+}
+
+.sidebar-owner .presence-dot {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--sidebar);
+}
+
+.connect-apps {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  height: 40px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 99px;
+  background: var(--surface);
+  color: var(--ink);
+  transition: background var(--motion-snappy);
+}
+
+.connect-apps:hover {
+  background: var(--surface-raised);
+}
+
+.connect-apps-label {
+  flex: 0 0 auto;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.connect-apps-icons {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.app-tile {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 35%);
+}
+
+.app-tile-mark {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.app-tile-mono {
+  letter-spacing: 0.02em;
+}
+
