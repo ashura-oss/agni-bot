@@ -57,13 +57,12 @@ export function cancelTurnsForDevice(deviceID: string): number {
 }
 
 /**
- * Why a turn is stopped by the pause switch. These join `AbortReason` (agent/abort-reason.ts) once that
- * file lists them; until then the loop reads them as an interruption, not an owner Stop.
+ * Why a turn is stopped by the pause switch (both are `AbortReason`s, so the turn leaves the right note behind):
  *
  *   paused     the owner paused all bots
  *   agent_off  the owner turned this turn's bot off
  */
-export type PauseAbortReason = "paused" | "agent_off";
+export type PauseAbortReason = Extract<AbortReason, "paused" | "agent_off">;
 
 /**
  * Abort the running turns a pause covers: every turn, or only the turns of one bot. Returns how many were

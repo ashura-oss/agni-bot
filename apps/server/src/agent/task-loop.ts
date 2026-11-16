@@ -940,7 +940,9 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
     // Only an explicit Stop is the owner's; an abort nobody labelled is "interrupted", never "Stop".
     const why = abortReasonOf(run.signal);
     const ownerStopped = why === "owner_stop" || cancelReason === "the owner asked to stop";
-    if (why !== "timeout") closeRequest(db, { threadID, turnID, reason: why === "device_revoked" ? "revoked" : ownerStopped ? "stopped" : "interrupted" });
+    if (why !== "timeout") {
+      closeRequest(db, { threadID, turnID, reason: why === "paused" || why === "agent_off" ? why : why === "device_revoked" ? "revoked" : ownerStopped ? "stopped" : "interrupted" });
+    }
   }
   touchThread(db, threadID);
   // A turn waiting for the owner's answer is not a failed turn: the session

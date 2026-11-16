@@ -25,6 +25,12 @@ export const STOPPED_REQUEST_NOTE =
 export const INTERRUPTED_REQUEST_NOTE =
   `[My previous request was interrupted by a restart and was not completed. Some of its steps may already have run. That request is closed: I will not resume it, re-run its tool calls, or ask for its approvals again unless the owner asks for it again in a new message. ${CHECK_STATE}]`;
 
+export const PAUSED_REQUEST_NOTE =
+  `[The owner paused all bots, so my previous request was stopped before it finished. Some of its steps may already have run. That request is closed: I will not resume it, retry its actions, or ask for its approvals again unless the owner asks for it again in a new message after the bots are resumed. ${CHECK_STATE}]`;
+
+export const AGENT_OFF_REQUEST_NOTE =
+  `[The owner turned me off, so my previous request was stopped before it finished. Some of its steps may already have run. That request is closed: I will not resume it, retry its actions, or ask for its approvals again unless the owner asks for it again in a new message after turning me back on. ${CHECK_STATE}]`;
+
 export const REVOKED_REQUEST_NOTE =
   `[My previous request came from a device that has since been revoked. Some of its steps may already have run. That request is closed: I will not resume it, retry its actions, or ask for its approvals again. ${CHECK_STATE}]`;
 
@@ -50,7 +56,7 @@ export function closureWording(text: string): boolean {
 const CLOSURE_MARKERS: readonly RegExp[] = [
   /that request is closed\b/,
   /the owner pressed stop on my previous request/,
-  /my previous request (?:was interrupted by a restart|came from a device that has since been revoked)/,
+  /my previous request (?:was interrupted by a restart|came from a device that has since been revoked|was stopped)/,
   /\[record from the tool log of that request/,
 ];
 
@@ -162,8 +168,16 @@ function recordOf(db: Database, turnID: string): string {
   return `[Record from the tool log of that request (not from memory): ${parts.join(". ")}${more > 0 ? ` (and ${more} more)` : ""}. I will never say that anything listed as done did not happen, I will not repeat it, and I check anything listed as unknown before I act on it.]`;
 }
 
-export function closeRequest(db: Database, params: { threadID: string; turnID?: string; reason: "stopped" | "interrupted" | "revoked" }): void {
-  const base = params.reason === "stopped" ? STOPPED_REQUEST_NOTE : params.reason === "revoked" ? REVOKED_REQUEST_NOTE : INTERRUPTED_REQUEST_NOTE;
+const CLOSE_NOTES = {
+  stopped: STOPPED_REQUEST_NOTE,
+  interrupted: INTERRUPTED_REQUEST_NOTE,
+  revoked: REVOKED_REQUEST_NOTE,
+  paused: PAUSED_REQUEST_NOTE,
+  agent_off: AGENT_OFF_REQUEST_NOTE,
+} as const;
+
+export function closeRequest(db: Database, params: { threadID: string; turnID?: string; reason: keyof typeof CLOSE_NOTES }): void {
+  const base = CLOSE_NOTES[params.reason];
   appendMessage(db, {
     threadID: params.threadID,
     ...(params.turnID ? { turnID: params.turnID } : {}),

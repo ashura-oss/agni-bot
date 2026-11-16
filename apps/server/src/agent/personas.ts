@@ -460,8 +460,8 @@ export function seedAgentPromptTemplates(db: Database): number {
 export function personaInfo(db?: Database, options: { includeHidden?: boolean } = {}): AgentInfo[] {
   return PERSONAS.filter((persona) => options.includeHidden || !persona.hidden).map((persona) => {
     const row = db
-      ?.query<{ display_name: string | null; avatar_color: string | null; onboarded: number; role_detail: string | null; visibility: string | null }, [string]>(
-        "SELECT display_name, avatar_color, onboarded, role_detail, visibility FROM agents WHERE id = ?",
+      ?.query<{ display_name: string | null; avatar_color: string | null; onboarded: number; role_detail: string | null; visibility: string | null; disabled: number | null }, [string]>(
+        "SELECT display_name, avatar_color, onboarded, role_detail, visibility, disabled FROM agents WHERE id = ?",
       )
       .get(persona.id);
     return {
@@ -474,6 +474,8 @@ export function personaInfo(db?: Database, options: { includeHidden?: boolean } 
       onboarded: (row?.onboarded ?? 0) === 1,
       visibility: normalizeVisibility(row?.visibility ?? persona.visibility ?? DEFAULT_VISIBILITY),
       ...(persona.hidden ? { hidden: true } : {}),
+      // A bot the owner turned off says so in every roster; a bot that is on carries no flag.
+      ...(row?.disabled === 1 ? { enabled: false } : {}),
     };
   });
 }
