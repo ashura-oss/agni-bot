@@ -60,6 +60,8 @@ export interface ChatMessage {
   isContinuation: boolean;
   /** The daemon said how this message's turn ended (history rows carry it). */
   stopKnown?: boolean;
+  /** On a pending send: the ids of every durable row this chat knew when it was sent. */
+  knownBeforeSend?: ReadonlySet<string>;
 }
 
 export interface ApprovalRow {
@@ -224,6 +226,8 @@ export class Conversation {
    * their own, so this is the only way to tell them from this chat's.
    */
   private declinedTurns = new Set<string>();
+  /** Every durable row id this chat has loaded. */
+  private knownDurableIDs = new Set<string>();
   /** Turns whose turn.end this view has seen, so a late history answer cannot bring one back. */
   private endedTurns = new Set<string>();
   /**
@@ -272,8 +276,11 @@ export class Conversation {
   /** Local echo: the bubble appears before the socket answers (S6). */
   appendLocalUserMessage(text: string, at: Date = new Date(), attachments: AttachmentInfo[] = []): string {
     const id = `local_${randomID()}`;
+    // What the chat already knew, so only a row that appears afterwards can be this send's own.
+    const known = new Set(this.knownDurableIDs);
+    for (const message of this.messages) if (!message.isLocalEcho) known.add(message.id);
     this.messages.push(
-      newMessage({ id, role: "user", text, attachments, createdAt: at, sessionID: this.threadID, isLocalEcho: true }),
+      newMessage({ id, role: "user", text, attachments, createdAt: at, sessionID: this.threadID, isLocalEcho: true, knownBeforeSend: known }),
     );
     return id;
   }
@@ -512,12 +519,46 @@ export class Conversation {
     const echoes = this.messages.filter(
       (message) => message.isLocalEcho && !(message.state.kind === "failed" && message.state.reason === ""),
     );
-    rebuilt.push(...streaming);
+    // A pending send is answered by a durable row of the same text that was not known when it
+    // was sent; each such row answers one send, oldest send first. The text alone is not enough
+    // (an older row with the same words must not swallow a message still on its way), and no clock
+    // is compared: the daemon's and the browser's need not agree.
+    const claimed = new Set<string>();
+    const answeredBy = new Map<ChatMessage, string>();
+    const keep = new Set<ChatMessage>(streaming);
     for (const echo of echoes) {
-      if (!rebuilt.some((message) => message.role === "user" && message.text === echo.text)) {
-        rebuilt.push(echo);
-      }
+      const answer = rebuilt.find(
+        (message) =>
+          message.role === "user" &&
+          message.text === echo.text &&
+          !claimed.has(message.id) &&
+          !(echo.knownBeforeSend?.has(message.id) ?? false),
+      );
+      if (answer) {
+        claimed.add(answer.id);
+        answeredBy.set(echo, answer.id);
+      } else keep.add(echo);
     }
+    // Survivors stay where they were: right after the last durable row they followed, in the
+    // order they were added. Nothing is sorted by time or by what it says.
+    const rebuiltIDs = new Set(rebuilt.map((message) => message.id));
+    const placed = new Map<string | null, number>();
+    let follows: string | null = null;
+    for (const message of this.messages) {
+      if (!keep.has(message)) {
+        // A send answered by a durable row now sits where that row is.
+        const answer = answeredBy.get(message);
+        if (answer !== undefined) follows = answer;
+        else if (rebuiltIDs.has(message.id)) follows = message.id;
+        continue;
+      }
+      const count = placed.get(follows) ?? 0;
+      placed.set(follows, count + 1);
+      const anchor = follows === null ? -1 : rebuilt.findIndex((candidate) => candidate.id === follows);
+      // With nothing before it (a chat that was only an echo) a survivor is the newest thing: the end.
+      rebuilt.splice(follows === null ? rebuilt.length : anchor + 1 + count, 0, message);
+    }
+    for (const message of rebuilt) this.knownDurableIDs.add(message.id);
     // Survivors predate the blocks they stream into; stamp them with the
     // active block so a seam renders the instant history reloads.
     for (const message of rebuilt) {
