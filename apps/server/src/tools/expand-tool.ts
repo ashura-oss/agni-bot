@@ -10,7 +10,7 @@ import type { Database } from "bun:sqlite";
 import type { ToolRegistry } from "./registry";
 import { getAgentMemory, type AgentMemoryRow } from "../stores/agent-memories";
 import { canonicalAgentID, resolvePersona } from "../agent/personas";
-import { DEFAULT_VISIBILITY, redactForCaller, type RedactedText } from "../agent/visibility";
+import { DEFAULT_VISIBILITY, MISSING_AGENT_VISIBILITY, redactForCaller, type RedactedText } from "../agent/visibility";
 import { searchTranscripts } from "../stores/transcripts";
 
 /**
@@ -21,7 +21,7 @@ import { searchTranscripts } from "../stores/transcripts";
  */
 function redactMemory(db: Database, row: AgentMemoryRow, callerAgentID: string): RedactedText {
   const owner = row.agent_id ?? "";
-  const visibility = owner ? resolvePersona(db, owner)?.visibility ?? DEFAULT_VISIBILITY : DEFAULT_VISIBILITY;
+  const visibility = owner ? resolvePersona(db, owner)?.visibility ?? MISSING_AGENT_VISIBILITY : DEFAULT_VISIBILITY;
   if (row.visibility === "private" && (row.agent_id ?? "ea") !== canonicalAgentID(callerAgentID)) {
     return { text: null, redacted: true, mode: "private" };
   }
@@ -99,7 +99,7 @@ export function registerExpandTool(registry: ToolRegistry, deps: ExpandToolDeps)
       const channelOwner = deps.db
         .query<{ agent_id: string | null }, [string]>("SELECT agent_id FROM channels WHERE id = ?")
         .get(anchor.channel_id)?.agent_id ?? "";
-      const visibility = channelOwner ? resolvePersona(deps.db, channelOwner)?.visibility ?? DEFAULT_VISIBILITY : DEFAULT_VISIBILITY;
+      const visibility = channelOwner ? resolvePersona(deps.db, channelOwner)?.visibility ?? MISSING_AGENT_VISIBILITY : DEFAULT_VISIBILITY;
       const allowed = visibility === "private" && channelOwner !== deps.currentAgentID;
       return {
         kind: "messages",

@@ -11,7 +11,7 @@ import type { ToolRegistry } from "./registry";
 import { getArtifact } from "../stores/artifacts";
 import { canonicalAgentID, resolvePersona } from "../agent/personas";
 import { getTask } from "../stores/tasks";
-import { DEFAULT_VISIBILITY, redactForCaller } from "../agent/visibility";
+import { MISSING_AGENT_VISIBILITY, redactForCaller } from "../agent/visibility";
 import { carryTaint, taskTaint } from "../policy/carry";
 
 export interface ArtifactToolDeps {
@@ -58,7 +58,7 @@ export function registerArtifactTool(registry: ToolRegistry, deps: ArtifactToolD
       if (!ref) throw new Error("artifactRef is required");
       const artifact = getArtifact(deps.db, ref);
       if (!artifact) throw new Error(`no artifact ${ref}`);
-      const visibility = resolvePersona(deps.db, artifact.agent_id)?.visibility ?? DEFAULT_VISIBILITY;
+      const visibility = resolvePersona(deps.db, artifact.agent_id)?.visibility ?? MISSING_AGENT_VISIBILITY;
       // The bot that delegated the task asked for this work, so it reads all of it, a page at
       // a time (the task row and the wake carry only the first 4,000 characters, and without
       // the rest it redoes the work). A private specialist is still a receipt, and every other

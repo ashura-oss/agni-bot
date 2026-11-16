@@ -19,6 +19,7 @@ import {
 import { canonicalAgentID } from "../agent/personas";
 import { describeSchedule, nextDailyRun, parseDay, parseWallClock } from "../jobs/schedule";
 import { isPeerPrincipal, isTainted } from "../policy/context";
+import { CLOSURE_WORDING_REFUSAL, closureWording } from "../agent/closure";
 import { MAX_SELF_SCHEDULED_JOBS } from "../policy/limits";
 
 export interface JobScheduleArgs {
@@ -94,6 +95,7 @@ export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: 
   }
   const text = args.text.trim();
   if (!text) throw new Error("a scheduled job needs something to do");
+  if (closureWording(text)) throw new Error(CLOSURE_WORDING_REFUSAL);
   const mine = selfScheduledCount(db, callerAgentID);
   if (mine >= MAX_SELF_SCHEDULED_JOBS) {
     throw new Error(`you already have ${mine} scheduled jobs, which is the most a bot may keep. Cancel one with job_cancel before scheduling another.`);

@@ -15,6 +15,7 @@ import type { ServerFrameBody } from "@agni/protocol";
 import type { ToolRegistry, ToolDefinition } from "./registry";
 import { canonicalAgentID, getPersona, personaInfo, mentionRoster, updatePersona } from "../agent/personas";
 import type { Visibility } from "../agent/visibility";
+import { CLOSURE_WORDING_REFUSAL, closureWording } from "../agent/closure";
 
 export interface UpdateAgentDeps {
   db: Database;
@@ -77,6 +78,7 @@ export function createUpdateAgentTool(deps: UpdateAgentDeps): ToolDefinition<Upd
     timeoutMs: 2_000,
     handler: async (args, ctx) => {
       if (ctx.peerInput) return { error: "not done: this turn started from another agent's message" };
+      if ([args.role, args.prompt].some((text) => typeof text === "string" && closureWording(text))) return { error: CLOSURE_WORDING_REFUSAL };
       // C3: a bot may change only itself; the owner changes others via frames.
       const caller = ctx.chain?.currentAgentID;
       const target = args.agent_id ?? args.agentID ?? caller;

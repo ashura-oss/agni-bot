@@ -7,6 +7,7 @@ import { nextRun, validateCron } from "../routines/cron";
 import { ROUTINE_DEFAULTS } from "../routines/types";
 import type { Preflight, Routine } from "../routines/types";
 import { newID, nowISO } from "../util/ids";
+import { CLOSURE_WORDING_REFUSAL, closureWording } from "../agent/closure";
 
 const objectSchema = (properties: Record<string, unknown>, required: string[]): Record<string, unknown> => ({
   type: "object", properties, required, additionalProperties: false,
@@ -42,6 +43,7 @@ function createRoutine(db: Database, args: Record<string, unknown>, agentID: str
   if (misfireValue !== "skip" && misfireValue !== "run_once") throw new Error("misfire must be skip or run_once");
   const preflightInput = (args.preflight ?? { kind: "none" }) as Record<string, unknown>;
   if (!name || name.length > 120 || !prompt || prompt.length > 4_000) throw new Error("name and prompt are required (name max 120, prompt max 4000)");
+  if (closureWording(name) || closureWording(prompt)) throw new Error(CLOSURE_WORDING_REFUSAL);
   if (!timezoneValid(timezone)) throw new Error(`invalid timezone "${timezone}"`);
   validateCron(cron, timezone);
   let preflight: Preflight;

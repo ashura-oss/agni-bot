@@ -11,7 +11,7 @@ import type { Database } from "bun:sqlite";
 import { PEER_INTENTS, PeerIntentSchema, type PeerIntent, type ServerFrameBody } from "@agni/protocol";
 import type { ToolContext, ToolRegistry } from "./registry";
 import { assertTeammate, canonicalAgentID, resolvePersona } from "../agent/personas";
-import { DEFAULT_VISIBILITY, RESULT_MAX_CHARS, redactStoredForCaller, type Visibility } from "../agent/visibility";
+import { DEFAULT_VISIBILITY, MISSING_AGENT_VISIBILITY, RESULT_MAX_CHARS, redactStoredForCaller, type Visibility } from "../agent/visibility";
 import {
   createDelegationTask,
   setDelegationJob,
@@ -265,7 +265,7 @@ function taskView(task: TaskRow, deps: DelegateTaskToolDeps): Record<string, unk
   // The result of a private agent is a receipt, not text — the same rule the
   // synchronous handoff applies, so the async path cannot be the weak one.
   const owner = task.owner_agent_id ?? "";
-  const visibility = owner ? resolvePersona(deps.db, owner)?.visibility ?? DEFAULT_VISIBILITY : DEFAULT_VISIBILITY;
+  const visibility = owner ? resolvePersona(deps.db, owner)?.visibility ?? MISSING_AGENT_VISIBILITY : DEFAULT_VISIBILITY;
   // The row keeps a short summary; the artifact holds what the specialist
   // actually wrote (DEL-004). A finished task is shown from the artifact so a
   // long answer is not cut to the row's summary. It is still redacted for

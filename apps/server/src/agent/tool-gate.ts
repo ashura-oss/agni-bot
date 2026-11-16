@@ -77,7 +77,7 @@ export async function gateToolCall(deps: GateDeps, run: RunContext, input: Polic
     case "refuse": {
       // An invalid call keeps its own message as the stored code, as the tool's own refusal always did.
       const code = decision.code === "invalid_arguments" ? decision.error : (STORED_CODE[decision.code] ?? decision.code);
-      return blocked(code, decision.error, PREVIEW[decision.code] ?? decision.error.slice(0, 120));
+      return blocked(code, decision.error, decision.preview ?? PREVIEW[decision.code] ?? decision.error.slice(0, 120));
     }
     case "run":
       if (decision.rule) deps.broker.recordRuleApproval(run.threadID, run.turnID, input.tool, input.callID, input.args, decision.rule);

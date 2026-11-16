@@ -104,8 +104,8 @@ describe("a note with a record is still a closure note", () => {
     expect(isClosureNote("user", text, "closure")).toBe(false);
     expect(isClosureNote("system", `${"[Check the inbox.]"}\n${text}`)).toBe(false);
     expect(blockTranscript([{ role: "system", text, kind: "closure" }])).toContain('write_file "notes.txt" (ok)');
-    // Notes stored before records existed still count.
-    expect(isClosureNote("system", INTERRUPTED_REQUEST_NOTE)).toBe(true);
+    // Notes stored before records existed no longer count: the words alone do not make a closure note.
+    expect(isClosureNote("system", INTERRUPTED_REQUEST_NOTE)).toBe(false);
   });
 });
 

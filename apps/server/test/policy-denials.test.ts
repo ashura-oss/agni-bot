@@ -92,6 +92,13 @@ describe("a denied delete covers the file by every other route", () => {
     }
   });
 
+  test("the owner sees one quiet line saying what was blocked and why, not a card", async () => {
+    answers.push("reject");
+    await ask(rig.run, "bash", { command: "rm report.txt" });
+    const result = await ask(rig.run, "write_file", { path: "report.txt", content: "x" });
+    expect(!result.go && result.preview).toMatch(/^Blocked: .+ tried to overwrite a file after you said no to deleting it\.$/);
+  });
+
   test("reading the file is still allowed: a no to deleting is not a no to reading", async () => {
     answers.push("reject");
     await ask(rig.run, "bash", { command: "rm report.txt" });

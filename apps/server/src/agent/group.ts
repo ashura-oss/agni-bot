@@ -13,7 +13,7 @@
 import type { Database } from "bun:sqlite";
 import { resolveAgentMention } from "./mentions";
 import { resolvePersona } from "./personas";
-import { DEFAULT_VISIBILITY, redactForCaller } from "./visibility";
+import { MISSING_AGENT_VISIBILITY, redactForCaller } from "./visibility";
 import { channelAgentIDs, type ChannelRow } from "../stores/channels";
 import type { TaintSource } from "../policy/types";
 
@@ -54,7 +54,7 @@ export function groupHistory(db: Database, channelID: string, callerAgentID: str
       continue;
     }
     if (row.from_id === callerAgentID) continue;
-    const visibility = resolvePersona(db, row.from_id)?.visibility ?? DEFAULT_VISIBILITY;
+    const visibility = resolvePersona(db, row.from_id)?.visibility ?? MISSING_AGENT_VISIBILITY;
     const seen = redactForCaller(row.text, row.from_id, callerAgentID, visibility);
     const name = row.name?.trim() || row.from_id;
     lines.push(seen.redacted || !seen.text ? `${name}: (replied; private)` : `${name}: ${clip(seen.text)}`);

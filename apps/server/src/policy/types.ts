@@ -182,7 +182,7 @@ export type Decision =
   /** Run it. `via` says what let it through: nothing needed asking, or a stored rule. */
   | { action: "run"; via: "free" | "rule"; reason: string; assessment: CallAssessment; ruleID?: string; rule?: RuleRef }
   /** Do not run it; the model gets `error` as the tool result. */
-  | { action: "refuse"; code: RefusalCode; error: string; reason: string }
+  | { action: "refuse"; code: RefusalCode; error: string; reason: string; /** One quiet line for the owner's activity strip, when the refusal is theirs to know about. */ preview?: string }
   /** Ask the owner with a card; the call runs only on an allowing answer. */
   | { action: "ask"; reason: string; assessment: CallAssessment; card: ApprovalCard }
   /** End the whole run, not just this call. */

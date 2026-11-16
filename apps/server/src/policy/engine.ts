@@ -52,7 +52,7 @@ export function decide(run: RunContext, input: PolicyInput, options: DecideOptio
 
 // ---------------------------------------------------------------------------
 
-const refuse = (code: RefusalCode, error: string, reason: string): Decision => ({ action: "refuse", code, error, reason });
+const refuse = (code: RefusalCode, error: string, reason: string): Extract<Decision, { action: "refuse" }> => ({ action: "refuse", code, error, reason });
 
 function judge(run: RunContext, input: PolicyInput, record: boolean): Decision {
   const { tool, args } = input;
@@ -160,12 +160,20 @@ function deniedEarlier(run: RunContext, tool: string, args: Record<string, unkno
       reason: `refused ${attempts} times: ${hit.operation} on ${hit.kind}`,
     };
   }
-  return refuse(
-    "denied_resource",
-    `Refused: the owner said no to ${OPERATION_PHRASE[hit.operation]} ${entry(what, 200)} earlier in this task. This covers every tool and every route to it, for the rest of this task. Do not try again. Tell the owner what you were trying to do and ask how to continue.`,
-    `owner said no to ${hit.operation} on ${hit.kind}`,
-  );
+  const bot = run.services.botName?.trim() || "A bot";
+  return {
+    ...refuse(
+      "denied_resource",
+      `Refused: the owner said no to ${OPERATION_PHRASE[hit.operation]} ${entry(what, 200)} earlier in this task. This covers every tool and every route to it, for the rest of this task. Do not try again. Tell the owner what you were trying to do and ask how to continue.`,
+      `owner said no to ${hit.operation} on ${hit.kind}`,
+    ),
+    preview: `Blocked: ${entry(bot, 60)} tried to ${verbFor(tool, args, assessment, false)} after you said no to ${DENIED_GERUND[hit.operation]} it.`,
+  };
 }
+
+const DENIED_GERUND: Record<Operation, string> = {
+  delete: "deleting", change: "changing", send: "sending", read: "reading", run: "running",
+};
 
 const OPERATION_PHRASE: Record<Operation, string> = {
   delete: "deleting", change: "changing", send: "sending to", read: "reading", run: "running a command on",

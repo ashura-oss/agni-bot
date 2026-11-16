@@ -15,7 +15,7 @@ import type { Database } from "bun:sqlite";
 import type { ServerFrameBody } from "@agni/protocol";
 import { runTaskTurn, isThreadActive, type TaskTurnSettings } from "../agent/task-loop";
 import { canonicalAgentID, defaultResolvedPersona, getPersona, resolvePersona, type ResolvedPersona } from "../agent/personas";
-import { DEFAULT_VISIBILITY, RESULT_MAX_CHARS, redactResultForCaller } from "../agent/visibility";
+import { DEFAULT_VISIBILITY, MISSING_AGENT_VISIBILITY, RESULT_MAX_CHARS, redactResultForCaller } from "../agent/visibility";
 import { rootGuardrail } from "../agent/guardrails";
 import { asksWhenClean } from "../policy/metadata";
 import { unpackTaint } from "../policy/context";
@@ -534,7 +534,7 @@ function wakeParent(deps: TurnJobDeps, taskID: string, summary: string, parentDe
   const parentAgentID = task.parent_agent_id;
   if (!parentThreadID || !parentAgentID) return; // nobody to wake
   const owner = task.owner_agent_id ?? "";
-  const visibility = owner ? resolvePersona(deps.db, owner)?.visibility ?? DEFAULT_VISIBILITY : DEFAULT_VISIBILITY;
+  const visibility = owner ? resolvePersona(deps.db, owner)?.visibility ?? MISSING_AGENT_VISIBILITY : DEFAULT_VISIBILITY;
   const visible = redactResultForCaller(summary, owner, parentAgentID, visibility);
   const wakeKey = `wake:${parentThreadID}`;
   const item = {
