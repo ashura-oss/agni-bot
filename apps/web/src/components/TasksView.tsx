@@ -3,6 +3,24 @@ import { CalendarDays, ChevronLeft, ChevronRight, Check, Plus, RefreshCw, X, Mic
 import { format, type TaskInfo } from "@agni/client";
 import { useAppModel, useAppSnapshot } from "../state/use-app-model";
 
+/**
+ * Escape closes the sheet that is open, not the whole Tasks screen. RootView closes the screen from a
+ * window listener; this runs first, on the document, and stops the event there.
+ */
+function useEscapeClose(onClose: () => void) {
+  const latest = useRef(onClose);
+  latest.current = onClose;
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      latest.current();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, []);
+}
+
 export function TasksView({ onToggleSidebar, sidebarCollapsed = false }: { onToggleSidebar?: () => void; sidebarCollapsed?: boolean }) {
   const model = useAppModel();
   const snapshot = useAppSnapshot();
@@ -184,6 +202,7 @@ function TaskComposer({ parentTaskID, onClose }: { parentTaskID: string | null; 
   const recordingChunksRef = useRef<Blob[]>([]);
   type Recognition = { lang: string; continuous: boolean; interimResults: boolean; onresult: ((event: { results: ArrayLike<ArrayLike<{ transcript: string }>>; resultIndex?: number }) => void) | null; onend: (() => void) | null; start: () => void; stop: () => void };
   const recognitionRef = useRef<Recognition | null>(null);
+  useEscapeClose(onClose);
   useEffect(() => () => {
     recognitionRef.current?.stop();
     recorderRef.current?.stop();
@@ -263,6 +282,7 @@ function TaskComposer({ parentTaskID, onClose }: { parentTaskID: string | null; 
 
 function ActivitySheet({ task, onClose }: { task: TaskInfo; onClose: () => void }) {
   const snapshot = useAppSnapshot();
+  useEscapeClose(onClose);
   const entries = snapshot.taskActivity?.taskID === task.id ? snapshot.taskActivity.entries : [];
   return <div className="task-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="task-activity-sheet"><div className="task-composer-heading"><h2>Task activity</h2><button type="button" className="icon-btn" aria-label="Close activity" onClick={onClose}><X size={18} /></button></div><p className="task-activity-title">{task.title}</p>{entries.length ? entries.map((entry) => <div className="task-activity-entry" key={entry.id}><span><strong>{entry.actor}</strong> {entry.action}{entry.detail ? ` · ${entry.detail}` : ""}</span><time>{format.stamp(format.parseISO(entry.createdAt) ?? new Date())}</time></div>) : <div className="tasks-empty-inline">No activity recorded yet.</div>}</section></div>;
 }
@@ -282,6 +302,7 @@ function TaskDetailSheet({ task, onClose, onActivity, onSubtask }: { task: TaskI
   const [reminder, setReminder] = useState(dateInput(task.reminderAt));
   const [labels, setLabels] = useState((task.labels ?? []).join(", "));
   const children = snapshot.tasks.filter((item) => item.parentTaskID === task.id);
+  useEscapeClose(onClose);
   const save = () => {
     const date = (value: string) => value ? new Date(value) : null;
     model.editTask(task, { title, description: description || null, listID, priority, workflowStatus, progressNote: progressNote || null, dueAt: date(due), deadlineAt: date(deadline), reminderAt: date(reminder), labels: labels.split(",").map((label) => label.trim().replace(/^#/, "")).filter(Boolean) });

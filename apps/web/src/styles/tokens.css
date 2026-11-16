@@ -61,3 +61,15 @@
   /* Arrivals: the answer rising into place when it lands. */
   --motion-enter: 520ms cubic-bezier(0.16, 1, 0.3, 1);
 }
+
+/* The Tasks rules in app.css read --accent and --border, which no theme ever
+   defined: the phone button, the calendar's today circle, the check hover and
+   the detail sheet borders were drawn with an invalid value. They are meant to
+   be the accent and the hairline. Defined here, on the page that reads them
+   (not on .app), so the sidebar's own dormant rules stay as they are. The
+   values resolve where this rule applies, so the appearance system's inline
+   --ember and --hairline on .app still drive them. */
+.tasks-page {
+  --accent: var(--ember);
+  --border: var(--hairline);
+}
