@@ -21,7 +21,8 @@ export type NormalizedArgs =
  * always tolerated these, so refusing them would break calls that worked:
  *   - null for an optional field means "not given" (the field is dropped);
  *   - a numeric string where a number is wanted becomes the number;
- *   - a number outside minimum/maximum is clamped to the bound (a note says so);
+ *   - a size-like number (`CLAMPED_FIELDS`) outside minimum/maximum is clamped
+ *     to the bound (a note says so); any other out-of-range number is refused;
  *   - one string where an array of strings is wanted becomes a one-item array.
  * A missing or null required field, a value of the wrong type that cannot be
  * repaired, an enum miss and a length breach are still refused.
@@ -40,6 +41,15 @@ export function validateArgs(schema: unknown, args: unknown): string | null {
   return result.ok ? null : result.error;
 }
 
+/**
+ * The only fields whose out-of-range numbers are clamped: knobs for how much
+ * to return or how long to wait, where "the most allowed" is what the caller
+ * meant. Any other number out of range is refused: moving an id, a score or an
+ * offset to the nearest bound would run something the model never asked for.
+ */
+export const CLAMPED_FIELDS = new Set([
+  "limit", "count", "maxResults", "maxChars", "max", "topK", "depth", "timeoutMs", "pageSize", "perPage", "maxItems", "maxTokens",
+]);
 const NUMERIC = /^[-+]?\d+(\.\d+)?([eE][-+]?\d+)?$/;
 
 function repair(schema: Schema, value: unknown, path: string, notes: string[]): unknown {
@@ -48,7 +58,8 @@ function repair(schema: Schema, value: unknown, path: string, notes: string[]): 
     const text = value.trim();
     if (NUMERIC.test(text)) value = Number(text);
   }
-  if (typeof value === "number" && Number.isFinite(value) && types && (types.includes("number") || (types.includes("integer") && Number.isInteger(value)))) {
+  const field = path.replace(/\[\d+\]$/, "").split(".").pop() ?? "";
+  if (CLAMPED_FIELDS.has(field) && typeof value === "number" && Number.isFinite(value) && types && (types.includes("number") || (types.includes("integer") && Number.isInteger(value)))) {
     if (typeof schema.minimum === "number" && value < schema.minimum) {
       notes.push(`"${path}" was ${value}; used the minimum, ${schema.minimum}`);
       return schema.minimum;

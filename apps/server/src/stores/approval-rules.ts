@@ -27,12 +27,12 @@
  *                   remembered, so an event id alone never allows a new edit.
  *
  * Some calls are never remembered: `run_privileged` (its approval is the point
- * of the tool) and a bash command that runs code (`runsCode`: an interpreter,
- * shell, script, or build/test tool, which runs files whose content may have
- * changed since the owner looked, so "always" would be a shell without
- * asking). `approvalTarget` returns null for those, and for a call whose
- * target cannot be worked out; null means "ask every time", and the card does
- * not offer "always".
+ * of the tool), and any bash command that is not made only of plain,
+ * non-executing programs (`isPlainCommand`, an allowlist: "always" on a command
+ * that runs code would be a shell without asking, because the files it runs can
+ * change after the owner looked). `approvalTarget` returns null for those, and
+ * for a call whose target cannot be worked out; null means "ask every time",
+ * and the card does not offer "always".
  */
 import type { Database } from "bun:sqlite";
 import { resolve } from "node:path";
@@ -80,7 +80,7 @@ export function approvalTarget(toolName: string, args: Record<string, unknown>):
   switch (toolName) {
     case "bash": {
       const command = typeof args.command === "string" ? args.command.replace(/\r\n/g, "\n").trim() : "";
-      if (!command || runsCode(command)) return null;
+      if (!command || !isPlainCommand(command)) return null;
       if (typeof args.cwd === "string" && args.cwd.trim()) return `cd ${shellQuote(resolve(args.cwd))} && ${command}`;
       return command;
     }
@@ -147,30 +147,45 @@ export function revokeApprovalRule(db: Database, id: string): boolean {
   return result.changes > 0;
 }
 
-/** Programs that run code from files or arguments: interpreters, shells, wrappers, and build/test tools. */
-const CODE_RUNNERS = new Set([
-  "node", "bun", "bunx", "deno", "tsx", "ts-node", "npm", "npx", "pnpm", "yarn", "pip", "pip3", "uv", "uvx", "pytest", "tox",
-  "sh", "bash", "zsh", "fish", "dash", "ksh", "csh", "tcsh", "pwsh", "powershell", "cmd", "wsl", "osascript",
-  "make", "cmake", "ninja", "gradle", "mvn", "ant", "cargo", "rustc", "go", "java", "javac", "dotnet", "ruby", "perl", "php", "lua", "rscript",
-  "awk", "gawk", "nawk", "find", "xargs", "env", "sudo", "doas", "nohup", "time", "timeout", "exec", "eval", "source", ".", "command", "builtin", "busybox", "start", "call",
+/** Programs that only touch files or print, and never run what they are given. */
+const PLAIN_PROGRAMS = new Set([
+  "ls", "dir", "cat", "type", "head", "tail", "wc", "pwd", "mkdir", "cp", "copy", "mv", "move", "rm", "del", "touch", "echo",
 ]);
+/** Read-only git subcommands, and the flags that make even those run a configured program. */
+const GIT_READ_ONLY = new Set(["status", "log", "diff", "show"]);
+const GIT_RUNS_PROGRAMS = /^(-c|--ext-diff|--textconv|--output|--exec|--upload-pack|--receive-pack|--config|--paginate|-p$)/;
 
 /**
- * True when any simple command in `command` (split on `;`, `&`, `|`, newlines,
- * parentheses, backticks and braces) starts with a code runner or with a path.
- * Over-matching only means the owner is asked again, which is the safe error.
+ * An allowlist, not a denylist: "always" may be remembered for a bash command
+ * only when every simple command in it is a plain, non-executing program. A
+ * remembered command is re-run on a match without a card, so anything that
+ * could run code (an interpreter nobody listed, a shell keyword, a script a
+ * path names, a variable that expands to a program, a redirect that creates
+ * a script) must ask every time.
+ *
+ * The whole command may not contain `$`, a backtick, parentheses, braces,
+ * `<`, `>` or `!`: no expansion, no substitution, no subshell, no redirection.
+ * It is split on `;`, `&`, `|` and newlines, and each segment must start with a
+ * bare program name from `PLAIN_PROGRAMS`, or `git` with a read-only
+ * subcommand and no flag that names a helper program. Quotes, backslash-escaped
+ * names, `.exe` suffixes, paths and `VAR=x` prefixes fail the bare-name test.
  */
-function runsCode(command: string): boolean {
-  for (const segment of command.split(/[;&|\n\r()`{}]|\$\(/)) {
+function isPlainCommand(command: string): boolean {
+  if (/[$`(){}<>!]/.test(command)) return false;
+  for (const segment of command.split(/[;&|\n\r]/)) {
     const words = segment.trim().split(/\s+/).filter(Boolean);
-    const first = words.find((word) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word));
-    if (!first) continue;
-    const word = first.replace(/^['"]+|['"]+$/g, "");
-    if (/[\\/]/.test(word) || word.startsWith("~") || (word.startsWith(".") && word !== ".")) return true;
-    const name = word.toLowerCase().replace(/\.(exe|cmd|bat|com|ps1)$/, "");
-    if (CODE_RUNNERS.has(name) || /^(python|pypy)[\d.]*$/.test(name)) return true;
+    if (words.length === 0) continue;
+    const program = words[0]!;
+    if (!/^[A-Za-z]+$/.test(program)) return false;
+    const name = program; // exact: "LS" is not a program this list vouches for
+    if (name === "git") {
+      if (!GIT_READ_ONLY.has(words[1] ?? "")) return false;
+      if (words.slice(2).some((word) => GIT_RUNS_PROGRAMS.test(word))) return false;
+    } else if (!PLAIN_PROGRAMS.has(name)) {
+      return false;
+    }
   }
-  return false;
+  return true;
 }
 
 function normaliseRecipient(entry: string): string {

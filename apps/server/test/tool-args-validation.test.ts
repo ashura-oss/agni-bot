@@ -111,12 +111,12 @@ describe("the registry validates before the handler", () => {
     const registry = new ToolRegistry();
     registry.register({
       name: "demo", description: "d", kind: "static", timeoutMs: 1000,
-      schema: { type: "object", properties: { n: { type: "integer", maximum: 2 } }, required: ["n"] },
+      schema: { type: "object", properties: { limit: { type: "integer", maximum: 2 } }, required: ["limit"] },
       handler: async () => null,
     });
-    expect(registry.validateArgs("demo", { n: "many" })).toBe('invalid arguments: "n" must be an integer');
-    expect(registry.validateArgs("demo", {})).toBe('invalid arguments: "n" is required');
-    expect(registry.validateArgs("demo", { n: 3 })).toBeNull(); // out of range is clamped, not refused
+    expect(registry.validateArgs("demo", { limit: "many" })).toBe('invalid arguments: "limit" must be an integer');
+    expect(registry.validateArgs("demo", {})).toBe('invalid arguments: "limit" is required');
+    expect(registry.validateArgs("demo", { limit: 3 })).toBeNull(); // out of range is clamped, not refused
     expect(registry.validateArgs("nope", {})).toBeNull();
   });
 });

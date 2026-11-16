@@ -65,6 +65,17 @@ describe("tolerant arguments", () => {
     expect(received(await call({ to: ["a@b.c", "d@e.f"], subject: "s", body: "b" })).to).toEqual(["a@b.c", "d@e.f"]);
   });
 
+  test("only size-like fields are clamped: an out-of-range id is refused, never moved to another item", async () => {
+    // mail_read uid 0 must not quietly read message 1.
+    await expect(probe("mail_read")({ uid: 0 })).rejects.toThrow('"uid" must be at least 1 (got 0)');
+    await expect(probe("remember_fact")({ fact: "x", importance: 5 })).rejects.toThrow('"importance" must be at most 1 (got 5)');
+    await expect(probe("read_file")({ path: "a", offset: -3 })).rejects.toThrow('"offset" must be at least 0 (got -3)');
+    // Size knobs still clamp.
+    expect(received(await probe("bash")({ command: "ls", timeoutMs: 999_999 }))).toEqual({ command: "ls", timeoutMs: 120_000 });
+    expect(received(await probe("deep_research")({ query: "x", depth: 9 }))).toEqual({ query: "x", depth: 5 });
+    expect(received(await probe("grep")({ pattern: "x", maxResults: 500 }))).toEqual({ pattern: "x", maxResults: 20 });
+  });
+
   test("a required field that is missing or null is still refused", async () => {
     const call = probe("web_fetch");
     await expect(call({})).rejects.toThrow('"url" is required');
