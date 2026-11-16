@@ -55,7 +55,7 @@ function cannotSecureDirectory(dir: string, cause: unknown): PrivateFileError {
  * the contents, and rename it into place. A failure leaves nothing at `path`
  * and no temporary file behind. The ACL and mode travel with the rename.
  */
-export function writePrivateFileSync(path: string, contents: string, temporaryPath = `${path}.${randomUUID()}.tmp`): void {
+export function writePrivateFileSync(path: string, contents: string | Uint8Array, temporaryPath = `${path}.${randomUUID()}.tmp`): void {
   writeFileSync(temporaryPath, "", { mode: 0o600, flag: "wx" });
   try {
     try {
@@ -71,7 +71,7 @@ export function writePrivateFileSync(path: string, contents: string, temporaryPa
   }
 }
 
-export async function writePrivateFile(path: string, contents: string, temporaryPath = `${path}.${randomUUID()}.tmp`): Promise<void> {
+export async function writePrivateFile(path: string, contents: string | Uint8Array, temporaryPath = `${path}.${randomUUID()}.tmp`): Promise<void> {
   await writeFile(temporaryPath, "", { mode: 0o600, flag: "wx" });
   try {
     try {

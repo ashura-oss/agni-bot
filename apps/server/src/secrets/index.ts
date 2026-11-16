@@ -19,3 +19,7 @@ export {
   setActiveVault,
   tryGetVault,
 } from "./state";
+export { createBunSecretsKeyStore } from "./bun-secrets";
+export { createPassphraseKeyStore, passphraseFilePath } from "./passphrase";
+export { selectKeyStore } from "./select";
+export { secretsMode, unlockVault, vaultExists, vaultStatus } from "./unlock";
