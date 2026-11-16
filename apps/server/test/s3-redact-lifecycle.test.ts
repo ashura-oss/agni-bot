@@ -235,6 +235,22 @@ describe("plugins.json", () => {
     expect(masked("1//file-refresh-1-zzzz")).toBe(true);
     expect(masked("ya29.file-access-2-zzzz")).toBe(true);
   });
+
+  test("a save that fails leaves the queue of replaced values as it was, even when it is full", async () => {
+    const path = join(home, "plugins.json");
+    await unlockVault({ home, create: true });
+    process.env.AGNI_SECRETS_MODE = "vault";
+    const rounds = RETIRED_PER_SLOT + 3;
+    for (let i = 1; i <= rounds; i += 1) savePluginsFile(path, config(i));
+    const oldest = rounds - RETIRED_PER_SLOT; // the oldest value the full queue still holds
+    expect(masked(`ya29.file-access-${oldest}-zzzz`)).toBe(true);
+    expect(masked(`ya29.file-access-${oldest - 1}-zzzz`)).toBe(false);
+    lockVault();
+    expect(() => savePluginsFile(path, config(rounds + 1))).toThrow();
+    expect(masked(`ya29.file-access-${oldest}-zzzz`)).toBe(true); // a release that ran before the write would have pushed it out
+    expect(masked(`ya29.file-access-${rounds}-zzzz`)).toBe(true);
+    expect(masked(`ya29.file-access-${rounds + 1}-zzzz`)).toBe(true);
+  });
 });
 
 // --- the ChatGPT accounts ----------------------------------------------------------------
@@ -297,6 +313,44 @@ describe("ChatGPT accounts", () => {
     try {
       await expect(auth.accessToken()).rejects.toThrow();
       for (const value of [OLD_ACCESS, OLD_REFRESH, NEW_ACCESS, NEW_REFRESH]) expect(masked(value)).toBe(true);
+    } finally {
+      auth.stop();
+    }
+  });
+
+  test("a refresh whose save fails leaves the queue of replaced tokens as it was, even when it is full", async () => {
+    let clock = Date.now();
+    let round = 0;
+    const path = seed(clock + 30_000);
+    const auth = new ChatGPTAuth({
+      filePath: path,
+      now: () => clock,
+      fetchFn: (async () => {
+        round += 1;
+        return new Response(
+          JSON.stringify({ access_token: `chatgpt-lifecycle-access-r${round}-zz`, refresh_token: `chatgpt-lifecycle-refresh-r${round}-zz`, token_type: "bearer", expires_in: 3600, scope: "resource.invoke chatgpt.tokens.use.direct" }),
+          { headers: { "content-type": "application/json" } },
+        );
+      }) as unknown as typeof fetch,
+    });
+    try {
+      // Each refresh replaces an access and a refresh token, so this fills the queue.
+      const rounds = RETIRED_PER_SLOT / 2 + 3;
+      for (let i = 1; i <= rounds; i += 1) {
+        clock += 2 * HOUR;
+        await auth.accessToken();
+      }
+      const oldest = `chatgpt-lifecycle-access-r${rounds - RETIRED_PER_SLOT / 2}-zz`; // the oldest access token the full queue still holds
+      expect(masked(oldest)).toBe(true);
+      expect(masked(`chatgpt-lifecycle-access-r${rounds - RETIRED_PER_SLOT / 2 - 1}-zz`)).toBe(false);
+      await unlockVault({ home, create: true });
+      process.env.AGNI_SECRETS_MODE = "vault";
+      lockVault(); // the next save is refused
+      clock += 2 * HOUR;
+      await expect(auth.accessToken()).rejects.toThrow();
+      expect(masked(oldest)).toBe(true); // a release that ran before the write would have pushed it out
+      expect(masked(`chatgpt-lifecycle-access-r${rounds}-zz`)).toBe(true);
+      expect(masked(`chatgpt-lifecycle-access-r${rounds + 1}-zz`)).toBe(true);
     } finally {
       auth.stop();
     }
