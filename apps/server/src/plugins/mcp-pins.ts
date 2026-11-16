@@ -5,7 +5,7 @@
  * tool's definition (name, description, input schema, annotations) is hashed and
  * stored. Afterwards a tool whose hash differs, or which is new, is not offered
  * to any bot until the owner approves it with `agni mcp approve`, which shows
- * the change first. A tool the server stops listing loses its pin.
+ * the change first. A tool missing from a non-empty listing loses its pin.
  *
  * Everything here works on a bun:sqlite Database holding migration 60's tables.
  * The hub, the plugin service and the CLI share it, so an approval made in the
@@ -80,7 +80,8 @@ export type PinVerdict = "approved" | "pending";
  * The first connect of a plugin is trusted as it stands. After that a tool is
  * `approved` only when its hash matches the approved pin; a changed or new tool
  * is `pending` (and its latest offered definition is stored for the diff);
- * a pinned tool the server no longer lists loses its pins.
+ * a pinned tool the server no longer lists loses its pins, but only when the
+ * listing is not empty (an empty one never drops anything).
  */
 export function reconcilePins(db: Database, plugin: string, offered: PinCandidate[], now: () => string = () => new Date().toISOString()): Map<string, PinVerdict> {
   const verdicts = new Map<string, PinVerdict>();
@@ -97,8 +98,12 @@ export function reconcilePins(db: Database, plugin: string, offered: PinCandidat
     );
     const listed = new Set(offered.map((item) => item.tool));
     // Removed tools drop every pin they had, so a tool that comes back is new and needs approval.
-    for (const known of db.query<{ tool_name: string }, [string]>("SELECT DISTINCT tool_name FROM mcp_tool_pins WHERE plugin_id = ?").all(plugin)) {
-      if (!listed.has(known.tool_name)) db.run("DELETE FROM mcp_tool_pins WHERE plugin_id = ? AND tool_name = ?", [plugin, known.tool_name]);
+    // Only on a non-empty listing: a server that is still starting may list nothing, and that is
+    // not the server removing its tools (it would cost the owner every approval for no reason).
+    if (offered.length > 0) {
+      for (const known of db.query<{ tool_name: string }, [string]>("SELECT DISTINCT tool_name FROM mcp_tool_pins WHERE plugin_id = ?").all(plugin)) {
+        if (!listed.has(known.tool_name)) db.run("DELETE FROM mcp_tool_pins WHERE plugin_id = ? AND tool_name = ?", [plugin, known.tool_name]);
+      }
     }
     for (const item of offered) {
       if (!trusted) {

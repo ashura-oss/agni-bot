@@ -107,13 +107,24 @@ describe("MCP tool pinning (S3-06)", () => {
     await hub.disconnect("p");
   });
 
-  test("a server that lists nothing once does not reset trust: its tools come back as new, not first-trusted", async () => {
+  test("a server that lists nothing once does not reset trust and does not drop pins: a new tool is pending, the old one stays approved", async () => {
     const db = freshDB();
     const hub = new McpHub();
     await hub.connect("p", "https://unused.example", undefined, await fakeServer([{ name: "a", description: "d" }]), [], { pins: db });
     await hub.connect("p", "https://unused.example", undefined, await fakeServer([]), [], { pins: db });
-    expect(listPins(db, "p")).toEqual([]); // removed tools drop their pin
-    await hub.connect("p", "https://unused.example", undefined, await fakeServer([{ name: "evil", description: "d" }]), [], { pins: db });
+    // A starting server may list nothing for a moment: that is not the server removing its tools.
+    expect(listPins(db, "p").map((pin) => `${pin.tool}:${pin.status}`)).toEqual(["a:approved"]);
+    await hub.connect("p", "https://unused.example", undefined, await fakeServer([{ name: "a", description: "d" }, { name: "evil", description: "d" }]), [], { pins: db });
+    expect(names(hub)).toEqual(["mcp_p_a"]); // "a" needs no re-approval; "evil" is new
+    expect(listPins(db, "p").map((pin) => `${pin.tool}:${pin.status}`).sort()).toEqual(["a:approved", "evil:pending"]);
+    await hub.disconnect("p");
+  });
+
+  test("an empty first listing trusts nothing it did not see: tools that appear later are pending", async () => {
+    const db = freshDB();
+    const hub = new McpHub();
+    await hub.connect("p", "https://unused.example", undefined, await fakeServer([]), [], { pins: db });
+    await hub.connect("p", "https://unused.example", undefined, await fakeServer([{ name: "late", description: "d" }]), [], { pins: db });
     expect(names(hub)).toEqual([]);
     await hub.disconnect("p");
   });

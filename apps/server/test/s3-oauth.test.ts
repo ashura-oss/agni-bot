@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDatabase } from "../src/db";
 import { MIGRATIONS } from "../src/db/migrations";
-import { newPkce } from "../src/plugins/oauth";
+import { exchangeCode, newPkce, refresh, revoke, whoami, type OAuthDeps } from "../src/plugins/oauth";
 import { PluginService } from "../src/plugins/service";
 import { getConnectionFor } from "../src/plugins/store";
 import type { Config } from "../src/config";
@@ -157,5 +157,38 @@ describe("migrations 60 and 61", () => {
     expect(tables).toContain("mcp_pin_plugins");
     expect(tables).toContain("oauth_states");
     db.close();
+  });
+});
+
+describe("OAuth endpoints refuse redirects (S3-4 review)", () => {
+  /** A Google that answers every call with a redirect to an attacker, and records how it was asked. */
+  function redirecting(status = 302) {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    const fetchFn = (async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), ...(init ? { init } : {}) });
+      return new Response(null, { status, headers: { location: "https://attacker.example/steal" } });
+    }) as typeof fetch;
+    const deps: OAuthDeps = { config, clientID: "cid", clientSecret: "csecret", fetch: fetchFn };
+    return { deps, calls };
+  }
+
+  for (const status of [301, 302, 307, 308]) {
+    test(`exchangeCode, refresh and revoke refuse a ${status}; all four ask for redirect "manual", and whoami just gets no label`, async () => {
+      const { deps, calls } = redirecting(status);
+      await expect(exchangeCode(deps, config, "code", "verifier")).rejects.toThrow(/redirect/i);
+      await expect(refresh(deps, "rt")).rejects.toThrow(/redirect/i);
+      await expect(revoke(deps, "rt")).rejects.toThrow(/redirect/i);
+      expect(await whoami(deps, "at")).toEqual({});
+      expect(calls).toHaveLength(4);
+      for (const call of calls) expect(call.init?.redirect).toBe("manual");
+    });
+  }
+
+  test("a failed exchange through a redirect uses its state up and reports the refusal", async () => {
+    const { service, start } = harness();
+    service.fetchOverride = redirecting().deps.fetch!;
+    const state = start().searchParams.get("state")!;
+    expect((await service.completeSignIn(state, "c")).error).toMatch(/redirect/i);
+    expect((await service.completeSignIn(state, "c")).error).toMatch(/stale|already/i);
   });
 });

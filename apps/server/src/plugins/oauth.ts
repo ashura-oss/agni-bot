@@ -27,6 +27,21 @@ export interface TokenSet {
   expires_at?: number;
 }
 
+/**
+ * Every call that sends a secret to a Google endpoint (token, refresh, revoke) goes through here. Redirects are not followed and
+ * not accepted: these endpoints never redirect, and a followed one would carry the
+ * client secret, the code verifier, a refresh token or a bearer token to a host the
+ * owner never chose. The Location is not repeated in the error.
+ */
+async function send(deps: Pick<OAuthDeps, "fetch">, url: string, init: RequestInit): Promise<Response> {
+  const response = await (deps.fetch ?? fetch)(url, { ...init, redirect: "manual" });
+  if (response.status >= 300 && response.status < 400) {
+    await response.body?.cancel().catch(() => {});
+    throw new Error(`Google answered with a redirect (HTTP ${response.status}); redirects are refused`);
+  }
+  return response;
+}
+
 export function isConfigured(deps: Pick<OAuthDeps, "clientID" | "clientSecret">): boolean {
   return Boolean(deps.clientID && deps.clientSecret);
 }
@@ -61,7 +76,7 @@ export function authorizeURL(deps: OAuthDeps, config: Config, scopes: string[], 
 }
 
 export async function exchangeCode(deps: OAuthDeps, config: Config, code: string, codeVerifier: string): Promise<TokenSet> {
-  const response = await (deps.fetch ?? fetch)(TOKEN_ENDPOINT, {
+  const response = await send(deps, TOKEN_ENDPOINT, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
@@ -89,7 +104,7 @@ export async function refresh(
   deps: OAuthDeps,
   refreshToken: string,
 ): Promise<TokenSet> {
-  const response = await (deps.fetch ?? fetch)(TOKEN_ENDPOINT, {
+  const response = await send(deps, TOKEN_ENDPOINT, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
@@ -112,7 +127,7 @@ export async function refresh(
 }
 
 export async function revoke(deps: OAuthDeps, token: string): Promise<boolean> {
-  const response = await (deps.fetch ?? fetch)(REVOKE_ENDPOINT, {
+  const response = await send(deps, REVOKE_ENDPOINT, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ token }),
@@ -124,8 +139,10 @@ export async function whoami(
   deps: OAuthDeps,
   accessToken: string,
 ): Promise<{ email?: string }> {
+  // The email is only a label: a redirect (never followed, it would carry the bearer token) just means no label.
   const response = await (deps.fetch ?? fetch)(USERINFO_ENDPOINT, {
     headers: { authorization: `Bearer ${accessToken}` },
+    redirect: "manual",
   });
   if (!response.ok) return {};
   const data = (await response.json().catch(() => ({}))) as { email?: string };
