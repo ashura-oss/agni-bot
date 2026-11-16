@@ -1,10 +1,20 @@
 /**
  * The plugin connection store: one durable row per catalog plugin bound to
- * one account. Tokens stay here, server-side only — clients never receive
- * them; the frame snapshot carries status, scopes, and policy, never secrets.
+ * one account. Tokens stay server-side only — clients never receive them; the
+ * frame snapshot carries status, scopes, and policy, never secrets.
+ *
+ * Where the tokens live depends on the secrets mode (S3-02):
+ *  - file mode: in the `tokens` column, as before;
+ *  - vault mode: in the vault (`plugin-token/<row id>`), and the row holds only
+ *    that name in `token_ref` (migration 62) with `tokens` empty, so the
+ *    database file carries no credential. A vault that is locked refuses the
+ *    write; nothing is ever written to the column instead.
+ * Read a row's tokens with `readConnectionTokens`, never from the column.
  */
 import type { Database } from "bun:sqlite";
 import type { PluginAccount } from "@agni/protocol";
+import { entryName, rememberSecrets, vaultForReads, vaultForWrites } from "../credentials/vault-mode";
+import { VaultError } from "../secrets/types";
 import { newID, nowISO } from "../util/ids";
 
 export interface PluginConnectionRow {
@@ -15,7 +25,10 @@ export interface PluginConnectionRow {
   account_label: string | null;
   scopes: string | null; // JSON array actually granted
   capabilities: string | null; // JSON policy snapshot at connect time
-  tokens: string | null; // JSON TokenBlob — server-side only
+  /** JSON TokenBlob, server-side only. Empty in vault mode: the tokens are in the vault, named by `token_ref`. */
+  tokens: string | null;
+  /** The vault entry holding this row's tokens (migration 62), or null when they are in `tokens`. */
+  token_ref: string | null;
   error: string | null;
   grant_started_at: string | null;
   connected_at: string | null;
@@ -31,13 +44,47 @@ export interface TokenBlob {
   expires_at?: number;
 }
 
-function parseTokens(row: PluginConnectionRow): TokenBlob {
-  if (!row.tokens) return {};
+function parseBlob(raw: string | null | undefined): TokenBlob {
+  if (!raw) return {};
   try {
-    return JSON.parse(row.tokens) as TokenBlob;
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as TokenBlob) : {};
   } catch {
     return {};
   }
+}
+
+/** The tokens of a connection, wherever they are kept. With the vault locked, a vault-held blob reads as empty. */
+export function readConnectionTokens(row: PluginConnectionRow): TokenBlob {
+  if (row.token_ref) return parseBlob(vaultForReads()?.get(row.token_ref));
+  return parseBlob(row.tokens);
+}
+
+/** True when the blob holds a credential, as opposed to only a pending sign-in's `state`. */
+function holdsCredential(tokens: TokenBlob): boolean {
+  return Boolean(tokens.access_token || tokens.refresh_token);
+}
+
+/**
+ * Save a connection's tokens. Vault mode: the blob goes to the vault and is read
+ * back before the column is touched; the row gets the reference and an empty
+ * `tokens`. A blob with no credential in it (an MCP connect) is not worth a vault
+ * entry and stays in the column. File mode: the column, as before.
+ */
+function saveTokens(db: Database, id: string, tokens: TokenBlob): { tokens: string | null; token_ref: string | null } {
+  const vault = vaultForWrites();
+  if (!vault || !holdsCredential(tokens)) {
+    // Any earlier vault copy of this row is now stale.
+    const old = getConnection(db, id)?.token_ref;
+    if (old) vault?.delete(old);
+    return { tokens: JSON.stringify(tokens), token_ref: null };
+  }
+  const name = entryName.connectionTokens(id);
+  const blob = JSON.stringify(tokens);
+  vault.set(name, blob);
+  if (vault.get(name) !== blob) throw new VaultError("WRITE_FAILED", "The connection's tokens could not be read back from the vault, so they were not saved.");
+  rememberSecrets(tokens.access_token, tokens.refresh_token);
+  return { tokens: null, token_ref: name };
 }
 
 export function getConnections(db: Database): PluginConnectionRow[] {
@@ -54,13 +101,23 @@ export function getConnectionFor(db: Database, pluginID: string, account: Plugin
     .get(pluginID, account) ?? null;
 }
 
-/** Find a pending row by OAuth state (survives daemon restarts mid-flow). */
+/**
+ * Find a pending row by OAuth state (survives daemon restarts mid-flow). An
+ * exact match on the `state` in the row's JSON, never a LIKE. Sprint 3's OAuth
+ * flow keeps its state in `oauth_states` (migration 61) and no longer calls
+ * this; delete it, `ConnectPatch.state` and the `state` written by
+ * `startPending` once that flow has merged.
+ */
 export function getConnectionByState(db: Database, state: string): PluginConnectionRow | null {
-  const rows = db
-    .query<PluginConnectionRow, [string]>("SELECT * FROM plugin_connections WHERE status = 'pending' AND tokens LIKE ?")
-    .all(`%"state":"${state}"%`);
-  // A LIKE can over-match; the exact check seals it.
-  return rows.find((row) => parseTokens(row).state === state) ?? null;
+  return (
+    db
+      .query<PluginConnectionRow, [string]>(
+        `SELECT * FROM plugin_connections
+          WHERE status = 'pending'
+            AND CASE WHEN json_valid(tokens) THEN json_extract(tokens, '$.state') END = ?`,
+      )
+      .get(state) ?? null
+  );
 }
 
 export interface ConnectPatch {
@@ -76,7 +133,8 @@ export interface ConnectPatch {
 /**
  * Create-or-reset the (plugin, account) connection as a fresh pending grant.
  * A previous pending row for the same pair is cleared, and a previous
- * connected grant's tokens are wiped — a re-connect always starts clean.
+ * connected grant's tokens are wiped (the vault copy too) — a re-connect
+ * always starts clean.
  */
 export function startPending(db: Database, patch: ConnectPatch): PluginConnectionRow {
   const existing = getConnectionFor(db, patch.pluginID, patch.account);
@@ -85,15 +143,16 @@ export function startPending(db: Database, patch: ConnectPatch): PluginConnectio
   const now = nowISO();
   db.run(
     `INSERT INTO plugin_connections
-       (id, plugin_id, account, status, account_label, scopes, capabilities, tokens,
+       (id, plugin_id, account, status, account_label, scopes, capabilities, tokens, token_ref,
         error, grant_started_at, connected_at, updated_at)
-     VALUES (?, ?, ?, 'pending', NULL, ?, ?, ?, NULL, ?, NULL, ?)
+     VALUES (?, ?, ?, 'pending', NULL, ?, ?, ?, NULL, NULL, ?, NULL, ?)
      ON CONFLICT(plugin_id, account) DO UPDATE SET
        status = 'pending',
        account_label = NULL,
        scopes = excluded.scopes,
        capabilities = excluded.capabilities,
        tokens = excluded.tokens,
+       token_ref = NULL,
        error = NULL,
        grant_started_at = excluded.grant_started_at,
        connected_at = NULL,
@@ -109,34 +168,54 @@ export function startPending(db: Database, patch: ConnectPatch): PluginConnectio
       now,
     ],
   );
+  if (existing?.token_ref) tryDeleteVaultEntry(existing.token_ref);
   return getConnection(db, id)!;
 }
 
 /** Persist exchanged tokens + signed-in identity, mark connected. */
 export function completeConnect(db: Database, id: string, tokens: Omit<TokenBlob, "state">, accountLabel: string): PluginConnectionRow {
+  const saved = saveTokens(db, id, tokens);
   db.run(
     `UPDATE plugin_connections SET
        status = 'connected',
        account_label = ?,
        tokens = ?,
+       token_ref = ?,
        error = NULL,
        connected_at = ?,
        updated_at = ?
      WHERE id = ?`,
-    [accountLabel, JSON.stringify(tokens), nowISO(), nowISO(), id],
+    [accountLabel, saved.tokens, saved.token_ref, nowISO(), nowISO(), id],
   );
   return getConnection(db, id)!;
 }
 
 export function updateTokens(db: Database, id: string, tokens: TokenBlob): void {
-  db.run("UPDATE plugin_connections SET tokens = ?, updated_at = ? WHERE id = ?", [JSON.stringify(tokens), nowISO(), id]);
+  const saved = saveTokens(db, id, tokens);
+  db.run("UPDATE plugin_connections SET tokens = ?, token_ref = ?, updated_at = ? WHERE id = ?", [saved.tokens, saved.token_ref, nowISO(), id]);
 }
 
 export function markError(db: Database, id: string, error: string): void {
   db.run("UPDATE plugin_connections SET status = 'error', error = ?, updated_at = ? WHERE id = ?", [error, nowISO(), id]);
 }
 
-/** Drop the row entirely; a disconnected plugin falls back to its catalog row. */
+/** Drop the row entirely, and its vault entry; a disconnected plugin falls back to its catalog row. */
 export function deleteConnection(db: Database, id: string): boolean {
-  return db.run("DELETE FROM plugin_connections WHERE id = ?", [id]).changes > 0;
+  const ref = getConnection(db, id)?.token_ref;
+  const deleted = db.run("DELETE FROM plugin_connections WHERE id = ?", [id]).changes > 0;
+  if (ref) tryDeleteVaultEntry(ref);
+  return deleted;
+}
+
+/**
+ * Remove a vault entry that no row names any more. A locked or unreadable vault
+ * leaves it: an orphaned entry is a stale encrypted copy, not a leak, and the
+ * caller's own change (a reconnect, a disconnect) must not fail because of it.
+ */
+function tryDeleteVaultEntry(name: string): void {
+  try {
+    vaultForReads()?.delete(name);
+  } catch {
+    // see above
+  }
 }
