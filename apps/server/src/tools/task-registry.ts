@@ -18,6 +18,8 @@ import { skillsList, skillsLoad, skillsResource } from "./skills";
 import { createMailTools } from "./mail";
 import { createGoogleTools } from "./google";
 import { mcpHub } from "../plugins/mcp";
+import { IMPLICIT_AGENT_TOOLS } from "../agent/personas";
+import { SCRATCH_TOOLS } from "./scratch-tool";
 import { createJobTools } from "./jobs-tool";
 import { createRoutineTools } from "./routines-tool";
 import type { MailAccountResolver } from "../plugins/credentials";
@@ -272,12 +274,21 @@ export const CORE_TOOLS = new Set([
   "tasks_list", "task_create", "handoff", "delegate_task",
 ]);
 
-/** An agent with this many tools or fewer gets every schema; deferring would cost a step. */
+/**
+ * An agent with this many tools or fewer gets every schema; deferring would
+ * cost a step. Only the tools the bot was given count: the ones every bot
+ * gets (`IMPLICIT_AGENT_TOOLS`, the delegated scratch tools) and names this
+ * turn does not register do not, so a new bot with the default toolset
+ * defers nothing.
+ */
 export const DEFER_TOOLS_ABOVE = 12;
+
+const SCRATCH_TOOL_NAMES: ReadonlySet<string> = new Set(SCRATCH_TOOLS);
 
 /** The tools of this allowlist that are listed by name instead of sent. */
 export function deferredTools(registry: ToolRegistry, allowlist: string[]): string[] {
-  if (allowlist.length <= DEFER_TOOLS_ABOVE) return [];
+  const counted = allowlist.filter((name) => registry.get(name) && !IMPLICIT_AGENT_TOOLS.has(name) && !SCRATCH_TOOL_NAMES.has(name));
+  if (counted.length <= DEFER_TOOLS_ABOVE) return [];
   return allowlist.filter((name) => !CORE_TOOLS.has(name) && registry.get(name));
 }
 
