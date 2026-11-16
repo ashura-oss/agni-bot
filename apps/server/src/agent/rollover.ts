@@ -13,6 +13,7 @@
  * the background job and not in front of the rotation: a pre-close sweep
  * would put a model call on the path of the user's next turn.
  */
+import { isClosureNote } from "./closure";
 import { extractJSONObject } from "../util/json";
 import type { Database } from "bun:sqlite";
 import { z } from "zod";
@@ -411,7 +412,10 @@ const SUMMARY_MESSAGE_CHARS = 1_200;
  * many messages it dropped.
  */
 export function blockTranscript(messages: Array<{ role: string; text: string }>): string {
-  const lines = messages.map((message, index) => `${index}: ${message.role}: ${capMessage(message.text)}`);
+  // System rows hold what the server fed a turn: a routine's instruction with its saved state, a peer's brief,
+  // wake text. That is untrusted text and not part of the conversation, so the summariser never reads it;
+  // only the fixed closure notes (which say a request was closed) go in.
+  const lines = messages.filter((message) => message.role !== "system" || isClosureNote(message.role, message.text)).map((message, index) => `${index}: ${message.role}: ${capMessage(message.text)}`);
   const size = (list: string[]): number => list.reduce((sum, line) => sum + line.length + 1, 0);
   if (size(lines) <= SUMMARY_INPUT_CHARS) return lines.join("\n");
   const head: string[] = [];
