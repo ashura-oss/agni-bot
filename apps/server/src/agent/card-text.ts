@@ -25,15 +25,27 @@ export function escapeUnsafe(text: string, keepLineBreaks = false): string {
   });
 }
 
-/** One model-chosen entry on one line, cut at `max` characters with a marker that says how much is missing. */
+/**
+ * One model-chosen entry on one line. Past `max` characters the middle is cut,
+ * never the end: the start and the end are both kept, with a marker between
+ * that says how many characters are not shown.
+ */
 export function entry(value: unknown, max = 320): string {
   const raw = typeof value === "string" ? value : JSON.stringify(value) ?? "";
-  return raw.length > max ? `${escapeUnsafe(raw.slice(0, max))}… (+${raw.length - max} chars)` : escapeUnsafe(raw);
+  if (raw.length <= max) return escapeUnsafe(raw);
+  const head = Math.ceil(max / 2);
+  const tail = Math.floor(max / 2);
+  return `${escapeUnsafe(raw.slice(0, head))}… (+${raw.length - max} chars) …${escapeUnsafe(raw.slice(raw.length - tail))}`;
 }
 
-/** Several lines of model-written text, each quoted, so a line that looks like a card field is plainly quoted text. */
+/**
+ * Several lines of model-written text, each quoted, so a line that looks like a
+ * card field is plainly quoted text. The cap is applied to the quoted text, so
+ * the quote marks cannot push it over, and it keeps the start and the end.
+ */
 export function quoted(text: string, max: number): string {
-  return escapeUnsafe(clip(text.replace(/\r\n/g, "\n"), max), true).split("\n").map((line) => `> ${line}`).join("\n");
+  const lines = escapeUnsafe(text.replace(/\r\n/g, "\n"), true).split("\n").map((line) => `> ${line}`);
+  return clip(lines.join("\n"), max);
 }
 
 /** Cap long text without hiding its end: the dangerous part is often the tail. */
