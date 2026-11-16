@@ -241,9 +241,13 @@ export function cancelDelegation(db: Database, id: string): TaskRow | null {
     db.run("DELETE FROM jobs WHERE id = ? AND state = 'queued'", [task.job_id]);
   }
   const closed = setDelegationState(db, id, "failed", "cancelled by user");
+  // A cancelled task is over: it must not sit in the owner's open list. The state and result
+  // still say it was cancelled, not completed.
+  const shut = db.run("UPDATE tasks SET status = 'done', snoozed_until = NULL WHERE id = ? AND status != 'done'", [id]);
+  if (shut.changes > 0) recordTaskActivity(db, id, "owner", "cancelled", null);
   // Mark first, then abort: the unwinding turn must already see the cancellation.
   runningDelegations.get(id)?.abort();
-  return closed;
+  return getTask(db, id);
 }
 
 export function listTasks(db: Database, options: {status?: TaskStatus|"all"; limit?: number; includeSnoozed?: boolean}={}): TaskRow[] {

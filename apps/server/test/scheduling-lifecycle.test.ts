@@ -18,7 +18,8 @@ import { ToolRegistry } from "../src/tools/registry";
 import { registerDelegateTaskTool } from "../src/tools/delegate-task-tool";
 import { createJobTools, scheduleJob } from "../src/tools/jobs-tool";
 import { JobRunner } from "../src/jobs/runner";
-import { parentAlreadyRead, registerTurnJob } from "../src/jobs/turn";
+import { parentAlreadyRead, registerTurnJob, summarizeResult } from "../src/jobs/turn";
+import { registerArtifactTool } from "../src/tools/artifact-tool";
 import { registerTaskReminderJob, scheduleTaskReminder } from "../src/jobs/task-reminders";
 import { resolveApprovalWaiter } from "../src/agent/approval-broker";
 import { cancelThreadTurn, fitToolResult } from "../src/agent/task-loop";
@@ -485,11 +486,37 @@ describe("a denied action does not fail a run that finished the work another way
     return getJob(database, queued.id)!;
   }
 
-  test("a later call succeeded and the turn ended normally: the job is done, with a note naming the denied tool", async () => {
+  test("a later call that itself needed approval succeeded and the turn ended normally: done, with a note", async () => {
     db = openDatabase(":memory:");
-    const row = await runWith(db, [load, mail, other, { text: "Done another way." }]);
+    const database = db;
+    // The owner denies the first card and allows the next one.
+    let cards = 0;
+    const emit = (frame: ServerFrameBody): void => {
+      if (frame.type !== "approval.request") return;
+      cards += 1;
+      const decision = cards === 1 ? "reject" : "once";
+      setTimeout(() => {
+        database.run("UPDATE approvals SET status = 'decided', decision = ? WHERE id = ?", [decision, frame.requestID]);
+        resolveApprovalWaiter(frame.requestID, decision);
+      }, 5);
+    };
+    const runner = new JobRunner(database, emit, { retryDelayMs: 1 });
+    // A shell command the policy gates and that does nothing.
+    const outside = { tool: "bash", args: { command: "exit 0" } } as const;
+    const loadBoth = { tool: "load_tools", args: { names: ["mail_send", "bash"] } } as const;
+    registerTurnJob(runner, { db: database, router: scriptedRouter([loadBoth, mail, outside, { text: "Done another way." }]).router, settings, emit });
+    const queued = job(database);
+    await runner.tick();
+    const row = getJob(database, queued.id)!;
     expect(row.state).toBe("done");
-    expect(row.result).toMatch(/one action was denied: mail_send; finished another way/);
+    expect(row.result).toMatch(/a denied step was skipped; check the result: mail_send/);
+  });
+
+  test("a later free call (even a successful one) does not finish the work: still not done", async () => {
+    db = openDatabase(":memory:");
+    const row = await runWith(db, [load, mail, { tool: "memory_search", args: { query: "report" } }, { text: "All sent." }]);
+    expect(row.state).toBe("failed");
+    expect(row.result).toMatch(/not done/i);
   });
 
   test("nothing succeeded after the denial: still not done", async () => {
@@ -509,5 +536,140 @@ describe("a denied action does not fail a run that finished the work another way
     db = openDatabase(":memory:");
     const row = await runWith(db, [load, mail, other, "hang"]);
     expect(row.state).toBe("failed");
+  });
+});
+
+describe("S1-21: delegate_task in wait mode counts as reading the result", () => {
+  test("the wake is skipped when the parent got the finished result from delegate_task mode wait", async () => {
+    db = openDatabase(":memory:");
+    const database = db;
+    const parent = createThread(database, "ea");
+    createTurn(database, { id: "trn_parent", threadID: parent.id, agentID: "ea" });
+    const script = scriptedRouter([{ text: "Found it: misfiled." }, { text: "Told the owner AGAIN." }]);
+    const runner = new JobRunner(database, () => undefined, { maxPerTick: 1 });
+    registerTurnJob(runner, { db: database, router: script.router, settings, emit: () => undefined });
+    const registry = new ToolRegistry();
+    registerDelegateTaskTool(registry, {
+      db: database, emit: () => undefined, currentAgentID: "ea", channelID: "main",
+      parentTurnID: "trn_parent", parentThreadID: parent.id,
+    });
+    const tool = registry.get("delegate_task") as unknown as { handler: (args: Record<string, unknown>, ctx: unknown) => Promise<unknown> };
+    const args = { toAgentID: "researcher", goal: "Find the delay", mode: "wait", timeoutMs: 5000 };
+    const waiting = tool.handler(args, { threadID: parent.id, turnID: "trn_parent", signal: new AbortController().signal });
+    await runner.tick(); // the child runs and finishes; the wake is queued behind it
+    const result = await waiting as { taskID: string; state: string };
+    expect(result.state).toBe("done");
+    database.run(
+      "INSERT INTO tool_calls (id, thread_id, turn_id, call_id, tool_name, args, result, ok, error, created_at) VALUES ('tcl_dw', ?, 'trn_parent', 'call_dw', 'delegate_task', ?, ?, 1, NULL, ?)",
+      [parent.id, JSON.stringify(args), fitToolResult(result), new Date().toISOString()],
+    );
+
+    expect(parentAlreadyRead(database, parent.id, result.taskID)).toBe(true);
+    await runner.tick();
+    expect(script.calls()).toBe(1);
+    expect(wakeRows(database)[0]!.result).toMatch(/already/i);
+  });
+
+  test("a delegate_task that only queued the work (no wait) is not a read", async () => {
+    db = openDatabase(":memory:");
+    const database = db;
+    const parent = createThread(database, "ea");
+    createTurn(database, { id: "trn_parent", threadID: parent.id, agentID: "ea" });
+    const queued = await delegate(database, parent.id);
+    database.run(
+      "INSERT INTO tool_calls (id, thread_id, turn_id, call_id, tool_name, args, result, ok, error, created_at) VALUES ('tcl_q', ?, 'trn_parent', 'call_q', 'delegate_task', ?, ?, 1, NULL, ?)",
+      [parent.id, JSON.stringify({ toAgentID: "researcher", goal: "x" }), JSON.stringify({ taskID: queued.taskID, state: "queued" }), new Date().toISOString()],
+    );
+    expect(parentAlreadyRead(database, parent.id, queued.taskID)).toBe(false);
+  });
+});
+
+describe("a delegated result longer than 4,000 characters can be read in full by the bot that asked", () => {
+  const lines = Array.from({ length: 900 }, (_, i) => `line ${String(i).padStart(4, "0")} of the research`);
+  const full = lines.join("\n"); // about 22,000 characters
+
+  async function finished(database: Database): Promise<{ artifactID: string; taskID: string }> {
+    const parent = createThread(database, "ea");
+    const queued = await delegate(database, parent.id);
+    const runner = new JobRunner(database, () => undefined, { maxPerTick: 1 });
+    registerTurnJob(runner, { db: database, router: scriptedRouter([{ text: full }]).router, settings, emit: () => undefined });
+    await runner.tick();
+    const task = getTask(database, queued.taskID)!;
+    return { artifactID: task.artifact_id!, taskID: queued.taskID };
+  }
+
+  async function readAll(database: Database, caller: string, artifactID: string): Promise<{ text: string; pages: number; redacted: boolean }> {
+    const registry = new ToolRegistry();
+    registerArtifactTool(registry, { db: database, currentAgentID: caller });
+    const handler = registry.get("read_artifact")!.handler as unknown as (a: Record<string, unknown>, c: unknown) => Promise<{ text: string | null; redacted: boolean; nextOffset?: number }>;
+    const ctx = { threadID: "t", turnID: "u", signal: new AbortController().signal };
+    let text = "";
+    let offset = 0;
+    let pages = 0;
+    let redacted = false;
+    for (;;) {
+      const page = await handler({ artifactRef: artifactID, offset }, ctx);
+      pages += 1;
+      redacted = page.redacted;
+      text += page.text ?? "";
+      if (page.nextOffset === undefined || pages > 50) break;
+      offset = page.nextOffset;
+    }
+    return { text, pages, redacted };
+  }
+
+  test("the delegating bot pages through the whole work result", async () => {
+    db = openDatabase(":memory:");
+    db.run("UPDATE agents SET visibility = 'summary' WHERE id = 'researcher'");
+    const { artifactID } = await finished(db);
+    const read = await readAll(db, "ea", artifactID);
+    expect(read.text).toBe(full);
+    expect(read.pages).toBeGreaterThan(2);
+  });
+
+  test("a third bot still gets the visibility rules, not the work", async () => {
+    db = openDatabase(":memory:");
+    db.run("UPDATE agents SET visibility = 'summary' WHERE id = 'researcher'");
+    const { artifactID } = await finished(db);
+    const read = await readAll(db, "coder", artifactID);
+    expect(read.text.length).toBeLessThanOrEqual(241);
+    expect(read.text.length).toBeGreaterThan(0);
+    expect(read.text).not.toBe(full);
+  });
+
+  test("a private specialist's work stays a receipt even for the bot that asked", async () => {
+    db = openDatabase(":memory:");
+    db.run("UPDATE agents SET visibility = 'private' WHERE id = 'researcher'");
+    const { artifactID } = await finished(db);
+    const read = await readAll(db, "ea", artifactID);
+    expect(read.redacted).toBe(true);
+    expect(read.text).toBe("");
+  });
+});
+
+describe("summarizeResult keeps the shape of the text", () => {
+  test("line breaks, lists and code survive; runs of blanks do not", () => {
+    const text = "Findings:\n\n\n\n- one   item\n- two items\n\n```ts\nconst a  = 1;\n```\n| a | b |\n|---|---|\n| 1 | 2 |   \n";
+    expect(summarizeResult(text)).toBe("Findings:\n\n- one item\n- two items\n\n```ts\nconst a = 1;\n```\n| a | b |\n|---|---|\n| 1 | 2 |");
+  });
+
+  test("a long result with line breaks is still cut within 4,000 characters and points at the artifact", () => {
+    const out = summarizeResult("some words here\n".repeat(1_000), "art_abc");
+    expect(out.length).toBeLessThanOrEqual(4_000);
+    expect(out).toContain("\n");
+    expect(out.endsWith("full result: read_artifact art_abc")).toBe(true);
+  });
+});
+
+describe("a cancelled delegated task is closed", () => {
+  test("cancelling a queued delegation closes the task as well as failing it", async () => {
+    db = openDatabase(":memory:");
+    const parent = createThread(db, "ea");
+    const queued = await delegate(db, parent.id);
+    cancelDelegation(db, queued.taskID);
+    const task = getTask(db, queued.taskID)!;
+    expect(task.delegate_state).toBe("failed");
+    expect(task.result).toBe("cancelled by user");
+    expect(task.status).not.toBe("open");
   });
 });
