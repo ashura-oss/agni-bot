@@ -14,7 +14,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { childEnv } from "../util/child-env";
-import { gitInstall } from "../util/git-bash";
+import { gitBashReady, gitInstall } from "../util/git-bash";
 import { privateTempDir } from "../util/private-temp";
 import { TREE_SPAWN_OPTIONS, trackTree } from "../util/process-tree";
 import { isOutsideScratch, resolveWritePath, scratchDir } from "./write-file";
@@ -263,6 +263,8 @@ export async function runBash(args: BashArgs): Promise<BashResult> {
   if (args.signal?.aborted) {
     return { stdout: "", stderr: "", exitCode: null, signal: null, timedOut: false, aborted: true, outputTruncated: false, durationMs: 0 };
   }
+  // Windows: the permission check of a per-user Git install runs in the background, not on this command.
+  if (process.platform === "win32") await gitBashReady();
   const executable = bashExecutable();
   const secret = args.secret;
   const secretSetup = secret ? secretEnv(secret) : null;

@@ -8,11 +8,13 @@ import { setSpendProvider } from "../ws/policy-frames";
 import type { StartupContext } from "./context";
 import { startupS2Audit, stopPauseWatcher } from "./s2-audit";
 import { setPauseCheck, startupS2Ledger } from "./s2-ledger";
+import { startupS2Shell } from "./s2-shell";
 
 /** Sprint 2 startup work (audit sink, pause switch, spend frames, usage recorder, router gate). Called once from `serve()`; each task owns its own file. */
 export async function startupS2(ctx: StartupContext): Promise<void> {
   await startupS2Audit(ctx);
   await startupS2Ledger(ctx);
+  startupS2Shell();
 }
 
 /**
