@@ -51,9 +51,10 @@ import { formatDuration, parseDurationMs, parseWhen } from "./util/time";
 import { startServer, type RunningServer } from "./ws/server";
 import { agniHome, loadHomeEnv, migrateHomeLayout } from "./home";
 import { browserOpenCommand } from "./util/open-url";
-import { secureDirectory, secureDirectoryIfNeeded, secureFile } from "./util/private-file";
+import { secureDirectory, secureFile, verifyHomePrivate } from "./util/private-file";
 import { extraHelpLines, runExtraCommand } from "./cli/extra-commands";
 import { runStartupHooks } from "./startup";
+import { loadVaultEnvForCli, unlockVaultAtStart, vaultRefusalMessage } from "./startup/s3-vault";
 
 const [command = "help", ...args] = Bun.argv.slice(2);
 
@@ -65,6 +66,9 @@ if (layout.blockedByPid !== undefined) {
   process.exit(1);
 }
 for (const from of layout.movedFrom) console.error(`moved ${from} into ${agniHome()}`);
+// These commands ask the running daemon how it is, sending the stored device token. In vault mode that token
+// lives in the vault, not in config.env (S3-01).
+if (command === "daemon" || command === "service" || command === "setup") await loadVaultEnvForCli();
 
 if (command === "serve") await serve();
 else if (command === "daemon") await daemonCommand(args);
@@ -88,12 +92,26 @@ else if (await runExtraCommand(command, args)) {
 // --- server ------------------------------------------------------------------
 
 async function serve(): Promise<void> {
-  // Windows: owner-only ACL on AGNI_HOME, inherited by the config, keys, database
-  // and logs beneath it. Warn rather than refuse to start: every secret write
-  // (provider keys, VAPID key) is protected and fail-closed on its own.
-  mkdirSync(agniHome(), { recursive: true, mode: 0o700 });
-  // Skipped when the ACL is already in place, so a restart does not re-walk the home tree.
-  secureDirectoryIfNeeded(agniHome(), "warn");
+  // AGNI_HOME must be readable by its owner only, checked at every start
+  // (S3-04). Windows: owner-only ACL inherited by the config, keys, database and
+  // logs beneath it. macOS/Linux: mode 700, and 600 on the secret files. If it
+  // cannot be made so, refuse to start. (The ACL is re-applied only when it is
+  // not already in place, so a restart does not re-walk the home tree.)
+  try {
+    mkdirSync(agniHome(), { recursive: true, mode: 0o700 });
+    if (verifyHomePrivate(agniHome()) === "fixed") log.warn(`${agniHome()} was readable by other accounts; it is now private to yours`);
+  } catch (error) {
+    console.error(`Agni cannot start: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
+  // The vault opens before the config is read, so providers see their keys.
+  // A vault that cannot be opened stops the start; there is no plaintext fallback (S3-01).
+  try {
+    await unlockVaultAtStart();
+  } catch (error) {
+    console.error(vaultRefusalMessage(error));
+    process.exit(1);
+  }
   const config = loadConfig();
   const db = openDatabase(config.dbPath);
   setOwnerName(config.userFirstName);
@@ -486,6 +504,7 @@ async function setup(args: string[]): Promise<void> {
     // files already under it (an upgrade) inherit it. Fail closed: the owner is
     // about to put API keys in here.
     secureDirectory(home, "throw");
+    verifyHomePrivate(home);
     if (!existsSync(envPath)) {
       copyFileSync(resolve(import.meta.dir, "../../../infra/env.example"), envPath);
       chmodSync(envPath, 0o600);

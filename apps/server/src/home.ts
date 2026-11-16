@@ -1,7 +1,8 @@
 /**
  * AGNI_HOME (default ~/.agni) holds every file Agni keeps:
  *
- *   config.env       secrets and settings (mode 600)
+ *   config.env       settings, and credentials until they move to vault.bin (mode 600)
+ *   vault.bin        encrypted secrets; its key lives in the OS credential store
  *   providers.json   chosen models + custom endpoints
  *   plugins.json     plugin auth + activation
  *   data/            agni.sqlite, backups/, share/, attachments/, chatgpt/
@@ -15,6 +16,8 @@
 import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { secretClassifier } from "./secrets/classify";
+import { secretsMode } from "./secrets/mode";
 
 type Env = Record<string, string | undefined>;
 
@@ -47,11 +50,22 @@ export function parseEnvFile(text: string): Record<string, string> {
 /**
  * Load AGNI_HOME/config.env into process.env. Variables already set (the
  * shell, or a repo .env Bun loaded in dev) win, so nothing changes for dev.
+ *
+ * Secrets: while `AGNI_SECRETS_MODE` is `file` (the default until S3-3 flips
+ * it) credentials in config.env load as before. In `vault` mode they do not:
+ * only non-secret settings load here, and the credentials come from the vault
+ * (`unlockVaultAtStart` fills them in). The mode may be set in the shell or in
+ * config.env itself.
  */
 export function loadHomeEnv(env: Env = process.env): void {
   const path = join(agniHome(env), "config.env");
   if (!existsSync(path)) return;
-  for (const [key, value] of Object.entries(parseEnvFile(readFileSync(path, "utf8")))) {
+  const values = parseEnvFile(readFileSync(path, "utf8"));
+  const mode = secretsMode({ AGNI_SECRETS_MODE: env.AGNI_SECRETS_MODE || values.AGNI_SECRETS_MODE });
+  // Only vault mode needs the classifier, so file mode never reads providers.json here.
+  const isSecret = mode === "vault" ? secretClassifier({ env, home: agniHome(env) }) : undefined;
+  for (const [key, value] of Object.entries(values)) {
+    if (isSecret?.(key, value)) continue;
     if (!env[key]) env[key] = value;
   }
 }
