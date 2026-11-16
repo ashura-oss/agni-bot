@@ -4,13 +4,17 @@ import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { providerConfigPath } from "./providers";
 import { homePath } from "../home";
+import { entryName, rememberSecrets, vaultForWrites } from "../credentials/vault-mode";
+import { baseUrlCarriesCredential, sanitizeBaseUrl } from "../credentials/provider-urls";
+import { VaultError } from "../secrets/types";
 import { PrivateFileError, writePrivateFile } from "../util/private-file";
 import {
+  checkCustomBaseUrl,
   loadCustomProviders,
   loadProviders,
   nextCustomProviderID,
   providerCredentialTarget,
-  validateCustomBaseUrl,
+  type BaseUrlRefusal,
   type CustomProviderEntry,
 } from "./providers";
 import type { Router } from "./router";
@@ -26,12 +30,15 @@ export interface CustomProviderInput {
 }
 
 /**
- * The API key arrives only over the authenticated socket. It is written to the
- * daemon's .env with mode 0600, never returned to the client, and applied to
- * the live router without restarting the process.
+ * The API key arrives only over the authenticated socket. It is never returned
+ * to the client, and it is applied to the live router without restarting the
+ * process. Where it is kept depends on the secrets mode (S3-02): in file mode
+ * the daemon's .env with mode 0600; in vault mode the vault (`env/<VARIABLE>`),
+ * and never a plaintext file, so a locked vault refuses the save. Either way
+ * the key is registered for redaction as soon as it is accepted.
  *
  * A custom endpoint also needs somewhere to live: its URL, label and model are
- * written to the provider config file, and its key to .env under a variable
+ * written to the provider config file, and its key as above under a variable
  * the entry names.
  */
 export async function addProviderCredential(
@@ -45,6 +52,7 @@ export async function addProviderCredential(
   if (!apiKey || apiKey.length > 4096 || /[\u0000\r\n]/.test(apiKey)) {
     return { ok: false, code: "invalid_key", message: "Enter a valid API key." };
   }
+  rememberSecrets(apiKey);
   if (providerID === "custom") {
     return addCustomProvider(router, apiKey, model, custom);
   }
@@ -56,11 +64,8 @@ export async function addProviderCredential(
     return { ok: false, code: "provider_exists", message: `${target.label} is already configured.` };
   }
 
-  const envPath = homePath("config.env");
-  const temporaryPath = `${envPath}.${randomUUID()}.tmp`;
   try {
-    const nextContents = await writeEnvValues(envPath, { [target.envKey]: apiKey });
-    await writeEnvFile(envPath, temporaryPath, nextContents);
+    await saveProviderKey(target.envKey, apiKey);
     // Bun.env is the environment map used by the rest of this process.
     Bun.env[target.envKey] = apiKey;
     if (model?.trim()) await saveProviderModel(providerID, validateModel(model));
@@ -69,6 +74,27 @@ export async function addProviderCredential(
   } catch (error) {
     // Do not include the key or filesystem content in the response/log path.
     return { ok: false, code: "provider_storage", message: storageMessage(error, "Could not save the provider key on the daemon.") };
+  }
+}
+
+/**
+ * Keep one provider key where the secrets mode says (see the note above).
+ * Vault mode: store it as `env/<VARIABLE>`, the entry start-up turns back into
+ * an environment variable, and read it back before reporting success. File
+ * mode: update config.env atomically and owner-only.
+ */
+async function saveProviderKey(envKey: string, apiKey: string): Promise<void> {
+  const vault = vaultForWrites();
+  if (vault) {
+    const name = entryName.env(envKey);
+    vault.set(name, apiKey);
+    if (vault.get(name) !== apiKey) throw new VaultError("WRITE_FAILED", "The key could not be read back from the vault, so it was not saved.");
+    return;
+  }
+  const envPath = homePath("config.env");
+  const temporaryPath = `${envPath}.${randomUUID()}.tmp`;
+  try {
+    await writeEnvFile(envPath, temporaryPath, await writeEnvValues(envPath, { [envKey]: apiKey }));
   } finally {
     await unlink(temporaryPath).catch(() => {});
   }
@@ -81,10 +107,10 @@ async function addCustomProvider(
   model?: string,
   custom?: CustomProviderInput,
 ): Promise<AddProviderResult> {
-  const baseUrl = validateCustomBaseUrl(custom?.baseUrl ?? "");
-  if (!baseUrl) {
-    return { ok: false, code: "unknown_provider", message: "Enter the endpoint URL, for example https://host/v1." };
-  }
+  // Settings cannot say "this endpoint is on my private network"; that is an owner's edit of providers.json.
+  const verdict = checkCustomBaseUrl(custom?.baseUrl ?? "");
+  if (!verdict.ok) return { ok: false, code: "unknown_provider", message: endpointRefusal(verdict.reason) };
+  const baseUrl = verdict.url;
   const label = (custom?.label ?? "").trim() || defaultCustomLabel(baseUrl);
   const existing = loadCustomProviders(Bun.env);
   const id = nextCustomProviderID(existing);
@@ -96,20 +122,31 @@ async function addCustomProvider(
     model: model?.trim() ? validateModel(model) : "",
     envKey,
   };
-  const envPath = homePath("config.env");
-  const temporaryPath = `${envPath}.${randomUUID()}.tmp`;
   try {
-    const nextContents = await writeEnvValues(envPath, { [envKey]: apiKey });
-    await writeEnvFile(envPath, temporaryPath, nextContents);
+    await saveProviderKey(envKey, apiKey);
+    // An address with a credential in it is a secret too: the vault keeps it whole, the file a clean copy.
+    const vault = vaultForWrites();
+    if (vault && baseUrlCarriesCredential(baseUrl)) {
+      rememberSecrets(baseUrl);
+      vault.set(entryName.providerUrl(id), baseUrl);
+      entry.baseUrl = sanitizeBaseUrl(baseUrl);
+    }
     Bun.env[envKey] = apiKey;
     await saveCustomProvider(entry);
     router.replaceProviders(loadProviders(Bun.env));
     return { ok: true, providers: router.status() };
   } catch (error) {
     return { ok: false, code: "provider_storage", message: storageMessage(error, "Could not save the endpoint on the daemon.") };
-  } finally {
-    await unlink(temporaryPath).catch(() => {});
   }
+}
+
+/** What to tell the owner when an endpoint URL is refused (S3-07). */
+function endpointRefusal(reason: BaseUrlRefusal): string {
+  if (reason === "scheme") return "Use an https:// endpoint. Plain http is accepted only for localhost.";
+  if (reason === "private") {
+    return 'That address is on a private network. Agni only connects to private endpoints marked "local": true in providers.json; add the entry there by hand.';
+  }
+  return "Enter the endpoint URL, for example https://host/v1.";
 }
 
 /** The host of the endpoint, as a name to show in the list. */
@@ -151,11 +188,13 @@ export async function setProviderModel(router: Router, providerID: string, rawMo
 
 /**
  * Why a save failed, in words the owner can act on. A file that could not be
- * made private is named; anything else keeps the generic text so no key or
- * filesystem detail reaches the client.
+ * made private, or a vault that is locked or cannot be written, is named;
+ * anything else keeps the generic text so no key or filesystem detail reaches
+ * the client.
  */
 function storageMessage(error: unknown, generic: string): string {
-  return error instanceof PrivateFileError ? error.message : generic;
+  // Vault errors are written to be shown to the owner and never hold a secret.
+  return error instanceof PrivateFileError || error instanceof VaultError ? error.message : generic;
 }
 
 /** Read the .env file, or an empty one when it does not exist yet. */
