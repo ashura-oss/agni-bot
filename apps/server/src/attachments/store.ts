@@ -1,10 +1,11 @@
 import type { Database } from "bun:sqlite";
-import { mkdir, chmod, unlink } from "node:fs/promises";
+import { chmod, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { imageSize } from "image-size";
 import { MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, type AttachmentInfo } from "@agni/protocol";
 import { newID, nowISO } from "../util/ids";
+import { ensurePrivateDirectory } from "../util/private-file";
 import type { ChatMessage } from "../models/client";
 
 interface AttachmentRow {
@@ -99,7 +100,9 @@ export async function saveAttachment(db: Database, dbPath: string, deviceID: str
   const directory = purpose === "task"
     ? join(dirname(dbPath), "attachments", "documents")
     : join(dirname(dbPath), "attachments");
-  await mkdir(directory, { recursive: true, mode: 0o700 });
+  // Windows: owner-only ACL on the directory before the file lands in it, so the
+  // file inherits it. Not a secret, so a volume without ACLs warns and saves anyway.
+  await ensurePrivateDirectory(directory, "attachments");
   const path = join(directory, id);
   await Bun.write(path, bytes);
   await chmod(path, 0o600);

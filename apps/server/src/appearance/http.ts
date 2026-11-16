@@ -1,9 +1,10 @@
 import type { Database } from "bun:sqlite";
-import { mkdir, chmod, unlink } from "node:fs/promises";
+import { chmod, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { imageSize } from "image-size";
 import { requestToken, verifyToken } from "../auth/tokens";
 import { newID, nowISO } from "../util/ids";
+import { ensurePrivateDirectory } from "../util/private-file";
 
 const MAX_BYTES = 10 * 1024 * 1024;
 const headers = {
@@ -52,7 +53,7 @@ export async function backgroundRequest(request: Request, db: Database, dbPath: 
       }
       const id = newID("bg");
       const directory = join(dirname(dbPath), "backgrounds");
-      await mkdir(directory, { recursive: true, mode: 0o700 });
+      await ensurePrivateDirectory(directory, "backgrounds");
       const diskPath = join(directory, id);
       await Bun.write(diskPath, bytes);
       await chmod(diskPath, 0o600);

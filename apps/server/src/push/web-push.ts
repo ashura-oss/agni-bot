@@ -8,13 +8,14 @@
  * Not built: APNs for the Mac app (needs an Apple key).
  */
 import type { Database } from "bun:sqlite";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import webpush from "web-push";
 import { homePath } from "../home";
 import { log } from "../log";
 import { allowPush } from "../stores/proactivity";
 import { nowISO } from "../util/ids";
+import { writePrivateFileSync } from "../util/private-file";
 
 export interface VapidKeys { publicKey: string; privateKey: string }
 export interface PushPayload { title: string; body: string; threadID?: string }
@@ -26,8 +27,10 @@ export function loadVapid(path = homePath("push-vapid.json")): VapidKeys {
   const keys = webpush.generateVAPIDKeys();
   if (path !== ":memory:") {
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, JSON.stringify(keys), { mode: 0o600 });
-    chmodSync(path, 0o600);
+    // The private key is a credential: owner-only before it is written
+    // (mode 600, or an owner-only ACL on Windows). If that cannot be done, throw
+    // rather than store it readable.
+    writePrivateFileSync(path, JSON.stringify(keys));
   }
   return keys;
 }

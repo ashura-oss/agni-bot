@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import type { Config } from "./config";
 import { type HealthReport } from "./ws/server";
 import { log } from "./log";
+import { restrictToOwnerOnWindows } from "./util/windows-acl";
 
 export interface PidInfo {
   pid: number;
@@ -78,6 +79,14 @@ export function readPidFile(path: string): PidInfo | null {
 export function writePidFile(path: string, info: PidInfo): void {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, `${JSON.stringify(info, null, 2)}\n`, { mode: 0o600 });
+  // `daemon stop` signals the pid in this file, so only the owner should be
+  // able to change it. It holds no secret, and some volumes cannot hold ACLs,
+  // so a failure here warns and the daemon starts anyway.
+  try {
+    restrictToOwnerOnWindows(path, false);
+  } catch (error) {
+    log.warn(`pid file ${path} could not be restricted to your account; continuing without it: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 export function removePidFile(path: string): void {
