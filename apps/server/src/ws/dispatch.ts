@@ -85,6 +85,7 @@ import { pluginMailResolver } from "../plugins/credentials";
 import type { FrameLog } from "./frame-log";
 import { buildConversationHistory, stopReasonsByTurn } from "./history";
 import { replayButtons } from "./approval-replay";
+import { looksLikeNameAnswer } from "./name-answer";
 import { DAY_NAMES } from "../jobs/schedule";
 import { cancelTurn, cancelTurnsForDevice, isServerStopping, registerTurn, unregisterTurn } from "./turn-registry";
 import { activateAppearanceProfile, deleteAppearanceProfile, listAppearanceProfiles, saveAppearanceProfile } from "../stores/appearance";
@@ -737,7 +738,19 @@ async function runUserMessage(
     "SELECT count(*) AS count FROM channel_messages WHERE channel_id = 'main' AND ui_hint = 'onboarding_name_prompt'",
   ).get()?.count ?? 0;
   const primary = deps.db.query<{ onboarded: number }, []>("SELECT onboarded FROM agents WHERE id = 'ea'").get();
-  if (!attachments.length && !mention && frame.channelId === "main" && channelID === "main" && primary?.onboarded === 0 && onboardingPrompt > 0) {
+  // Only a message that reads like a name is the answer; a question or a
+  // sentence goes on as an ordinary message. The answer is the owner's line
+  // like any other, so it is stored and echoed before the rename (it used to
+  // vanish, and a failed rename dropped it silently).
+  if (!attachments.length && !mention && frame.channelId === "main" && channelID === "main" && primary?.onboarded === 0 && onboardingPrompt > 0 && looksLikeNameAnswer(text)) {
+    if (channel) {
+      const answer = appendChannelMessage(deps.db, { channelID, fromType: "user", fromID: session.device?.id ?? "user", text, salience: "temp" });
+      deps.emit({
+        type: "msg.new", id: answer.id, channelId: channelID, fromType: "user",
+        fromId: answer.from_id, senderName: session.device?.name ?? "You", text,
+        internal: false, uiHint: "normal", createdAt: answer.created_at,
+      });
+    }
     completeAgentRename(deps, "ea", text);
     return;
   }
