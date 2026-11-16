@@ -198,6 +198,29 @@ describe("owner trust for MCP tools (plugins.json)", () => {
     expect(saved.plugins.notion.trustedTools).toEqual(["search"]);
   });
 
+  test("an edit to trustedTools on disk is used on the next reconnect and survives later saves", async () => {
+    const { service, calls } = harness({ notion: { account: "owner", enabled: true, auth: { kind: "mcp" }, trustedTools: ["search"] } });
+    const path = (service as any).deps.pluginsPath as string;
+    // The owner edits the file by hand while the daemon is running.
+    const edited = JSON.parse(readFileSync(path, "utf-8"));
+    edited.plugins.notion.trustedTools = ["search", "fetch"];
+    writeFileSync(path, JSON.stringify(edited));
+
+    expect(service.configure("notion", "owner", { url: "https://example.test/mcp" }).error).toBeUndefined();
+    await Promise.resolve();
+    expect(calls[0]![4]).toEqual(["search", "fetch"]);
+    expect(JSON.parse(readFileSync(path, "utf-8")).plugins.notion.trustedTools).toEqual(["search", "fetch"]);
+
+    // A second hand edit, then an unrelated save and a restart-style reconnect (autoConnect).
+    edited.plugins.notion.trustedTools = ["fetch"];
+    writeFileSync(path, JSON.stringify(edited));
+    service.configure("gmail", "agent", { user: "a@example.test", pass: "pw" });
+    expect(JSON.parse(readFileSync(path, "utf-8")).plugins.notion.trustedTools).toEqual(["fetch"]);
+    service.autoConnect();
+    await Promise.resolve();
+    expect(calls.at(-1)![4]).toEqual(["fetch"]);
+  });
+
   test("with nothing marked trusted the hub gets an empty list", async () => {
     const { service, calls } = harness({});
     service.configure("notion", "owner", { url: "https://example.test/mcp" });

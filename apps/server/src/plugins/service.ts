@@ -32,6 +32,7 @@ import {
   removePlugin,
   enabledPluginIDs,
   type PluginsFile,
+  syncTrustedTools,
   trustedMcpTools,
   type PluginEntry,
 } from "./config";
@@ -95,6 +96,7 @@ export class PluginService {
 
   /** Persist the in-memory plugins.json to disk (mode-600). */
   private save(): void {
+    syncTrustedTools(this.deps.pluginsPath, this.pluginsFile);
     savePluginsFile(this.deps.pluginsPath, this.pluginsFile);
   }
 
@@ -196,6 +198,7 @@ export class PluginService {
     }
 
     if (manifest.authKind === "mcp") {
+      syncTrustedTools(this.deps.pluginsPath, this.pluginsFile);
       // The bearer token (if the server needs one) goes to plugins.json only.
       upsertPlugin(this.pluginsFile, pluginID, {
         account,
@@ -350,6 +353,7 @@ export class PluginService {
 
   private async reachMcp(pluginID: string, connectionID: string, url: string, token?: string): Promise<void> {
     try {
+      syncTrustedTools(this.deps.pluginsPath, this.pluginsFile);
       await (this.mcpHubOverride ?? mcpHub).connect(pluginID, url, token, undefined, trustedMcpTools(this.pluginsFile, pluginID));
     } catch (error) {
       markError(this.deps.db, connectionID, error instanceof Error ? error.message : String(error));

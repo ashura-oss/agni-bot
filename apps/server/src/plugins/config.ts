@@ -77,8 +77,10 @@ export interface PluginEntry {
    * MCP plugins: the server's own tool names (as it lists them, e.g. "search")
    * that the owner has marked trusted. Only these can run without an approval
    * card, and only when the catalog's `read` mode is `free`. A server's own
-   * `readOnlyHint` never counts. Edited by hand in plugins.json for now; read
-   * when the server connects, so a change needs a reconnect or restart.
+   * `readOnlyHint` never counts. Edited by hand in plugins.json for now. The
+   * file on disk is the authority: it is re-read at every MCP connect and
+   * before every save (see syncTrustedTools), so an edit takes effect on the
+   * next reconnect and is never written over. The hub applies it at connect.
    */
   trustedTools?: string[];
 }
@@ -165,6 +167,27 @@ export function removePlugin(config: PluginsFile, pluginID: string): void {
 export function trustedMcpTools(config: PluginsFile, pluginID: string): string[] {
   const list = config.plugins[pluginID]?.trustedTools;
   return Array.isArray(list) ? list.filter((name): name is string => typeof name === "string" && name !== "") : [];
+}
+
+/**
+ * Copy `trustedTools` from the file on disk into the in-memory config, so the
+ * owner's hand edit is used and a later save writes it back instead of the
+ * stale list. The disk value wins, including removal. A missing or unreadable
+ * file leaves the config as it is.
+ */
+export function syncTrustedTools(path: string, config: PluginsFile): void {
+  let onDisk: PluginsFile;
+  try {
+    onDisk = JSON.parse(readFileSync(path, "utf-8")) as PluginsFile;
+  } catch {
+    return;
+  }
+  if (!onDisk?.plugins || typeof onDisk.plugins !== "object") return;
+  for (const [id, entry] of Object.entries(config.plugins)) {
+    const list = onDisk.plugins[id]?.trustedTools;
+    if (Array.isArray(list)) entry.trustedTools = list;
+    else delete entry.trustedTools;
+  }
 }
 
 /** All plugin IDs that are enabled, for auto-connect on daemon start. */
