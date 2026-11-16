@@ -28,8 +28,9 @@ describe("the routine state block is cut from what the owner sees", () => {
     expect(stripRoutineState(reply)).toBe("Inbox is quiet.");
   });
 
-  test("a trailing bare fenced json block that is the last thing in the reply is cut", () => {
-    expect(stripRoutineState('Two new mails.\n\n```json\n{"seen": 2}\n```\n')).toBe("Two new mails.");
+  test("a trailing json block with no label and no key is the routine's own content: kept", () => {
+    const reply = 'Two new mails.\n\n```json\n{"seen": 2}\n```';
+    expect(stripRoutineState(reply)).toBe(reply);
   });
 
   test("the label alone, or with a bold or heading marker, goes with its block", () => {
