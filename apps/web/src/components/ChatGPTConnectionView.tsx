@@ -10,7 +10,9 @@ export function ChatGPTConnectionView({ manage = false }: { manage?: boolean }) 
   const accountID = chosenAccountID ?? (manage ? connection?.activeAccountID ?? connection?.accounts[0]?.id ?? "" : connection?.accounts.length === 1 && !connection.activeAccountID ? connection.accounts[0]!.id : "");
   const pending = connection?.status === "pending" || !!login;
   const active = connection?.accounts.find((a) => a.id === connection.activeAccountID);
-  const disabled = busy || pending || connectionState.kind !== "ready";
+  // The server says so in plain words when sign-in is switched off; offering the button then is a trap.
+  const signInOff = /sign-in is disabled/i.test(connection?.message ?? "");
+  const disabled = busy || pending || connectionState.kind !== "ready" || signInOff;
   const connected = connection?.status === "connected";
   return (
     <div className="chatgpt-connection">

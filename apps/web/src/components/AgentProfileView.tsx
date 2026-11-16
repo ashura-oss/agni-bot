@@ -116,7 +116,7 @@ export function AgentProfileView() {
               {nameError}
             </div>
           ) : null}
-          <div className="profile-by">by {agent.id}</div>
+          <div className="profile-by">Mention as @{agent.id}</div>
         </div>
 
         <div className="profile-tag-block">

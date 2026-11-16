@@ -6,6 +6,7 @@ import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { ArrowUp, Plus, UserRound, Paperclip, X } from "lucide-react";
 import { useAppModel, useAppSnapshot } from "../state/use-app-model";
 import { copyText } from "./bits";
+import { shortcutLabel } from "../state/display";
 
 import { MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, type AttachmentInfo } from "@agni/client";
 
@@ -284,7 +285,7 @@ export function ComposerView() {
           <button
             type="button"
             className="composer-stop"
-            title="Stop this turn (⌘.) — or send “stop”"
+            title={`Stop this turn (${shortcutLabel(".")}) — or send “stop”`}
             aria-label="Stop"
             onClick={() => model.stopTurn()}
           >

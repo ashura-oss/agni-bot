@@ -219,6 +219,11 @@ export class Conversation {
   private adoptedTurns = new Set<string>();
   /** Which bot runs each turn this view follows: who an approval is "from". */
   private turnAgents = new Map<string, string>();
+  /**
+   * Turns whose start named another conversation. Their tokens carry no conversation of
+   * their own, so this is the only way to tell them from this chat's.
+   */
+  private declinedTurns = new Set<string>();
 
   private static readonly noticeCap = 40;
 
@@ -264,6 +269,27 @@ export class Conversation {
       newMessage({ id, role: "user", text, attachments, createdAt: at, sessionID: this.threadID, isLocalEcho: true }),
     );
     return id;
+  }
+
+  /**
+   * The daemon behind this view restarted (or lost its replay log): whatever it was in the
+   * middle of is gone. Forget the running turn and its half-written bubbles, and drop the
+   * approval, question and password cards that belonged to the old process. `keepCards`
+   * names cards the new process has already re-sent. History is reloaded separately.
+   */
+  resetLive(options: { keepCards?: ReadonlySet<string> } = {}): void {
+    const keep = options.keepCards ?? new Set<string>();
+    this.inFlightTurnID = null;
+    this.inFlightThreadID = null;
+    this.adoptedTurns.clear();
+    this.turnAnswers.clear();
+    this.turnAgents.clear();
+    this.failures.clear();
+    this.declinedTurns.clear();
+    this.messages = this.messages.filter((message) => !isStreaming(message));
+    this.approvals = this.approvals.filter((approval) => keep.has(approval.id));
+    this.forms = this.forms.filter((form) => keep.has(form.id));
+    this.secrets = this.secrets.filter((secret) => keep.has(secret.id));
   }
 
   /** Take back a local echo the daemon refused, so the text can go back to the composer. */
@@ -596,7 +622,11 @@ export class Conversation {
 
       case "turn.start": {
         const isOurs = this.belongsTo(frame.threadID, frame.conversationID ?? null);
-        if (!isOurs) return [{ kind: "unread", threadID: frame.threadID }, { kind: "refreshThreadList" }];
+        if (!isOurs) {
+          this.declinedTurns.add(frame.turnID);
+          for (const old of [...this.declinedTurns].slice(0, Math.max(0, this.declinedTurns.size - 100))) this.declinedTurns.delete(old);
+          return [{ kind: "unread", threadID: frame.threadID }, { kind: "refreshThreadList" }];
+        }
         if (frame.conversationID !== undefined || this.threadID === frame.threadID) {
           this.adoptedTurns.add(frame.turnID);
         }
@@ -632,8 +662,11 @@ export class Conversation {
       }
 
       case "token": {
+        if (this.declinedTurns.has(frame.turnID)) return [];
         const adopted = this.adoptedTurns.has(frame.turnID);
-        if (!this.belongsTo(frame.threadID, null) && !adopted) return [];
+        // With no turn.start seen, only a block this chat already knows is proof the turn is its own:
+        // a chat that has not learned its block yet (just switched to) would take any bot's tokens.
+        if (!adopted && !(this.threadID !== null && this.threadID === frame.threadID)) return [];
         const id = Conversation.assistantID(frame.turnID);
         const message = this.messages.find((candidate) => candidate.id === id);
         if (message) {
@@ -662,6 +695,7 @@ export class Conversation {
 
       case "turn.end": {
         const adopted = this.adoptedTurns.delete(frame.turnID);
+        const wasDeclined = this.declinedTurns.delete(frame.turnID);
         const isOurs =
           adopted ||
           this.belongsTo(frame.threadID, frame.conversationID ?? null) ||
@@ -712,7 +746,10 @@ export class Conversation {
         this.turnAnswers.delete(frame.turnID);
         this.failures.delete(frame.turnID);
         // A reply this view only saw the tail of is completed from the durable copy.
-        const pickedUpMidStream = message?.isContinuation === true && message.text.length > 0;
+        // So is a turn of this conversation whose tokens were not shown (its block was not known
+        // yet): there is no bubble, but the durable history has the reply.
+        const unseen = !message && !wasDeclined && isOurs && frame.stopReason === "end" && frame.conversationID !== undefined && frame.conversationID === this.conversationID && answerID === undefined;
+        const pickedUpMidStream = unseen || (message?.isContinuation === true && message.text.length > 0);
         if (!isOurs) return [{ kind: "unread", threadID: frame.threadID }, { kind: "refreshThreadList" }];
         if (this.inFlightTurnID === frame.turnID) {
           this.inFlightTurnID = null;
