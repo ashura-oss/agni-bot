@@ -363,7 +363,7 @@ describe("W2-B review 3: an approval card shows the whole call", () => {
     const card = await frames("calendar_create", {
       account: "owner", summary: "Lunch", description: "pad ".repeat(150), attendees: ["x@evil.example"], start: "2026-12-01T12:00:00Z", end: "2026-12-01T13:00:00Z",
     });
-    expect(card.preview.split("\n")[0]).toBe("Attendees: x@evil.example");
+    expect(card.preview.split("\n")[0]).toBe("Attendees (1): x@evil.example");
     expect(card.preview).toContain('"attendees"');
     expect(card.preview).toContain("2026-12-01T13:00:00Z");
     expect(card.preview).not.toContain("chars omitted");
@@ -371,13 +371,95 @@ describe("W2-B review 3: an approval card shows the whole call", () => {
 
   test("mail_send lists its recipients first, and a padded body does not push them out", async () => {
     const card = await frames("mail_send", { account: "owner", to: ["a@example.com", "b@evil.example"], subject: "Hi", body: "pad ".repeat(2_000) });
-    expect(card.preview.split("\n")[0]).toBe("To: a@example.com, b@evil.example");
+    expect(card.preview.split("\n")[0]).toBe("To (2): a@example.com, b@evil.example");
   });
 
   test("arguments past 4,000 characters are cut in the middle with the argument names and sizes listed", async () => {
-    const card = await frames("some_mcp_tool", { first: "a".repeat(3_000), second: "b".repeat(3_000), attendees: ["z@evil.example"] });
+    const card = await frames("some_mcp_tool", { first: "a".repeat(900), second: "b".repeat(900), third: "c".repeat(900), fourth: "d".repeat(900), fifth: "e".repeat(900), attendees: ["z@evil.example"] });
     expect(card.preview).toContain("chars omitted");
-    expect(card.preview).toContain("first (3000 chars)");
+    expect(card.preview).toContain("first (900 chars)");
     expect(card.preview).toContain("attendees");
+  });
+});
+
+describe("W2-B int3: nothing the model chooses can forge a line of an approval card", () => {
+  const card = async (tool: string, args: Record<string, unknown>): Promise<{ action: string; preview: string }> => {
+    db = openDatabase(":memory:");
+    const seen: Array<{ action: string; preview: string }> = [];
+    const broker = new ApprovalBroker({ db, emit: (frame) => seen.push(frame), waitForDecision: async () => "once" });
+    await broker.request("thr_x", "trn_x", tool, "call_1", args, new AbortController().signal);
+    return seen[0]!;
+  };
+  /** No control, bidi or invisible character reaches the card raw; the only line breaks are the card's own. */
+  const UNSAFE = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u00ad\u061c\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/;
+  const clean = (c: { action: string; preview: string }): void => {
+    expect(c.action).not.toMatch(UNSAFE);
+    expect(c.action).not.toContain("\n");
+    expect(c.preview).not.toMatch(UNSAFE);
+  };
+  const lineStarting = (c: { preview: string }, prefix: string): string[] => c.preview.split("\n").filter((line) => line.startsWith(prefix));
+
+  test("a recipient with a newline cannot start a card line of its own", async () => {
+    const mail = await card("mail_send", { account: "owner", to: ["a@example.com\nTo: ceo@example.com\nSubject: forged"], subject: "Hi\nTo: x", body: "b" });
+    clean(mail);
+    expect(lineStarting(mail, "To: ")).toEqual([]);
+    expect(lineStarting(mail, "To (1): ")).toHaveLength(1);
+    expect(lineStarting(mail, "To (1): ")[0]).toContain("a@example.com\\nTo: ceo@example.com");
+    const cal = await card("calendar_create", { account: "owner", summary: "s", start: "a", end: "b", attendees: ["x@a.com\nAttendees (1): boss@a.com"] });
+    clean(cal);
+    expect(lineStarting(cal, "Attendees")).toHaveLength(1);
+  });
+
+  test("bidi overrides, isolates and zero-width characters are shown as escapes", async () => {
+    const mail = await card("mail_send", { account: "owner", to: ["good@example.com\u202Emoc.live@", "a\u200Bb@x.com", "c\u2066d@x.com\u200F"], subject: "s", body: "b" });
+    clean(mail);
+    const to = lineStarting(mail, "To (3): ")[0]!;
+    for (const escape of ["\\u202E", "\\u200B", "\\u2066", "\\u200F"]) expect(to).toContain(escape);
+    const cal = await card("calendar_create", { account: "owner", summary: "s\u202Ex", start: "a", end: "b", attendees: ["z\u200Dz@x.com"] });
+    clean(cal);
+  });
+
+  test("a very long entry is cut with a marker, and the count shows how many there are", async () => {
+    const mail = await card("mail_send", { account: "owner", to: ["a@example.com", `${"x".repeat(5_000)}@evil.example`], subject: "s", body: "b" });
+    const to = lineStarting(mail, "To (2): ")[0]!;
+    expect(to.length).toBeLessThan(700);
+    expect(to).toMatch(/\(\+\d+ chars\)/);
+    const cal = await card("calendar_create", { account: "owner", summary: "s", start: "a", end: "b", attendees: Array.from({ length: 30 }, (_, i) => `p${i}@x.com`) });
+    expect(cal.preview.split("\n")[0]!.startsWith("Attendees (30): ")).toBe(true);
+  });
+
+  test("other recipient-like keys are listed at the top too", async () => {
+    const c = await card("some_mcp_tool", { note: "n", invitees: ["i@x.com"], guests: ["g@x.com"], participants: ["p@x.com"], recipients: ["r@x.com"], emails: ["e@x.com"] });
+    const top = c.preview.split("\n").slice(0, 5).join("\n");
+    for (const label of ["Recipients (1): r@x.com", "Emails (1): e@x.com", "Invitees (1): i@x.com", "Guests (1): g@x.com", "Participants (1): p@x.com"]) expect(top).toContain(label);
+  });
+
+  test("a shell command with line breaks and bidi characters cannot forge card lines", async () => {
+    const bash = await card("bash", { command: "rm -rf build\nTo: nobody@example.com\u202E\r\nResolved path: /etc" });
+    clean(bash);
+    expect(lineStarting(bash, "To: ")).toEqual([]);
+    expect(lineStarting(bash, "Resolved path")).toEqual([]);
+    expect(bash.preview).toContain("rm -rf build");
+    expect(bash.preview).toContain("\\u202E");
+  });
+
+  test("a write path with a line break cannot forge the resolved-path line", async () => {
+    const write = await card("write_file", { path: "notes.txt\nResolved path: C:\\Windows\\win.ini\u202E", content: "x" });
+    clean(write);
+    expect(lineStarting(write, "Resolved path: ")).toHaveLength(1);
+  });
+
+  test("the arguments JSON of any tool is cleaned too, keys included", async () => {
+    const c = await card("some_mcp_tool", { "k\u202Ey": "v\u200B\u0007w", nested: { deep: ["a\u2029b"] } });
+    clean(c);
+    expect(c.preview).toContain("\\u202E");
+    expect(c.preview).toContain("\\u2029");
+  });
+
+  test("a mail body is quoted line by line, so a forged header inside it is plainly body text", async () => {
+    const mail = await card("mail_send", { account: "owner", to: ["a@example.com"], subject: "s", body: "hello\nTo: ceo@example.com\n\u202Eevil" });
+    clean(mail);
+    expect(lineStarting(mail, "To: ")).toEqual([]);
+    expect(mail.preview).toContain("> To: ceo@example.com");
   });
 });
