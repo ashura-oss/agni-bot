@@ -24,7 +24,6 @@ import type { Persona, ResolvedPersona } from "./personas";
 import type { ChatMessage, ToolCall } from "../models/client";
 import { Router, RouterBusyError, RouterError } from "../models/router";
 import { appendMessage, createTurn, finishTurn, recentMessages, titleThreadFromFirstMessage, touchThread } from "../stores/threads";
-import { recordUsage } from "../stores/usage";
 import { newID, nowISO } from "../util/ids";
 import { buildTaskToolRegistry, deferredToolHints, deferredTools, registerLoadTools, taskToolSpecs } from "../tools/task-registry";
 import { teamRoster } from "./personas";
@@ -931,7 +930,6 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   // is parked, and the resume picks it up.
   const sessionState = stopReason === "end" ? "done" : stopReason === "needs_input" ? "waiting" : "failed";
   persistSession(db, threadID, turnID, sessionState, messages, summary, stepCount, tokenCount);
-  if (usage) recordUsage(db, { turnID, ...usage });
   run.emit({ type: "turn.end", turnID, threadID, stopReason, ...(usage ? { usage } : {}), ...(run.conversationID ? { conversationID: run.conversationID } : {}) });
   // PR 6: waiting for the owner is not the same as working.
   run.emit({

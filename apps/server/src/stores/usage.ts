@@ -12,8 +12,8 @@ export interface UsageRecord {
 
 /**
  * Per-turn summary row (the old ledger). It carries no cost and no kind, so it
- * never counts toward spend. S2-1 removes the one caller (task-loop) once the
- * per-call ledger below is the only record.
+ * never counts toward spend. Nothing in the server calls it any more: the
+ * router's usage hook writes one row per model call (`recordLedgerCall`).
  */
 export function recordUsage(db: Database, record: UsageRecord): void {
   db.run(

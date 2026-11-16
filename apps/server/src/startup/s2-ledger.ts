@@ -2,16 +2,23 @@ import { priceCall, type PricedUsageEvent } from "../models/prices";
 import { setRouteGate, type RouteGateCall, type RouteGateDecision } from "../models/router";
 import { setUsageRecorder } from "../models/usage-hook";
 import { configureBudget, checkBudget, markLedgerWrite, resolveRootJobID } from "../policy/budget";
+import { isRunPaused } from "../policy/pause";
 import { recordLedgerCall, type LedgerCall } from "../stores/usage";
 import type { StartupContext } from "./context";
 
 /**
  * Says why a run may not call a model right now (the owner paused everything,
- * or this bot), or null when it may. S2-2 supplies the real one from
- * `policy/pause.ts` once it is merged: `setPauseCheck((call) => isRunPaused(call) ? "..." : null)`.
+ * or this bot), or null when it may.
  */
 export type PauseCheck = (call: RouteGateCall) => string | null;
 
+/** The real check: `policy/pause.ts` (it canonicalises the bot id, and an unreadable state means paused). */
+export const realPauseCheck: PauseCheck = (call) => {
+  const verdict = isRunPaused({ agentID: call.agentID ?? null });
+  return verdict.paused ? verdict.reason ?? "The owner paused the bots." : null;
+};
+
+/** Nothing until the startup hook installs the real check: a gate with no pause check refuses every call. */
 let pauseCheck: PauseCheck | null = null;
 
 export function setPauseCheck(check: PauseCheck | null): void {
@@ -27,7 +34,9 @@ function gate(call: RouteGateCall): RouteGateDecision {
   if (!call.agentID || !call.kind) {
     return refuse("unattributed", "A model call must say which bot it is for and whether it is a turn or a side call; refusing it.");
   }
-  const paused = pauseCheck?.(call);
+  // Fail closed: with no pause check there is no way to know the owner has not pulled the switch.
+  if (!pauseCheck) return refuse("pause_check_missing", "The pause switch could not be checked, so the call was stopped.");
+  const paused = pauseCheck(call);
   if (paused) return refuse("paused", paused);
   const budget = checkBudget({
     agentID: call.agentID,
@@ -93,5 +102,6 @@ export async function startupS2Ledger(ctx: StartupContext): Promise<void> {
     }
   });
   configureBudget(db);
+  setPauseCheck(realPauseCheck);
   setRouteGate(gate);
 }
