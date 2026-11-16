@@ -120,8 +120,15 @@ export function openSession(
 ): ThreadRow {
   const now = nowISO();
   return db.transaction(() => {
-    if (conversation.active_thread_id) {
-      db.run("UPDATE threads SET closed_at = ?, closed_by = ? WHERE id = ?", [now, reason, conversation.active_thread_id]);
+    // S1-33: close the block that is active NOW, as the row says, not the one
+    // the caller's snapshot named. A rotation can wait ~20 s on a summary, and
+    // another may open a block in that time; closing the stale id would leave
+    // the newer block open forever. A block already closed keeps its close.
+    const current = db
+      .query<{ active_thread_id: string | null }, [string]>("SELECT active_thread_id FROM conversations WHERE id = ?")
+      .get(conversation.id)?.active_thread_id;
+    if (current) {
+      db.run("UPDATE threads SET closed_at = ?, closed_by = ? WHERE id = ? AND closed_at IS NULL", [now, reason, current]);
     }
     const block = createThread(db, conversation.agent_id, undefined, { conversationID: conversation.id });
     db.run("UPDATE threads SET opened_carry = ?, opened_tail = ?, created_at = ? WHERE id = ?", [
