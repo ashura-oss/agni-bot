@@ -257,12 +257,13 @@ function taskView(task: TaskRow, deps: DelegateTaskToolDeps): Record<string, unk
 }
 
 /**
- * How much of a delegated result goes into one tool result. The loop cuts a
- * whole tool result at 4,000 characters and shrinks every string in it when
- * it is longer, so the result text keeps to what leaves room for the other
- * fields of the view. Past this the text is cut and says where the rest is.
+ * How much of a delegated result goes into one tool result. The loop lets
+ * these tools' results carry strings up to this size intact (a whole result of
+ * up to 4,000 characters, see `LONG_RESULT_TOOLS` in the task loop) and cuts
+ * the whole tool result at 6,000. Past this the text is cut and says where the
+ * rest is.
  */
-export const TASK_VIEW_RESULT_MAX_CHARS = 3_000;
+export const TASK_VIEW_RESULT_MAX_CHARS = 4_000;
 
 function clipResult(value: string | null, artifactID: string | null): string | null {
   if (value === null || value.length <= TASK_VIEW_RESULT_MAX_CHARS) return value;

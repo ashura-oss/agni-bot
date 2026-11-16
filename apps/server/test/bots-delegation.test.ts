@@ -289,7 +289,7 @@ describe("S1-18: new bots can read files; delegated results are not clipped to a
     expect(view.result).toContain(artifact.id);
     expect(view.artifactRef).toBe(artifact.id);
     // And the loop does not shrink it again on the way to the model.
-    const sent = JSON.parse(fitToolResult(view)) as { result: string };
+    const sent = JSON.parse(fitToolResult(view, 6_000, 4_000)) as { result: string }; // the limits the loop gives task_status
     expect(sent.result).toContain("finding-100");
   });
 

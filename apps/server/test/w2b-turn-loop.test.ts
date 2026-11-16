@@ -22,7 +22,8 @@ import { ToolRegistry } from "../src/tools/registry";
 import { registerArtifactTool } from "../src/tools/artifact-tool";
 import { registerDelegateTaskTool } from "../src/tools/delegate-task-tool";
 import { saveArtifact } from "../src/stores/artifacts";
-import { getTask } from "../src/stores/tasks";
+import { getTask, setDelegationArtifact, setDelegationState } from "../src/stores/tasks";
+import { fitToolResult } from "../src/agent/task-loop";
 import { listJobs, parseJobPayload } from "../src/stores/jobs";
 import { JobRunner } from "../src/jobs/runner";
 import { registerTurnJob, summarizeResult } from "../src/jobs/turn";
@@ -296,5 +297,26 @@ describe("W2-B 5: an owner question that expires says so plainly", () => {
     const draft = JSON.parse(rows.find((row) => row.tool_name === "draft_email")!.result) as { decided: boolean; note: string };
     expect(draft.decided).toBe(false);
     expect(draft.note).toContain("nobody answered in time");
+  });
+});
+
+describe("W2-B 3 (follow-up): the task view carries a 4,000-character result intact", () => {
+  test("task_status returns a 4,000-character result whole, and the loop does not shrink it", async () => {
+    db = openDatabase(":memory:");
+    const registry = new ToolRegistry();
+    registerDelegateTaskTool(registry, { db, emit: () => undefined, currentAgentID: "ea", channelID: "main", parentTurnID: "trn_p", parentThreadID: "thr_p" });
+    const ctx = { threadID: "t", turnID: "u", signal: new AbortController().signal };
+    const call = (name: string, args: Record<string, unknown>) =>
+      (registry.get(name)!.handler as unknown as (a: Record<string, unknown>, c: unknown) => Promise<Record<string, unknown>>)(args, ctx);
+    const queued = await call("delegate_task", { toAgentID: "researcher", goal: "Report" }) as { taskID: string };
+    const text = `${"b".repeat(3_996)}-END`;
+    const artifact = saveArtifact(db, { taskID: queued.taskID, agentID: "researcher", content: text });
+    setDelegationArtifact(db, queued.taskID, artifact.id);
+    setDelegationState(db, queued.taskID, "done", text);
+
+    const view = await call("task_status", { taskID: queued.taskID });
+    expect(view.result).toBe(text);
+    const sent = JSON.parse(fitToolResult(view, 6_000, 4_000)) as { result: string };
+    expect(sent.result).toBe(text);
   });
 });
