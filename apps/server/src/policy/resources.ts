@@ -78,25 +78,38 @@ export function hostResource(raw: unknown): ToolResource[] {
 const DELETE_PROGRAMS = new Set(["rm", "rmdir", "unlink", "del", "erase", "shred", "trash", "rd"]);
 const CHANGE_PROGRAMS = new Set(["mv", "move", "ren", "rename", "cp", "copy", "tee", "dd", "truncate", "touch", "chmod", "chown", "sed", "ln", "install", "rsync"]);
 
-/** Split a shell line into words: quotes are removed, separators and redirections split words. */
-export function shellWords(command: string): string[] {
-  const words: string[] = [];
+/**
+ * Split a shell line into command segments, each a list of words. Quotes are removed; whitespace and
+ * redirections split words; `;`, `&&`, `||`, `|`, `&`, newlines, subshell parentheses and backticks end a
+ * segment, so the first word of each segment is the program that segment runs.
+ */
+export function shellSegments(command: string): string[][] {
+  const segments: string[][] = [];
+  let words: string[] = [];
   let current = "";
   let quote: string | null = null;
-  const flush = (): void => { if (current) words.push(current); current = ""; };
+  const flushWord = (): void => { if (current) words.push(current); current = ""; };
+  const endSegment = (): void => { flushWord(); if (words.length) segments.push(words); words = []; };
   for (const ch of command) {
     if (quote) {
       if (ch === quote) quote = null; else current += ch;
     } else if (ch === "'" || ch === "\"") {
       quote = ch;
-    } else if (/[\s;|&<>()`]/.test(ch)) {
-      flush();
+    } else if (/[;|&\n()`]/.test(ch)) {
+      endSegment();
+    } else if (/[\s<>]/.test(ch)) {
+      flushWord();
     } else {
       current += ch;
     }
   }
-  flush();
-  return words;
+  endSegment();
+  return segments;
+}
+
+/** Split a shell line into words: quotes are removed, separators and redirections split words. */
+export function shellWords(command: string): string[] {
+  return shellSegments(command).flat();
 }
 
 /** What a shell command does to files, by its programs: deleting, changing, or something else (run). */
@@ -107,15 +120,18 @@ export function commandOperation(command: string): Operation {
   return "run";
 }
 
+/** The words of one command segment that can name a file: the program name is dropped unless it is itself a path (`./run.sh`). */
+function segmentArguments(words: string[]): string[] {
+  const [program = "", ...rest] = words;
+  return /[\\/.~*?]/.test(program) ? words : rest;
+}
+
 /** Every word of the command that could name a file or folder, resolved against `cwd`, as comparison keys. */
 export function commandPaths(command: string, cwd: string): string[] {
   const home = homedir();
   const keys = new Set<string>();
-  const words = shellWords(command);
-  for (const [index, word] of words.entries()) {
+  for (const word of shellSegments(command).flatMap(segmentArguments)) {
     if (word.startsWith("-") || word.includes("=") && !/[\\/]/.test(word)) continue;
-    const isPathLike = /[\\/.~*?]/.test(word);
-    if (index === 0 && !isPathLike) continue; // the program name
     const expanded = word === "~" ? home : word.startsWith("~/") || word.startsWith("~\\") ? resolve(home, word.slice(2)) : word;
     const absolute = resolve(cwd, expanded);
     // A word with a pattern in it cannot be followed to a real file; any other is resolved the way a file tool resolves it, links included.
