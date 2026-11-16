@@ -6,7 +6,7 @@ import type { Config } from "../src/config";
 import { openDatabase } from "../src/db";
 import { HealthTracker } from "../src/models/health";
 import { Router } from "../src/models/router";
-import { allowedOrigin, startServer, type RunningServer } from "../src/ws/server";
+import { startServer, type RunningServer } from "../src/ws/server";
 
 /** C5 / H10: one auth gate, no crash on a throwing handler, Origin check on upgrade. */
 
@@ -103,14 +103,18 @@ describe("websocket auth gate", () => {
     await expect(open(running.url, { origin: "https://evil.example" })).rejects.toThrow();
   });
 
-  test("no Origin (native clients) and loopback origins are allowed", async () => {
+  test("no Origin (native clients) and the server's own origin are allowed; other loopback ports are not", async () => {
     const running = start();
     (await open(running.url)).close();
-    (await open(running.url, { origin: "http://127.0.0.1:5173" })).close();
-    expect(allowedOrigin("http://localhost:5173", "127.0.0.1")).toBe(true);
-    expect(allowedOrigin("http://[::1]:5173", "127.0.0.1")).toBe(true);
-    expect(allowedOrigin("http://100.64.0.1:5173", "100.64.0.1")).toBe(true);
-    expect(allowedOrigin("http://localhost.evil.example", "127.0.0.1")).toBe(false);
-    expect(allowedOrigin("null", "127.0.0.1")).toBe(false);
+    (await open(running.url, { origin: `http://127.0.0.1:${running.port}` })).close();
+    (await open(running.url, { origin: `http://localhost:${running.port}` })).close();
+    // A page on another local port (an unconfigured dev server, or any local app), a look-alike name and
+    // an opaque origin may not drive the socket. Plain HTTP shows the refusal without a failed handshake.
+    const upgrade = (origin: string) => fetch(`http://127.0.0.1:${running.port}/ws`, {
+      headers: { origin, upgrade: "websocket", connection: "Upgrade", "sec-websocket-version": "13", "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==" },
+    });
+    for (const origin of ["http://127.0.0.1:5173", "http://localhost.evil.example", "null"]) {
+      expect((await upgrade(origin)).status).toBe(403);
+    }
   });
 });

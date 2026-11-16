@@ -2,16 +2,11 @@ import type { Database } from "bun:sqlite";
 import { mkdir, chmod, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { imageSize } from "image-size";
+import { NO_BROWSER_ORIGINS, type OriginPolicy } from "../auth/origin";
 import { requestToken, verifyToken } from "../auth/tokens";
 import { newID, nowISO } from "../util/ids";
 
 const MAX_BYTES = 10 * 1024 * 1024;
-const headers = {
-  "access-control-allow-origin": "*",
-  "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
-  "access-control-allow-headers": "authorization, content-type",
-  "cache-control": "private, no-store",
-};
 
 interface BackgroundRow { id: string; device_id: string; mime_type: string; size: number; path: string; created_at: string }
 
@@ -20,7 +15,12 @@ function referenced(db: Database, id: string): boolean {
     .some((profile) => profile.profile_json.includes(`\"assetID\":\"${id}\"`));
 }
 
-export async function backgroundRequest(request: Request, db: Database, dbPath: string): Promise<Response> {
+export async function backgroundRequest(request: Request, db: Database, dbPath: string, policy: OriginPolicy = NO_BROWSER_ORIGINS): Promise<Response> {
+  // A page on another origin gets no answer at all, with or without a token. An
+  // allowed origin is echoed back; there is no wildcard here.
+  const foreign = policy.rejectForeignOrigin(request);
+  if (foreign) return foreign;
+  const headers = { ...policy.cors(request, "GET, POST, DELETE, OPTIONS", "authorization, content-type"), "cache-control": "private, no-store" };
   const reply = (data: unknown, status = 200) => Response.json(data, { status, headers });
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers });
   const token = requestToken(request);
