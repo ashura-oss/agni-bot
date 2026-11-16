@@ -20,7 +20,7 @@ import { dayTotals, type DayTotals } from "../stores/usage";
 import { purgeExpiredShares } from "../share/document";
 import { shareRequest } from "../share/http";
 import { dispatch, errorFrame, purgeRevokedQueues, newSession, resumeQueuedMessages, type DispatchDeps, type Session } from "./dispatch";
-import { isDeviceRevoked, requestToken, verifyToken } from "../auth/tokens";
+import { isDeviceRevoked, requestToken, touchDevice, verifyToken } from "../auth/tokens";
 import { authRequest } from "../auth/web";
 import { gateDevice, requestDevice } from "../auth/gate";
 import { clientAddress, createPairLimiter } from "../auth/rate-limit";
@@ -35,7 +35,9 @@ import { dirname, resolve } from "node:path";
 import { ChatGPTAuth } from "../models/chatgpt-auth";
 import { PushService } from "../push/web-push";
 import { homePath } from "../home";
-import { redact } from "../util/redact";
+import { providerKeyEnvNames } from "../models/providers";
+import { redact, registerSecretsFromEnv, secretEnvNames } from "../util/redact";
+import { StreamRedactor } from "../util/redact-stream";
 
 export interface RunningServer {
   readonly port: number;
@@ -95,6 +97,9 @@ export function healthReport(db: Database, router: Router, seq: number, startedA
 }
 
 export function startServer(config: Config, db: Database, router: Router, startedAt = Date.now()): RunningServer {
+  // Provider keys and other secret settings read from the environment (config.env in file mode,
+  // the shell otherwise) are masked from here on, wherever the server logs, sends or stores text.
+  registerSecretsFromEnv(secretEnvNames(Bun.env, providerKeyEnvNames()), Bun.env);
   const frameLog = new FrameLog(config.frameLogCapacity, (seq) => writeMeta(db, "seq", String(seq)));
   // A fresh database has no persisted counter and starts at 1. After a clean stop the
   // counter is exact (the stop left a marker equal to it), so resume from it and
@@ -123,7 +128,25 @@ export function startServer(config: Config, db: Database, router: Router, starte
     timeZone: config.timeZone,
   });
 
+  // A secret can be split across streamed `token` frames; a short tail that could be the start of one waits for the next piece.
+  const tokenStreams = new StreamRedactor();
+
   const emit = (body: ServerFrameBody): ServerFrame => {
+    if (body.type === "token") {
+      // A reset clears the client's text for this step, so what was held with it is dropped too.
+      if (body.reset) tokenStreams.drop(body.turnID);
+      const delta = tokenStreams.push(body.turnID, body.delta);
+      if (delta.length === 0 && !body.reset) return { ...body, seq: frameLog.seq } as ServerFrame;
+      body = { ...body, delta };
+    } else if (body.type === "turn.end") {
+      // The stream is over: send what was held, before the frame that ends the turn.
+      const tail = tokenStreams.flush(body.turnID);
+      if (tail) sendToSessions({ type: "token", turnID: body.turnID, threadID: body.threadID, delta: tail });
+    }
+    return sendToSessions(body);
+  };
+
+  const sendToSessions = (body: ServerFrameBody): ServerFrame => {
     const frame = frameLog.next(body);
     const connected = new Set<string>();
     for (const [socket, session] of sessions) {
@@ -140,7 +163,12 @@ export function startServer(config: Config, db: Database, router: Router, starte
   // devices among its open sessions and closes them.
   const revocationSweep = setInterval(() => {
     for (const [socket, session] of sessions) {
-      if (!session.authed || !session.device || !isDeviceRevoked(db, session.device.id)) continue;
+      if (!session.authed || !session.device) continue;
+      if (!isDeviceRevoked(db, session.device.id)) {
+        // An open socket is use: it keeps the device inside the idle limit (at most one write an hour).
+        touchDevice(db, session.device.id);
+        continue;
+      }
       session.authed = false;
       socket.close(4003, "revoked");
     }
@@ -213,17 +241,17 @@ export function startServer(config: Config, db: Database, router: Router, starte
         const foreign = policy.rejectForeignOrigin(request);
         if (foreign) return foreign;
         if (request.method !== "GET" && request.method !== "HEAD") {
-          return new Response("method not allowed", { status: 405, headers: { allow: "GET, HEAD" } });
+          return new Response("method not allowed", { status: 405, headers: { allow: "GET, HEAD", "x-content-type-options": "nosniff" } });
         }
         // Only a paired device (cookie or bearer token) gets providers, usage and capacity.
         const paired = await requestDevice(request, db);
         return Response.json(paired ? healthReport(db, router, frameLog.seq, startedAt) : liveness(startedAt), {
-          headers: { "cache-control": "no-store" },
+          headers: { "cache-control": "no-store", "x-content-type-options": "nosniff" },
         });
       }
       if (url.pathname.startsWith("/auth/")) {
         return authRequest(request, db, policy.originAllowed, {
-          clientKey: clientAddress(srv.requestIP(request)?.address, request.headers.get("x-forwarded-for")),
+          clientKey: clientAddress(srv.requestIP(request)?.address, request.headers.get("x-forwarded-for"), Bun.env.AGNI_TRUST_PROXY === "1"),
           pairLimiter,
           publicOrigin: config.publicOrigin,
         });
@@ -349,6 +377,7 @@ export function startServer(config: Config, db: Database, router: Router, starte
       markServerStopping(db);
       cancelAllTurns();
       sessions.clear();
+      tokenStreams.clear();
       chatgpt.stop();
       server.stop(true);
       frameLog.flush();

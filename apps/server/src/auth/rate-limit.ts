@@ -81,15 +81,17 @@ export function createPairLimiter(now: () => number = Date.now): PairLimiter {
 const LOOPBACK_PEERS = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
 /**
- * The address to count a request against. The socket peer is the truth; but
- * behind a proxy on this machine (`tailscale serve`) every peer is loopback,
- * so there the proxy's own `X-Forwarded-For` entry, the last one, which the
- * proxy appended and the client cannot forge, names the caller. A non-loopback
- * peer's header is never believed.
+ * The address to count a request against. The socket peer is the truth, and
+ * it is the answer unless the owner has said a proxy on this machine sits in
+ * front (`AGNI_TRUST_PROXY=1`, as with `tailscale serve`, where every peer is
+ * loopback). Only then is `X-Forwarded-For` read: its last entry, which the
+ * proxy appended and the client cannot forge, and only from a loopback peer.
+ * Without the flag the header is ignored, so a caller cannot pick its own
+ * address by sending one.
  */
-export function clientAddress(peer: string | undefined, forwardedFor: string | null): string {
+export function clientAddress(peer: string | undefined, forwardedFor: string | null, trustProxy = false): string {
   const address = peer ?? "unknown";
-  if (!LOOPBACK_PEERS.has(address) || !forwardedFor) return address;
+  if (!trustProxy || !LOOPBACK_PEERS.has(address) || !forwardedFor) return address;
   const last = forwardedFor.split(",").pop()?.trim();
   return last ? last.slice(0, 64) : address;
 }

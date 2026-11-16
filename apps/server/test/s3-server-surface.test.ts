@@ -14,7 +14,7 @@ import { startHarness, type Harness } from "./ws-harness";
 let harness: Harness | undefined;
 const dirs: string[] = [];
 const saved: Record<string, string | undefined> = {};
-const ENV_KEYS = ["AGNI_DEV", "AGNI_ALLOWED_ORIGINS", "AGNI_SHARE_DIR", "AGNI_WEB_DIR"];
+const ENV_KEYS = ["AGNI_DEV", "AGNI_ALLOWED_ORIGINS", "AGNI_SHARE_DIR", "AGNI_WEB_DIR", "AGNI_TRUST_PROXY"];
 
 beforeEach(() => {
   for (const key of ENV_KEYS) saved[key] = process.env[key];
@@ -226,6 +226,8 @@ describe("pairing rate limit", () => {
   });
 
   test("a valid code is refused while the address is limited, and still works from another address", async () => {
+    // Behind `tailscale serve` the owner sets this so the proxy's entry names the caller.
+    process.env.AGNI_TRUST_PROXY = "1";
     harness = await startHarness();
     for (let i = 0; i < 5; i++) await pairWith(harness.base, { "x-forwarded-for": "198.51.100.7" });
     const code = await mintPairCode(harness.db);
@@ -244,6 +246,8 @@ describe("pairing rate limit", () => {
   });
 
   test("a client that invents its own X-Forwarded-For entries cannot widen its allowance", async () => {
+    // Behind `tailscale serve` the owner sets this so the proxy's entry names the caller.
+    process.env.AGNI_TRUST_PROXY = "1";
     harness = await startHarness();
     // The proxy appends the real peer last; entries a client put first are ignored.
     for (let i = 0; i < 5; i++) await pairWith(harness.base, { "x-forwarded-for": `10.0.0.${i}, 198.51.100.7` });
@@ -251,6 +255,8 @@ describe("pairing rate limit", () => {
   });
 
   test("a ceiling across all addresses stops a flood that rotates its address", async () => {
+    // Behind `tailscale serve` the owner sets this so the proxy's entry names the caller.
+    process.env.AGNI_TRUST_PROXY = "1";
     harness = await startHarness();
     let refused = 0;
     for (let i = 0; i < 40; i++) {
