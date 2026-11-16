@@ -295,6 +295,8 @@ export class AppModel {
    * ones left over from the old one.
    */
   private connectionEpoch = 0;
+  /** The conversation whose block the history handler already asked the daemon to open. */
+  private openAskedFor: string | null = null;
   /** When Stop and a rule revoke were last sent: both can be answered `not_found`, for different reasons. */
   private lastCancelAt = 0;
   private lastRevokeAt = 0;
@@ -1616,6 +1618,7 @@ export class AppModel {
             break;
           case "handshaking":
             this.connectionEpoch += 1;
+            this.openAskedFor = null;
             this.outageStart = this.lastFrameAt;
             break;
           case "waiting":
@@ -1759,7 +1762,8 @@ export class AppModel {
     }
 
     if (frame.type === "msg.new") {
-      if (frame.channelId !== this.activeChannel() || frame.internal) return;
+      // The agent's own channel, or the one the daemon bound this chat to (a routine posts into either).
+      if ((frame.channelId !== this.activeChannel() && frame.channelId !== this.boundChannelID) || frame.internal) return;
       this.statusText = null;
       this.run(this.conversation.apply(frame));
       this.publish();
@@ -1813,7 +1817,12 @@ export class AppModel {
       // agent they name is what tells a live reply from a stale one.
       if (frame.agentID !== this.conversation.agentID) return;
       const freshSurface = this.conversation.conversationID !== frame.conversationID;
+      // This answer is to the open the history handler asked for (to learn the session block):
+      // the history it follows is already on screen, so asking for it again would loop for as
+      // long as the conversation has no block.
+      const answersHistoryOpen = !freshSurface && this.openAskedFor === frame.conversationID;
       if (freshSurface) {
+        this.openAskedFor = null;
         this.conversation.bind(
           frame.conversationID,
           frame.agentID,
@@ -1823,7 +1832,7 @@ export class AppModel {
         this.conversation.startSession(frame.sessionID, frame.conversationID);
       }
       const connection = this.connection;
-      if (connection && isReady(this.connectionState)) {
+      if (connection && isReady(this.connectionState) && !answersHistoryOpen) {
         void connection
           .send({ type: "conversation.history", conversationID: frame.conversationID, limit: 400 })
           .catch(() => undefined);
@@ -1848,12 +1857,15 @@ export class AppModel {
         frame.conversationID,
         this.conversation.agentID,
         frame.messages,
+        // A turn running right now (added to the frame by newer daemons; absent from older ones).
+        (frame as { runningTurn?: { turnID: string; threadID: string; agentID: string } }).runningTurn ?? null,
       );
       // History does not say how a turn ended; put back the "didn't finish" marks this browser saw.
       this.conversation.restoreStops(loadStops());
-      if (this.conversation.threadID === null) {
+      if (this.conversation.threadID === null && this.openAskedFor !== frame.conversationID) {
         const connection = this.connection;
         if (connection && isReady(this.connectionState)) {
+          this.openAskedFor = frame.conversationID;
           void connection
             .send({
               type: "conversation.open",
