@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test";
-import { calls, say, textOf, toolPairingProblems, toolResult, useScenarios, type ToolCallSpec } from "./harness";
+import { describe, expect } from "bun:test";
+import { scenarioTest, calls, say, textOf, toolPairingProblems, toolResult, useScenarios, type ToolCallSpec } from "./harness";
 
 /**
  * Sprint 1 exit scenarios 8, 9 and 11: a runaway response is bounded, the
@@ -10,7 +10,7 @@ import { calls, say, textOf, toolPairingProblems, toolResult, useScenarios, type
 const scenarios = useScenarios();
 
 describe("S1-08 tool-call cap", () => {
-  test("one response with 40 tool calls runs at most 25, and every call id gets a result", async () => {
+  scenarioTest("one response with 40 tool calls runs at most 25, and every call id gets a result", async () => {
     const s = await scenarios.start();
     const specs: ToolCallSpec[] = Array.from({ length: 40 }, (_, index) => ({
       id: `call_${String(index).padStart(2, "0")}`,
@@ -39,7 +39,7 @@ describe("S1-08 tool-call cap", () => {
 });
 
 describe("S1-16 usage ledger", () => {
-  test("a three-step turn records the usage of all three steps", async () => {
+  scenarioTest("a three-step turn records the usage of all three steps", async () => {
     const s = await scenarios.start();
     s.model.queue(
       { calls: [{ name: "memory_search", args: { query: "first lookup" }, id: "call_a" }], usage: { in: 100, out: 10 } },
@@ -85,7 +85,7 @@ describe("S1-14 compaction keeps call/result pairs and the current user message"
     return s;
   }
 
-  test("no request sends a tool result without its calling assistant message", async () => {
+  scenarioTest("no request sends a tool result without its calling assistant message", async () => {
     const s = await longTurn();
     const last = s.model.requests.at(-1)!;
     const keptChars = last.messages
@@ -99,7 +99,7 @@ describe("S1-14 compaction keeps call/result pairs and the current user message"
     expect(problems).toEqual([]);
   });
 
-  test("the owner's latest message is still a user message, verbatim, in every request", async () => {
+  scenarioTest("the owner's latest message is still a user message, verbatim, in every request", async () => {
     const s = await longTurn();
     const withoutIt = s.model.requests
       .filter((req) => !req.messages.some((message) => message.role === "user" && textOf(message) === request))

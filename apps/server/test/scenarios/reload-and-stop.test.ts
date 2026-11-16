@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test";
-import { eventually, gate, useScenarios } from "./harness";
+import { describe, expect } from "bun:test";
+import { scenarioTest, eventually, gate, useScenarios } from "./harness";
 
 /**
  * Sprint 1 exit scenarios 1 and 2: a turn belongs to the server, not to the
@@ -10,7 +10,7 @@ import { eventually, gate, useScenarios } from "./harness";
 const scenarios = useScenarios();
 
 describe("S1-01 reload mid-turn", () => {
-  test("a turn survives its socket closing; the client resyncs and gets the rest", async () => {
+  scenarioTest("a turn survives its socket closing; the client resyncs and gets the rest", async () => {
     const s = await scenarios.start();
     const midStream = gate();
     s.model.queue({ text: ["First half of the answer. ", "Second half of the answer."], hold: midStream });
@@ -44,7 +44,7 @@ describe("S1-01 reload mid-turn", () => {
 });
 
 describe("S1-02 stop from a second device", () => {
-  test("msg.cancel from device B stops the turn device A started", async () => {
+  scenarioTest("msg.cancel from device B stops the turn device A started", async () => {
     const s = await scenarios.start();
     const midStream = gate();
     s.model.queue({ text: ["Working on it. ", "Still working."], hold: midStream });

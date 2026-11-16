@@ -1,11 +1,13 @@
-import { describe, expect, test } from "bun:test";
-import { gate, say, useScenarios, type Scenario } from "./harness";
+import { describe, expect } from "bun:test";
+import { scenarioTest, gate, say, useScenarios, type Scenario } from "./harness";
 
 /**
  * Sprint 1 exit scenario 3 (S1-03): the server is killed while a turn runs.
  *
  * A hard kill leaves `agent_sessions.state = 'running'` and a `turns` row with
- * no end. The scenario writes exactly that into the database, then boots a new
+ * no end. The crash is SIMULATED by rewriting database state (a finished turn
+ * is flipped back to running); nothing is actually killed, because a turn
+ * cannot be killed inside the test process. The scenario then boots a new
  * server on the same file. After boot the old turn must be dead and
  * unresumable; the next message must start a new turn under a new ID that the
  * owner can cancel.
@@ -27,7 +29,7 @@ async function serverRestartedAfterCrash(s: Scenario): Promise<{ crashedTurnID: 
 }
 
 describe("S1-03 restart mid-turn", () => {
-  test("after boot the old turn is marked interrupted, not left running", async () => {
+  scenarioTest("after boot the old turn is marked interrupted, not left running", async () => {
     const s = await scenarios.start();
     const { crashedTurnID, threadID } = await serverRestartedAfterCrash(s);
 
@@ -42,7 +44,7 @@ describe("S1-03 restart mid-turn", () => {
     expect(turn?.stop_reason, "and it did not finish normally").not.toBe("end");
   });
 
-  test("the next message starts a new turn under a new ID", async () => {
+  scenarioTest("the next message starts a new turn under a new ID", async () => {
     const s = await scenarios.start();
     const { crashedTurnID } = await serverRestartedAfterCrash(s);
 
@@ -54,7 +56,7 @@ describe("S1-03 restart mid-turn", () => {
     await after.waitFor("turn.end", { match: (frame) => frame.turnID === second.turnID, why: "the new turn to finish" });
   });
 
-  test("cancelling the new turn by the ID the server announced works", async () => {
+  scenarioTest("cancelling the new turn by the ID the server announced works", async () => {
     const s = await scenarios.start();
     await serverRestartedAfterCrash(s);
 

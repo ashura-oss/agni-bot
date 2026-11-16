@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
-import { describe, expect, test } from "bun:test";
-import { calls, call, loadTools, say, useScenarios, type Scenario, type ScenarioClient } from "./harness";
+import { describe, expect } from "bun:test";
+import { scenarioTest, calls, call, loadTools, say, useScenarios, type Scenario, type ScenarioClient } from "./harness";
 
 /**
  * Sprint 1 exit scenarios 4 to 7: approval cards mean what they say.
@@ -20,7 +20,7 @@ async function expectCard(client: ScenarioClient, since: number, why: string) {
 }
 
 describe("S1-04 stop mid-step", () => {
-  test("cancelling at the first approval card stops the rest of the step", async () => {
+  scenarioTest("cancelling at the first approval card stops the rest of the step", async () => {
     const s = await scenarios.start();
     const touchOne = s.outside("one.txt");
     const touchTwo = s.outside("two.txt");
@@ -68,7 +68,7 @@ describe("S1-05 approval after the turn ended", () => {
     return { a, requestID: card.requestID };
   }
 
-  test("the client is told the card is closed", async () => {
+  scenarioTest("the client is told the card is closed", async () => {
     const s = await scenarios.start();
     const { a, requestID } = await endedWithCardPending(s);
 
@@ -81,20 +81,21 @@ describe("S1-05 approval after the turn ended", () => {
     expect(["expired", "cancelled"]).toContain(closed.reason);
   });
 
-  test("a late approve.reply is refused with an error", async () => {
+  scenarioTest("a late approve.reply is refused with an error", async () => {
     const s = await scenarios.start();
     const { a, requestID } = await endedWithCardPending(s);
 
     const since = a.mark();
     a.send({ type: "approve.reply", requestID, decision: "once" });
-    await a.waitFor("error", {
+    const error = await a.waitFor("error", {
       since,
       timeoutMs: 1_500,
       why: `an error for an approve.reply to the dead card ${requestID}`,
     });
+    expect(error.code).toBe("unknown_request");
   });
 
-  test("hello does not replay the dead card", async () => {
+  scenarioTest("hello does not replay the dead card", async () => {
     const s = await scenarios.start();
     const { requestID } = await endedWithCardPending(s);
 
@@ -105,7 +106,7 @@ describe("S1-05 approval after the turn ended", () => {
 });
 
 describe("S1-06 scratch overwrite gates", () => {
-  test("a new scratch file is written freely; writing the same path again asks first", async () => {
+  scenarioTest("a new scratch file is written freely; writing the same path again asks first", async () => {
     const s = await scenarios.start();
     const path = `${s.scratch}/notes.txt`;
     s.model.queue(
@@ -131,7 +132,7 @@ describe("S1-06 scratch overwrite gates", () => {
 });
 
 describe("S1-07 always allow persists for one bot, tool and target", () => {
-  test("a remembered write skips the card; another target or another bot still asks", async () => {
+  scenarioTest("a remembered write skips the card; another target or another bot still asks", async () => {
     const s = await scenarios.start();
     const granted = s.outside("granted.txt");
     const other = s.outside("other.txt");

@@ -12,7 +12,7 @@
  * tears everything down (cancels turns, rejects pending cards, closes
  * sockets, removes the temp home, restores env and the process-wide roster).
  */
-import { afterEach } from "bun:test";
+import { afterEach, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -382,6 +382,8 @@ export class ScenarioClient {
     text: string,
     options: { channelId?: string; toAgentId?: string; timeoutMs?: number } = {},
   ): Promise<{ turnID: string; threadID: string; since: number }> {
+    // Frames from earlier background work may still be in flight; flush them so the mark is clean.
+    await this.sync();
     const since = this.mark();
     this.send({
       type: "msg.send",
@@ -624,12 +626,20 @@ export class Scenario {
   }
 }
 
+/** Scenarios wait on sockets and the database; Bun's 5 s default is too tight for a failing run's waits. */
+export const SCENARIO_TIMEOUT_MS = 20_000;
+
+/** `test` with the scenario timeout. */
+export function scenarioTest(name: string, body: () => Promise<void>): void {
+  test(name, body, SCENARIO_TIMEOUT_MS);
+}
+
 /** Register the teardown hook and hand back the scenario starter. Call once per test file, at the top. */
 export function useScenarios(): { start: (options?: ScenarioOptions) => Promise<Scenario> } {
   const live: Scenario[] = [];
   afterEach(async () => {
     for (const scenario of live.splice(0)) await scenario.stop();
-  });
+  }, SCENARIO_TIMEOUT_MS);
   return {
     async start(options) {
       const scenario = await Scenario.start(options);
