@@ -14,7 +14,7 @@ import type { ClientFrame } from "@agni/protocol";
 import { PROTOCOL_VERSION } from "@agni/protocol";
 import { decodeServerFrame, encodeClientFrame, frameSeq, type IncomingFrame } from "./protocol";
 import type { ServerSettings } from "./settings";
-import { websocketURL } from "./settings";
+import { checkWebsocketURL } from "./settings";
 import { TransportError, WebSocketTransport, type FrameTransport } from "./transport";
 
 export type ConnectionState =
@@ -207,11 +207,12 @@ export class AgniConnection {
 
   private async session(id: number): Promise<string> {
     this.setState({ kind: "connecting" });
-    const url = websocketURL(this.settings);
-    if (!url) {
-      this.setState({ kind: "refused", reason: "That server address is not a websocket URL." });
+    const checked = checkWebsocketURL(this.settings);
+    if (!checked.ok) {
+      this.setState({ kind: "refused", reason: checked.reason });
       throw new AbortError();
     }
+    const url = checked.url;
 
     const socket = this.makeTransport();
     this.transport = socket;
