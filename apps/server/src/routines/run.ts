@@ -2,9 +2,10 @@ import type { Database } from "bun:sqlite";
 import type { ServerFrameBody } from "@agni/protocol";
 import type { Router } from "../models/router";
 import { runTaskTurn, type TaskTurnSettings } from "../agent/task-loop";
-import { resolvePersona } from "../agent/personas";
+import { canonicalAgentID, resolvePersona, type ResolvedPersona } from "../agent/personas";
 import { rootGuardrail } from "../agent/guardrails";
 import { backgroundSession, ensureConversation, getConversation } from "../stores/conversations";
+import { appendChannelMessage, ensureDMChannel } from "../stores/channels";
 import { getThread } from "../stores/threads";
 import { getJob, setJobEnabled } from "../stores/jobs";
 import { newID, nowISO } from "../util/ids";
@@ -153,6 +154,7 @@ export async function executeRoutine(deps: RoutineRunDeps, routine: Routine): Pr
     }
     // A routine that has nothing for the owner says so with this marker and stays silent.
     if (/^\s*NOTHING_TO_REPORT\b/.test(result.text)) return record(deps, run);
+    if (run.outcome === "ran") postFinalReply(deps, persona, result.turnID);
     deps.emit({ type: "notify", title: `${persona.name} · ${routine.name}`, body: run.summary ?? "Routine completed", sound: false, threadID, agentId: persona.id });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -161,6 +163,26 @@ export async function executeRoutine(deps: RoutineRunDeps, routine: Routine): Pr
     maybePause(deps, routine, updateStreak(deps, routine, false));
   }
   return record(deps, run);
+}
+
+/**
+ * The routine's final reply, as the thread keeps it (state block cut), goes to the owner's channel with that
+ * bot as a `msg.new`, so it shows without a reload. It is marked peer-influenced: it was written from saved
+ * state and pages an outsider can write. The channel is given to the post, not to the turn, so the turn does
+ * not stream and does not read the channel's history.
+ */
+function postFinalReply(deps: RoutineRunDeps, persona: Pick<ResolvedPersona, "id" | "name">, turnID: string): void {
+  const last = deps.db.query<{ text: string }, [string]>("SELECT text FROM messages WHERE turn_id = ? AND role = 'assistant' ORDER BY created_at DESC, rowid DESC LIMIT 1").get(turnID);
+  const text = last?.text.trim();
+  if (!text) return;
+  const channelID = canonicalAgentID(persona.id) === "ea" ? "main" : ensureDMChannel(deps.db, persona.id).id;
+  const row = appendChannelMessage(deps.db, { channelID, fromType: "agent", fromID: persona.id, text, turnID, uiHint: "normal", peerInfluenced: true });
+  const agent = deps.db.query<{ display_name: string | null; avatar_color: string | null }, [string]>("SELECT display_name, avatar_color FROM agents WHERE id = ?").get(persona.id);
+  deps.emit({
+    type: "msg.new", id: row.id, channelId: channelID, fromType: "agent", fromId: persona.id,
+    senderName: agent?.display_name ?? persona.name, ...(agent?.avatar_color ? { senderColor: agent.avatar_color } : {}),
+    text, internal: false, uiHint: "normal", createdAt: row.created_at,
+  });
 }
 
 /**

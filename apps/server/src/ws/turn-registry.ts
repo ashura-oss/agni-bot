@@ -69,13 +69,18 @@ export type PauseAbortReason = "paused" | "agent_off";
  * Abort the running turns a pause covers: every turn, or only the turns of one bot. Returns how many were
  * stopped. A turn registered without a bot is stopped only by a pause of everything.
  */
-export function cancelTurnsForPause(reason: PauseAbortReason, agentID?: string): number {
+export function cancelTurnsForPause(
+  reason: PauseAbortReason,
+  agentID?: string,
+  onStopped?: (turn: { turnID: string; threadID: string; agentID: string | undefined }) => void,
+): number {
   let stopped = 0;
-  for (const turn of running.values()) {
+  for (const [turnID, turn] of running) {
     if (agentID !== undefined && turn.agentID !== agentID) continue;
     if (turn.controller.signal.aborted) continue;
     turn.controller.abort(reason);
     stopped += 1;
+    onStopped?.({ turnID, threadID: turn.threadID, agentID: turn.agentID });
   }
   return stopped;
 }

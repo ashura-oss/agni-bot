@@ -265,7 +265,7 @@ export class JobRunner {
 }
 
 /** The bot a bot-kind job runs as: the turn's own agent (the main assistant when none is named) or its routine's. */
-function jobAgentID(db: Database, job: JobRow): string | null {
+export function jobAgentID(db: Database, job: JobRow): string | null {
   let payload: { agentID?: unknown; routineID?: unknown };
   try {
     payload = parseJobPayload(job);
