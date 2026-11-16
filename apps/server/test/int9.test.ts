@@ -66,7 +66,7 @@ async function abortedWith(reason: string | undefined): Promise<string[]> {
     emit: () => undefined, signal: controller.signal,
   });
   expect(result.stopReason).toBe("cancelled");
-  return db.query<{ text: string }, [string]>("SELECT text FROM messages WHERE thread_id = ? AND role = 'system'").all(thread.id).map((row) => row.text);
+  return db.query<{ text: string }, [string]>("SELECT text FROM messages WHERE thread_id = ? AND role = 'system'").all(thread.id).map((row) => row.text.split("\n[Record")[0]!);
 }
 
 describe("the note matches the reason the turn was aborted", () => {

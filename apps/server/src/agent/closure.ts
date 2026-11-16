@@ -10,6 +10,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { appendMessage } from "../stores/threads";
+import { entry } from "./card-text";
 
 /**
  * The wording is fixed server text, and careful about one thing: a request that
@@ -38,18 +39,91 @@ const EARLIER_WORDINGS = [
   "[My previous request came from a device that has since been revoked. That request is closed: I will not resume it, retry its actions, or ask for its approvals again.]",
 ];
 
-const CLOSURE_NOTES: ReadonlySet<string> = new Set([STOPPED_REQUEST_NOTE, INTERRUPTED_REQUEST_NOTE, REVOKED_REQUEST_NOTE, ...EARLIER_WORDINGS]);
+const CLOSURE_NOTES: readonly string[] = [STOPPED_REQUEST_NOTE, INTERRUPTED_REQUEST_NOTE, REVOKED_REQUEST_NOTE, ...EARLIER_WORDINGS];
 
-/** True for a stored row that is one of these notes (and not, say, a scheduled job's instruction). */
+/**
+ * True for a stored row that is one of these notes, alone or followed by the record of what the
+ * request had done (and not, say, a scheduled job's instruction).
+ */
 export function isClosureNote(role: string, text: string): boolean {
-  return role === "system" && CLOSURE_NOTES.has(text);
+  return role === "system" && CLOSURE_NOTES.some((note) => text === note || text.startsWith(`${note}\n[Record`));
+}
+
+/** Most calls a note lists; the rest are counted. */
+const RECORD_LIMIT = 10;
+
+/** The argument that says what a call was about, in the order a person would name it. */
+const TARGET_KEYS = ["path", "command", "to", "recipients", "attendees", "url", "title", "name", "toAgentID", "query"] as const;
+
+function targetOf(args: unknown): string {
+  if (typeof args !== "object" || args === null) return "";
+  const record = args as Record<string, unknown>;
+  for (const key of TARGET_KEYS) {
+    const value = record[key];
+    if (value === undefined || value === null || value === "") continue;
+    return entry(Array.isArray(value) ? value.map((item) => (typeof item === "string" ? item : JSON.stringify(item))).join(", ") : value, 80);
+  }
+  return "";
+}
+
+interface RecordedCall { tool_name: string; args: string; result: string | null; ok: number; error: string | null; card: string | null }
+type Bucket = "done" | "failed" | "denied" | "notRun";
+
+function bucketOf(row: RecordedCall): { bucket: Bucket; outcome: string } {
+  if (row.error === "approval_rejected") return { bucket: "denied", outcome: "denied" };
+  if (row.error !== null && ["approval_expired", "tool_not_allowed", "domain_not_allowed", "tool_not_loaded", "cancelled"].includes(row.error)) {
+    return { bucket: "notRun", outcome: "not run: refused or not approved" };
+  }
+  if (row.result === null) {
+    // No result was stored: a call still waiting on its card never ran; one without a card was running.
+    return row.card !== null
+      ? { bucket: "notRun", outcome: "not run: interrupted before it ran" }
+      : { bucket: "notRun", outcome: "was running when interrupted: outcome unknown, check before repeating" };
+  }
+  return row.ok === 1 && row.error === null ? { bucket: "done", outcome: "ok" } : { bucket: "failed", outcome: "failed" };
+}
+
+/**
+ * What the tool log shows a request did, as one line of server text for the model. Built from the stored
+ * calls only: the tool, what it was about (cleaned and cut), and how it ended, never a result body.
+ */
+function recordOf(db: Database, turnID: string): string {
+  const rows = db
+    .query<RecordedCall, [string]>(
+      `SELECT tc.tool_name, tc.args, tc.result, tc.ok, tc.error,
+              (SELECT a.status FROM approvals a WHERE a.turn_id = tc.turn_id AND a.call_id = tc.call_id LIMIT 1) AS card
+       FROM tool_calls tc WHERE tc.turn_id = ? ORDER BY tc.created_at, tc.rowid`,
+    )
+    .all(turnID);
+  if (rows.length === 0) return "[Record from the tool log: No tool call of that request had run.]";
+  const sections: Array<[Bucket, string]> = [["done", "Already done"], ["failed", "Failed"], ["denied", "Denied"], ["notRun", "Not done"]];
+  const described = rows.map((row) => {
+    const { bucket, outcome } = bucketOf(row);
+    let args: unknown = {};
+    try { args = JSON.parse(row.args); } catch { /* an unreadable call is listed by name only */ }
+    const target = targetOf(args);
+    return { bucket, text: `${entry(row.tool_name, 60)}${target ? ` ${target}` : ""} (${outcome})` };
+  });
+  let shown = 0;
+  const parts: string[] = [];
+  for (const [bucket, label] of sections) {
+    const items = described.filter((call) => call.bucket === bucket);
+    const room = Math.max(0, RECORD_LIMIT - shown);
+    if (items.length === 0 || room === 0) continue;
+    const take = items.slice(0, room);
+    shown += take.length;
+    parts.push(`${label}: ${take.map((call) => call.text).join("; ")}`);
+  }
+  const more = described.length - shown;
+  return `[Record from the tool log of that request (not from memory): ${parts.join(". ")}${more > 0 ? ` (and ${more} more)` : ""}. I will never say that anything listed as done did not happen, and I will not repeat it.]`;
 }
 
 export function closeRequest(db: Database, params: { threadID: string; turnID?: string; reason: "stopped" | "interrupted" | "revoked" }): void {
+  const base = params.reason === "stopped" ? STOPPED_REQUEST_NOTE : params.reason === "revoked" ? REVOKED_REQUEST_NOTE : INTERRUPTED_REQUEST_NOTE;
   appendMessage(db, {
     threadID: params.threadID,
     ...(params.turnID ? { turnID: params.turnID } : {}),
     role: "system",
-    text: params.reason === "stopped" ? STOPPED_REQUEST_NOTE : params.reason === "revoked" ? REVOKED_REQUEST_NOTE : INTERRUPTED_REQUEST_NOTE,
+    text: params.turnID ? `${base}\n${recordOf(db, params.turnID)}` : base,
   });
 }
