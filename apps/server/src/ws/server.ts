@@ -23,6 +23,8 @@ import { isDeviceRevoked, requestToken, verifyToken } from "../auth/tokens";
 import { authRequest } from "../auth/web";
 import { webAppRequest } from "./web-app";
 import { FrameLog } from "./frame-log";
+import { recoverInterruptedTurns } from "./boot-recovery";
+import { cancelAllTurns, whenNoTurnsRunning } from "./turn-registry";
 import { dirname, resolve } from "node:path";
 import { ChatGPTAuth } from "../models/chatgpt-auth";
 import { PushService } from "../push/web-push";
@@ -35,7 +37,12 @@ export interface RunningServer {
   readonly plugins: PluginService | undefined;
   /** Fan out a frame to every authed session (job results, notices). */
   emit(body: ServerFrameBody): ServerFrame;
-  stop(): void;
+  /**
+   * Stop serving and cancel running turns. Resolves once those turns have
+   * finished writing, so it is safe to close the database after awaiting it;
+   * a caller that does not await still gets the synchronous stop.
+   */
+  stop(): Promise<void>;
 }
 
 /**
@@ -76,14 +83,16 @@ export function healthReport(db: Database, router: Router, seq: number, startedA
 
 export function startServer(config: Config, db: Database, router: Router, startedAt = Date.now()): RunningServer {
   const frameLog = new FrameLog(config.frameLogCapacity, (seq) => writeMeta(db, "seq", String(seq)));
-  frameLog.adoptSeq(Number.parseInt(readMeta(db, "seq") ?? "0", 10) || 0);
+  // A fresh database has no persisted counter and starts at 1; an existing one resumes above it (S1-31).
+  const persistedSeq = readMeta(db, "seq");
+  if (persistedSeq !== null) frameLog.adoptPersistedSeq(Number.parseInt(persistedSeq, 10) || 0);
 
   const sessions = new Map<Bun.ServerWebSocket<Session>, Session>();
 
   /** A live frame for one connection: held while it waits for its resync replay (H32). */
   const deliver = (socket: Bun.ServerWebSocket<Session>, frame: ServerFrame): void => {
     if (socket.data.held) socket.data.held.push(frame);
-    else socket.send(encodeFrame(frame));
+    else sendIfOpen(socket, frame);
   };
 
   const push = new PushService(db, {
@@ -216,7 +225,7 @@ export function startServer(config: Config, db: Database, router: Router, starte
                 deliver(socket, frame);
                 return frame;
               },
-              send: (frame) => socket.send(encodeFrame(frame)),
+              send: (frame) => sendIfOpen(socket, frame),
               close: (code, reason) => socket.close(code, reason),
             },
             session,
@@ -225,15 +234,15 @@ export function startServer(config: Config, db: Database, router: Router, starte
         } catch (error) {
           // A throwing handler answers its own connection; it never takes the daemon down.
           log.error(`frame handler failed on ${session.id}`, error);
-          socket.send(encodeFrame(errorFrame(frameLog, "internal", error instanceof Error ? error.message : String(error))));
+          sendIfOpen(socket, errorFrame(frameLog, "internal", error instanceof Error ? error.message : String(error)));
         }
       },
       close(socket) {
         const session = socket.data;
         if (session.helloTimer !== undefined) clearTimeout(session.helloTimer);
         if (session.holdTimer !== undefined) clearTimeout(session.holdTimer);
-        for (const controller of session.aborts.values()) controller.abort();
-        session.aborts.clear();
+        // A turn belongs to the server: it keeps running after its socket closes
+        // (reload, phone lock, network blip) and its frames replay on reconnect.
         sessions.delete(socket);
         log.debug(`connection ${session.id} closed (${sessions.size} open)`);
       },
@@ -248,6 +257,9 @@ export function startServer(config: Config, db: Database, router: Router, starte
     send: () => undefined,
     close: () => undefined,
   };
+  // S1-03: nothing may stay `running` across a restart; do this before any
+  // queued message resumes, or it would glue itself onto the dead turn.
+  recoverInterruptedTurns(db, emit);
   const resumed = resumeQueuedMessages(bootDeps);
   if (resumed > 0) log.warn(`resumed ${resumed} owner message(s) a previous process left queued`);
 
@@ -256,13 +268,29 @@ export function startServer(config: Config, db: Database, router: Router, starte
     url: `ws://${config.host}:${server.port ?? config.port}/ws`,
     plugins,
     emit,
-    stop() {
+    async stop() {
       clearInterval(revocationSweep);
+      // Turns outlive their sockets, but not the server: stop them, and forget the
+      // sockets, so nothing writes to a connection of a server that is gone.
+      cancelAllTurns();
+      sessions.clear();
       chatgpt.stop();
       server.stop(true);
       frameLog.flush();
+      // The cancelled turns write their last rows and frames before the caller closes the database.
+      await whenNoTurnsRunning();
     },
   };
+}
+
+/**
+ * A turn can outlive its connection, so a late frame for a socket that has
+ * closed is normal, not an error: drop it. (The frame is in the log; a
+ * reconnect replays it.)
+ */
+function sendIfOpen(socket: Bun.ServerWebSocket<Session>, frame: ServerFrame): void {
+  if (socket.readyState !== 1) return;
+  socket.send(encodeFrame(frame));
 }
 
 const REVOCATION_SWEEP_MS = 2_000;

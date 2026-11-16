@@ -82,6 +82,7 @@ import { scheduleTaskReminder } from "../jobs/task-reminders";
 import type { PluginService } from "../plugins/service";
 import { pluginMailResolver } from "../plugins/credentials";
 import type { FrameLog } from "./frame-log";
+import { cancelTurn, registerTurn, unregisterTurn } from "./turn-registry";
 import { activateAppearanceProfile, deleteAppearanceProfile, listAppearanceProfiles, saveAppearanceProfile } from "../stores/appearance";
 import { getRoutineByJobID, listRuns, updateRoutineState } from "../stores/routines";
 import { normalizeAllowedDomains } from "../routines/egress";
@@ -98,8 +99,6 @@ export interface Session {
   cookieDevice?: { id: string; name: string };
   agentID: string;
   openThreadID?: string;
-  /** In-flight turns owned by this connection, cancellable via msg.cancel. */
-  aborts: Map<string, AbortController>;
   helloTimer?: ReturnType<typeof setTimeout>;
   /**
    * H32: live frames held after `hello` until this connection's `resync`
@@ -127,7 +126,6 @@ export function newSession(): Session {
     id: newID("conn"),
     authed: false,
     agentID: defaultPersona().id,
-    aborts: new Map(),
   };
 }
 
@@ -750,7 +748,9 @@ async function runUserMessage(
   }
   const turnID = newID("trn");
   const controller = new AbortController();
-  session.aborts.set(turnID, controller);
+  // Server-wide, not per connection: the turn outlives this socket and any
+  // device may cancel it.
+  registerTurn(turnID, thread.id, controller);
   const turnSettings = {
     firstTokenTimeoutMs: deps.config.firstTokenTimeoutMs,
     turnTimeoutMs: deps.config.turnTimeoutMs,
@@ -780,7 +780,7 @@ async function runUserMessage(
       deps.emit({ type: "error", code: "internal", message: error instanceof Error ? error.message : String(error) });
     })
     .finally(() => {
-      session.aborts.delete(turnID);
+      unregisterTurn(turnID, controller);
       // Background-first: a message sent during this turn is waiting, so the
       // freed thread starts it now instead of leaving it stranded.
       drainThreadQueue(deps, thread.id);
@@ -1303,12 +1303,7 @@ function handleThreadExport(
 
 function handleMsgCancel(deps: DispatchDeps, session: Session, frame: Extract<ClientFrame, { type: "msg.cancel" }>): void {
   if (!requireAuth(deps, session)) return;
-  const controller = session.aborts.get(frame.turnID);
-  if (!controller) {
-    log.debug(`cancel for unknown/complete turn ${frame.turnID}`);
-    return;
-  }
-  controller.abort();
+  if (!cancelTurn(frame.turnID)) log.debug(`cancel for unknown/complete turn ${frame.turnID}`);
 }
 
 function handleApproveReply(

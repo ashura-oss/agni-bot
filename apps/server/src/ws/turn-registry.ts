@@ -1,0 +1,79 @@
+/**
+ * The turns running in this process, by turn ID.
+ *
+ * A turn belongs to the server, not to the connection that started it: it keeps
+ * running when that socket closes (reload, phone lock, network blip), and any
+ * authenticated connection may cancel it. So the abort controllers live here,
+ * one server-wide map, instead of on each connection's session.
+ */
+
+interface RunningTurn {
+  controller: AbortController;
+  threadID: string;
+}
+
+const running = new Map<string, RunningTurn>();
+const idleWaiters: Array<() => void> = [];
+
+function notifyIfIdle(): void {
+  if (running.size > 0) return;
+  for (const resolve of idleWaiters.splice(0)) resolve();
+}
+
+/** Remember a turn's controller until the turn ends. */
+export function registerTurn(turnID: string, threadID: string, controller: AbortController): void {
+  running.set(turnID, { controller, threadID });
+}
+
+/** Forget a finished turn. A no-op when the entry already belongs to someone else. */
+export function unregisterTurn(turnID: string, controller: AbortController): void {
+  if (running.get(turnID)?.controller === controller) running.delete(turnID);
+  notifyIfIdle();
+}
+
+/** Abort a running turn from any connection; false when it is unknown or already over. */
+export function cancelTurn(turnID: string): boolean {
+  const turn = running.get(turnID);
+  if (!turn) return false;
+  turn.controller.abort();
+  return true;
+}
+
+/**
+ * Abort every running turn. A server calls this when it stops: turns outlive
+ * their sockets, so they must not outlive the server that would carry their
+ * frames (they finish as `cancelled`, not as a row left `running`).
+ */
+export function cancelAllTurns(): number {
+  const turns = [...running.values()];
+  for (const turn of turns) turn.controller.abort();
+  return turns.length;
+}
+
+/**
+ * Resolves once no turn is running (immediately when none is). A stopping
+ * server awaits this after `cancelAllTurns`, so the cancelled turns finish
+ * writing before anyone closes the database under them.
+ */
+export function whenNoTurnsRunning(timeoutMs = 3_000): Promise<void> {
+  if (running.size === 0) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, timeoutMs);
+    idleWaiters.push(() => { clearTimeout(timer); resolve(); });
+  });
+}
+
+/** Is this turn still running in this process? */
+export function isTurnRunning(turnID: string): boolean {
+  return running.has(turnID);
+}
+
+/** The thread a running turn belongs to, when it is running. */
+export function runningTurnThread(turnID: string): string | undefined {
+  return running.get(turnID)?.threadID;
+}
+
+/** How many turns are registered (tests assert entries are cleaned up). */
+export function runningTurnCount(): number {
+  return running.size;
+}

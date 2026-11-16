@@ -152,11 +152,12 @@ let db: Database | undefined;
 // Bots created here join the process-wide roster; drop them so later files start clean.
 const INITIAL_ROSTER = PERSONAS.length;
 
-afterEach(() => {
+afterEach(async () => {
   PERSONAS.length = INITIAL_ROSTER;
   client?.close();
   client = undefined;
-  server?.stop();
+  // Turns outlive their sockets now, so a stopping server settles them before the database closes.
+  await server?.stop();
   server = undefined;
   db?.close();
   db = undefined;

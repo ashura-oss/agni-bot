@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ServerFrame } from "@agni/protocol";
-import { FrameLog } from "../src/ws/frame-log";
+import { FrameLog, SEQ_PERSIST_INTERVAL } from "../src/ws/frame-log";
 
 describe("frame log", () => {
   test("assigns increasing seq and replays frames after lastSeq", () => {
@@ -79,5 +79,30 @@ describe("frame log", () => {
     const resync = log.since(40);
     expect(resync.gap).toBe(true);
     expect(resync.oldest).toBe(42);
+  });
+
+  test("S1-31: after a crash the counter resumes above every seq already sent", () => {
+    // Process 1 sent 45 frames but only persisted at 32 before it crashed.
+    let persisted = 0;
+    const first = new FrameLog(100, (seq) => { persisted = seq; });
+    let lastSent = 0;
+    for (let index = 0; index < 45; index += 1) lastSent = first.next({ type: "presence", state: "online" }).seq;
+    expect(persisted).toBe(SEQ_PERSIST_INTERVAL);
+    expect(lastSent).toBe(45);
+
+    const second = new FrameLog(100);
+    second.adoptPersistedSeq(persisted);
+    const next = second.next({ type: "presence", state: "online" }).seq;
+    expect(next).toBeGreaterThan(lastSent);
+    // A client that had seen seq 45 is told to reload, not to wait for frames that never come.
+    expect(second.since(lastSent).gap).toBe(true);
+  });
+
+  test("S1-31: adopting a larger persisted value never moves the counter backwards", () => {
+    const log = new FrameLog(100);
+    log.adoptPersistedSeq(100);
+    const before = log.seq;
+    log.adoptPersistedSeq(10);
+    expect(log.seq).toBe(before);
   });
 });
