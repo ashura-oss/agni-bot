@@ -281,7 +281,7 @@ function giveUpIfSideEffects(db: Database, threadID: string, since: string, mess
     .query<{ tool_name: string; args: string }, [string, string]>(
       `SELECT tool_name, args FROM tool_calls
        WHERE thread_id = ? AND created_at >= ?
-         AND (error IS NULL OR error NOT IN ('approval_rejected', 'tool_not_allowed', 'domain_not_allowed'))`,
+         AND (error IS NULL OR error NOT IN ('approval_rejected', 'approval_expired', 'tool_not_allowed', 'domain_not_allowed'))`,
     )
     .all(threadID, since);
   const acted = calls.find((call) => {
@@ -331,21 +331,22 @@ function parseObject(raw: unknown): Record<string, unknown> | null {
 /**
  * S1-13: why a background run could not do its work for want of approval, or
  * null. Reads the gated calls the loop refused this run: the owner denied them
- * (the card's decision is "reject"), or nobody decided before the turn ended.
+ * (the card's decision is "reject"), or nobody decided before the turn ended or
+ * the card expired (`approval_expired`).
  */
 function blockedByApproval(db: Database, threadID: string, since: string): string | null {
   const row = db
-    .query<{ tool_name: string; decision: string | null }, [string, string]>(
-      `SELECT tc.tool_name, a.decision FROM tool_calls tc
+    .query<{ tool_name: string; decision: string | null; error: string }, [string, string]>(
+      `SELECT tc.tool_name, a.decision, tc.error FROM tool_calls tc
        LEFT JOIN approvals a ON a.turn_id = tc.turn_id AND a.call_id = tc.call_id
-       WHERE tc.thread_id = ? AND tc.created_at >= ? AND tc.error = 'approval_rejected'
+       WHERE tc.thread_id = ? AND tc.created_at >= ? AND tc.error IN ('approval_rejected', 'approval_expired')
        ORDER BY tc.created_at LIMIT 1`,
     )
     .get(threadID, since);
   if (!row) return null;
-  return row.decision === "reject"
-    ? `the owner denied approval for ${row.tool_name}, so it did not run`
-    : `approval for ${row.tool_name} was not given before the run ended, so it did not run`;
+  if (row.decision === "reject") return `the owner denied approval for ${row.tool_name}, so it did not run`;
+  if (row.error === "approval_expired") return `approval for ${row.tool_name} expired, nobody answered, so it did not run`;
+  return `approval for ${row.tool_name} was not given before the run ended, so it did not run`;
 }
 
 /** The owner's own channel with this agent: where a background reply belongs. */

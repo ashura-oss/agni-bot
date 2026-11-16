@@ -378,6 +378,37 @@ describe("S1-13: a background job that needed approval is never reported done", 
   });
 });
 
+describe("S1-13: an approval that expired is blocked too", () => {
+  test("a gated call recorded as approval_expired ends the job as not done", async () => {
+    db = openDatabase(":memory:");
+    const database = db;
+    const thread = createThread(database, "ea");
+    // What the turn loop leaves when the owner never answered within its wait ceiling.
+    createTurn(database, { id: "trn_gate", threadID: thread.id, agentID: "ea" });
+    const later = new Date(Date.now() + 60_000).toISOString();
+    database.run(
+      "INSERT INTO approvals (id, thread_id, turn_id, action, preview, status, decision, call_id, tool_name, created_at) VALUES ('apr_x', ?, 'trn_gate', 'send', 'send', 'expired', NULL, 'call_x', 'mail_send', ?)",
+      [thread.id, later],
+    );
+    database.run(
+      "INSERT INTO tool_calls (id, thread_id, turn_id, call_id, tool_name, args, result, ok, error, created_at) VALUES ('tcl_x', ?, 'trn_gate', 'call_x', 'mail_send', '{}', ?, 0, 'approval_expired', ?)",
+      [thread.id, JSON.stringify({ error: "not approved" }), later],
+    );
+    const script = scriptedRouter([{ text: "Done, the email is on its way." }]);
+    const runner = new JobRunner(database, () => undefined, { retryDelayMs: 1 });
+    registerTurnJob(runner, { db: database, router: script.router, settings, emit: () => undefined });
+    const queued = enqueueJob(database, { kind: "turn", payload: { text: "Email the report.", agentID: "ea", threadID: thread.id, inputRole: "system" } });
+
+    await runner.tick();
+
+    const row = getJob(database, queued.id)!;
+    expect(row.state).toBe("failed");
+    expect(row.result).toMatch(/not done/i);
+    expect(row.result).toMatch(/expired/i);
+    expect(row.result).toContain("mail_send");
+  });
+});
+
 describe("S1-23: a scheduled reply reaches the owner's chat", () => {
   test("the reminder is posted to the agent's channel as the agent's message", async () => {
     db = openDatabase(":memory:");
