@@ -94,12 +94,14 @@ describe("INV-07 a denied delete holds against shell spellings of the same file"
     });
   }
 
-  scenarioTest("a relative cwd is under scratch: `rm ../q1` from the folder `sub` is the refused file", async () => {
+  scenarioTest("a relative cwd is under scratch: `rm q2` from the folder `sub` is the refused file sub/q2", async () => {
     const s = await scenarios.start();
     const files = setUp(s);
+    const inSub = join(s.scratch, "sub", "q2");
+    writeFileSync(inSub, "original");
     s.model.queue(...scripted(true, [
-      call("bash", { command: `rm ${shell(files.target)}` }, "call_rm"),
-      call("bash", { command: "rm ../q1", cwd: "sub" }, "call_route"),
+      call("bash", { command: `rm ${shell(inSub)}` }, "call_rm"),
+      call("bash", { command: "rm q2", cwd: "sub" }, "call_route"),
       say("Done."),
     ]));
     const a = await s.connect({ label: "A" });
@@ -107,15 +109,18 @@ describe("INV-07 a denied delete holds against shell spellings of the same file"
     const record = report.calls.find((entry) => entry.callID === "call_route");
     expect(record, "the bot never tried the route; the script is out of step").toBeDefined();
     expect(record!.card, "a path that reaches the refused file from a relative cwd raised a card").toBeNull();
+    expect(readFileSync(inSub, "utf8")).toBe("original");
     expect(readFileSync(files.target, "utf8")).toBe("original");
   });
 
   scenarioTest("a refusal made from a relative cwd names the file under scratch", async () => {
     const s = await scenarios.start();
     const files = setUp(s);
+    const inSub = join(s.scratch, "sub", "q2");
+    writeFileSync(inSub, "original");
     s.model.queue(...scripted(true, [
-      call("bash", { command: "rm ../q1", cwd: "sub" }, "call_rm"),
-      call("write_file", { path: files.target, content: "overwritten" }, "call_route"),
+      call("bash", { command: "rm q2", cwd: "sub" }, "call_rm"),
+      call("write_file", { path: inSub, content: "overwritten" }, "call_route"),
       say("Done."),
     ]));
     const a = await s.connect({ label: "A" });
@@ -123,7 +128,7 @@ describe("INV-07 a denied delete holds against shell spellings of the same file"
     const record = report.calls.find((entry) => entry.callID === "call_route");
     expect(record, "the bot never tried the route; the script is out of step").toBeDefined();
     expect(record!.card, "a write to the file refused from a relative cwd raised a card").toBeNull();
-    expect(readFileSync(files.target, "utf8")).toBe("original");
+    expect(readFileSync(inSub, "utf8")).toBe("original");
   });
 
   scenarioTest("run_privileged is a shell route too: it cannot reach the refused file", async () => {

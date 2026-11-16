@@ -8,6 +8,11 @@
  * "unresolved": no file name is read out of it, and a run that holds a refusal puts it to the owner
  * every time (policy/engine.ts) instead of guessing what it reaches.
  *
+ * An operand is unresolved too, and the command with it, when it has a `..` segment (the shell opens
+ * `link/../x` through the link, so the words do not say which file) or when any part of it that exists is a
+ * symbolic link or junction (the file is then somewhere the words do not name). Only the parts below the
+ * folder the server chose are looked at: that folder is the server's own.
+ *
  * There are no wrappers (`sudo`, `env`, `timeout`, `nice`, `xargs`, ...) and no option that takes a
  * folder (`-C`, `-D`, `-t`, `--directory`): the lists below name every option each program may carry,
  * and a word that is not on them leaves the command unresolved. Adding a program or an option is a
@@ -16,7 +21,8 @@
  * For Sprint 7: unattended (sandboxed) shell is off in any run that holds a refusal. The sandbox
  * profile, not this module, is the boundary around what a command can reach.
  */
-import { resolve } from "node:path";
+import { lstatSync } from "node:fs";
+import { parse, relative, resolve, sep } from "node:path";
 import type { Operation } from "./types";
 
 export type ShellProof =
@@ -24,7 +30,7 @@ export type ShellProof =
       proven: true;
       program: string;
       operation: Operation;
-      /** Absolute path of every literal path argument, `C:\...` style on Windows. Not yet followed through links. */
+      /** Absolute path of every literal path argument, `C:\...` style on Windows. No `..` segment, and no link in any part that exists. */
       paths: string[];
     }
   | { proven: false; why: string };
@@ -125,7 +131,10 @@ export function proveShell(command: string, cwd: string, platform: NodeJS.Platfo
     for (const operand of operands) {
       const host = hostPathOf(operand, platform);
       if (host === null) return unresolved("a path the server cannot place on this computer");
-      paths.push(resolve(cwd, host));
+      if (host.split(/[\\/]/).includes("..")) return unresolved("an operand with a `..` segment");
+      const absolute = resolve(cwd, host);
+      if (crossesLink(absolute, cwd)) return unresolved("an operand that goes through a link");
+      paths.push(absolute);
     }
   }
   return { proven: true, program, operation: spec.operation, paths };
@@ -156,4 +165,26 @@ export function hostPathOf(word: string, platform: NodeJS.Platform = process.pla
 function windowsPath(drive: string, rest: string): string | null {
   if (rest.includes(":") || rest.split("/").some((part) => part !== "." && part !== ".." && /[. ]$/.test(part))) return null;
   return `${drive}\\${rest.replaceAll("/", "\\")}`;
+}
+
+/**
+ * Is any part of `absolute` that exists a symbolic link or junction? Each existing component is `lstat`ed, from just
+ * below `cwd` (the server's own folder is not held against the operand) or from the root for a path outside it.
+ * A component that cannot be read counts as a link: what cannot be seen is not proven.
+ */
+function crossesLink(absolute: string, cwd: string): boolean {
+  const below = relative(cwd, absolute);
+  const inside = below === "" || (below !== ".." && !below.startsWith(`..${sep}`) && parse(below).root === "");
+  let current = inside ? cwd : parse(absolute).root;
+  const parts = (inside ? below : absolute.slice(current.length)).split(sep).filter((part) => part !== "");
+  for (const part of parts) {
+    current = resolve(current, part);
+    try {
+      if (lstatSync(current).isSymbolicLink()) return true;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      return code !== "ENOENT" && code !== "ENOTDIR";
+    }
+  }
+  return false;
 }
