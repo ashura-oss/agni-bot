@@ -14,6 +14,17 @@
  * are already inside the output count.
  */
 import { log } from "../log";
+import type { ModelUsageEvent } from "./usage-hook";
+
+/**
+ * The usage event as the router really sends it: the frozen `ModelUsageEvent`
+ * plus the cost the provider reported for the call, when it reported one. Kept
+ * here so the frozen interface is untouched; a recorder that ignores the extra
+ * field behaves as before.
+ */
+export interface PricedUsageEvent extends ModelUsageEvent {
+  reportedCostUsd?: number;
+}
 
 /** A higher price that applies once the prompt reaches `minPromptTokens` (whole request). */
 export interface PriceTier {

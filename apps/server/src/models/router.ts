@@ -10,6 +10,7 @@ import type { HealthTracker } from "./health";
 import { log } from "../log";
 import { chatGPTEnabled, type ChatGPTAuth } from "./chatgpt-auth";
 import { streamChatGPT } from "./chatgpt-responses";
+import type { PricedUsageEvent } from "./prices";
 import { recordModelUsage } from "./usage-hook";
 
 export class RouterError extends Error {
@@ -84,6 +85,8 @@ export interface RouteResult {
   outputTokens?: number;
   /** Prompt tokens the provider served from its cache (part of `inputTokens`), when it said. */
   cachedInputTokens?: number;
+  /** What the provider says the call cost in US dollars, when it says (OpenRouter). */
+  reportedCostUsd?: number;
   attempts: number;
   /** Structured tool calls the model emitted (task lane). */
   toolCalls?: import("./client").ToolCall[];
@@ -222,19 +225,21 @@ export class Router {
           } finally { lease?.release(); }
           this.health.markSuccess(provider.id);
           const latencyMs = Date.now() - beganAt;
-          recordModelUsage({
+          const usageEvent: PricedUsageEvent = {
             provider: provider.id,
             model: provider.model,
             inputTokens: result.inputTokens,
             outputTokens: result.outputTokens,
             cachedInputTokens: result.cachedInputTokens,
+            reportedCostUsd: result.reportedCostUsd,
             latencyMs,
             purpose: options.purpose,
             agentID: options.agentID,
             jobID: options.jobID,
             rootJobID: options.rootJobID,
             kind: options.kind,
-          });
+          };
+          recordModelUsage(usageEvent);
           return {
             provider: provider.id,
             model: provider.model,
@@ -244,6 +249,7 @@ export class Router {
             inputTokens: result.inputTokens,
             outputTokens: result.outputTokens,
             ...(result.cachedInputTokens !== undefined ? { cachedInputTokens: result.cachedInputTokens } : {}),
+            ...(result.reportedCostUsd !== undefined ? { reportedCostUsd: result.reportedCostUsd } : {}),
             attempts,
             ...(result.toolCalls ? { toolCalls: result.toolCalls } : {}),
             ...(result.reasoning ? { reasoning: result.reasoning } : {}),

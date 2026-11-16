@@ -61,6 +61,8 @@ export interface LedgerCall {
   cachedInputTokens?: number;
   latencyMs?: number;
   costUsd: number | null;
+  /** "reported": the provider's own figure; "table": estimated from `models/prices.ts`; null when the cost is unknown. */
+  costSource?: "reported" | "table" | null;
   agentID?: string;
   jobID?: string;
   rootJobID?: string;
@@ -73,8 +75,8 @@ export function recordLedgerCall(db: Database, call: LedgerCall): void {
   db.run(
     `INSERT INTO usage_ledger
        (id, provider, model, input_tokens, output_tokens, cached_input_tokens, latency_ms, day, created_at,
-        cost_usd, agent_id, job_id, root_job_id, call_kind, purpose)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        cost_usd, cost_source, agent_id, job_id, root_job_id, call_kind, purpose)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       newID("use"),
       call.provider,
@@ -86,6 +88,7 @@ export function recordLedgerCall(db: Database, call: LedgerCall): void {
       utcDay(),
       nowISO(),
       call.costUsd,
+      call.costUsd === null ? null : call.costSource ?? null,
       call.agentID ?? null,
       call.jobID ?? null,
       call.rootJobID ?? call.jobID ?? null,

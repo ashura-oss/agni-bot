@@ -193,3 +193,55 @@ describe("ledger recorder (startupS2Ledger)", () => {
     expect(perCall[0]!.cost_usd).not.toBeNull();
   });
 });
+
+describe("cost the provider reports (OpenRouter usage.cost)", () => {
+  const install = async () => startupS2Ledger({ db, config: {} as never });
+  const usage = { prompt_tokens: 1000, completion_tokens: 100, cost: 0.000321, prompt_tokens_details: { cached_tokens: 0 } };
+
+  test("the client reads usage.cost, and leaves it out when absent or not a number", async () => {
+    const run = (u: Record<string, unknown>) => streamChat({
+      baseUrl: "https://p.test/v1", apiKey: "k", model: "m", messages: [{ role: "user", content: "x" }],
+      firstTokenTimeoutMs: 1000, onDelta: () => {}, fetchFn: asFetch(() => sse(u)),
+    });
+    expect((await run(usage)).reportedCostUsd).toBe(0.000321);
+    expect((await run({ prompt_tokens: 1, completion_tokens: 1 })).reportedCostUsd).toBeUndefined();
+    expect((await run({ prompt_tokens: 1, completion_tokens: 1, cost: "free" })).reportedCostUsd).toBeUndefined();
+    expect((await run({ prompt_tokens: 1, completion_tokens: 1, cost: -1 })).reportedCostUsd).toBeUndefined();
+    // Bring-your-own-key calls report cost 0 here; the real bill is the upstream's, so it is not trusted.
+    expect((await run({ prompt_tokens: 1, completion_tokens: 1, cost: 0, is_byok: true })).reportedCostUsd).toBeUndefined();
+  });
+
+  test("the ledger stores the reported cost and says where it came from", async () => {
+    await install();
+    const router = new Router([deepseek], new HealthTracker(), asFetch(() => sse(usage)));
+    await router.route({ ...options, kind: "turn" });
+    const row = rows(db)[0]!;
+    expect(row.cost_usd).toBe(0.000321);
+    expect((row as unknown as { cost_source: string }).cost_source).toBe("reported");
+  });
+
+  test("with no reported cost the price table is used, and marked as such", async () => {
+    await install();
+    const router = new Router([deepseek], new HealthTracker(), asFetch(() => sse({ prompt_tokens: 1000, completion_tokens: 100 })));
+    await router.route({ ...options, kind: "turn" });
+    const row = rows(db)[0]!;
+    expect(row.cost_usd).toBeCloseTo((1000 * 0.036 + 100 * 0.5) / 1e6, 12);
+    expect((row as unknown as { cost_source: string }).cost_source).toBe("table");
+  });
+
+  test("a reported cost covers a model with no price entry", async () => {
+    await install();
+    recordModelUsage({ provider: "openrouter", model: "nobody/unknown", inputTokens: 10, outputTokens: 1, latencyMs: 5, reportedCostUsd: 0.5 } as ModelUsageEvent);
+    const row = rows(db)[0]! as unknown as { cost_usd: number; cost_source: string };
+    expect(row.cost_usd).toBe(0.5);
+    expect(row.cost_source).toBe("reported");
+  });
+
+  test("an unpriced model with no reported cost has cost null and no source", async () => {
+    await install();
+    recordModelUsage({ provider: "openrouter", model: "nobody/unknown", inputTokens: 10, outputTokens: 1, latencyMs: 5 });
+    const row = rows(db)[0]! as unknown as { cost_usd: number | null; cost_source: string | null };
+    expect(row.cost_usd).toBeNull();
+    expect(row.cost_source).toBeNull();
+  });
+});

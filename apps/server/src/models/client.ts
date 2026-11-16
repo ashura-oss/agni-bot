@@ -94,6 +94,12 @@ export interface ChatResult {
   outputTokens?: number;
   /** Prompt tokens served from the provider's cache (part of `inputTokens`), when the provider says. */
   cachedInputTokens?: number;
+  /**
+   * What the provider says this call cost, in US dollars (OpenRouter's `usage.cost`).
+   * The bill itself, so it beats any price table: OpenRouter routes one model to
+   * upstream endpoints that price differently.
+   */
+  reportedCostUsd?: number;
   /** Structured tool calls the model emitted, if any. */
   toolCalls?: ToolCall[];
   /**
@@ -199,6 +205,7 @@ export async function streamChat(request: ChatRequest): Promise<ChatResult> {
   let inputTokens: number | undefined;
   let outputTokens: number | undefined;
   let cachedInputTokens: number | undefined;
+  let reportedCostUsd: number | undefined;
   // Tool calls arrive as incremental fragments keyed by index; accumulate them.
   const toolFragments = new Map<number, { id?: string; name?: string; arguments: string }>();
   // A stream that closes without [DONE] or a finish_reason was cut off, not finished.
@@ -269,6 +276,7 @@ export async function streamChat(request: ChatRequest): Promise<ChatResult> {
           inputTokens = usage.prompt_tokens ?? inputTokens;
           outputTokens = usage.completion_tokens ?? outputTokens;
           cachedInputTokens = cachedTokensOf(usage) ?? cachedInputTokens;
+          reportedCostUsd = reportedCostOf(usage) ?? reportedCostUsd;
         }
       }
     }
@@ -296,6 +304,7 @@ export async function streamChat(request: ChatRequest): Promise<ChatResult> {
   return {
     text, firstTokenMs, inputTokens, outputTokens,
     ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
+    ...(reportedCostUsd !== undefined ? { reportedCostUsd } : {}),
     ...(finishReason ? { finishReason } : {}),
     ...(reasoning.trim().length > 0 ? { reasoning: reasoning.trim() } : {}),
     ...(toolCalls.length ? { toolCalls } : {}),
@@ -309,6 +318,17 @@ interface UsageChunk {
   prompt_tokens_details?: { cached_tokens?: number } | null;
   /** DeepSeek's own API. */
   prompt_cache_hit_tokens?: number;
+  /** OpenRouter: what the call cost. */
+  cost?: unknown;
+  /** OpenRouter: the call ran on the owner's own upstream key, so `cost` is not the real bill. */
+  is_byok?: boolean;
+}
+
+/** The cost the provider reports, when it is a plain non-negative number on a call that was billed by the provider. */
+function reportedCostOf(usage: UsageChunk): number | undefined {
+  if (usage.is_byok === true) return undefined;
+  const value = usage.cost;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
 /** Cached prompt tokens, however the provider spells them; undefined when it does not say. */

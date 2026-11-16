@@ -11,6 +11,7 @@ export const migration: Migration | null = {
   name: "usage_ledger_cost",
   sql: `
     ALTER TABLE usage_ledger ADD COLUMN cost_usd REAL;
+    ALTER TABLE usage_ledger ADD COLUMN cost_source TEXT;     -- reported (the provider's figure) | table (estimated)
     ALTER TABLE usage_ledger ADD COLUMN cached_input_tokens INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE usage_ledger ADD COLUMN agent_id TEXT;
     ALTER TABLE usage_ledger ADD COLUMN job_id TEXT;

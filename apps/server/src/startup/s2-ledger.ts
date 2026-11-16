@@ -1,5 +1,5 @@
-import { computeCostUsd } from "../models/prices";
-import { setUsageRecorder, type ModelUsageEvent } from "../models/usage-hook";
+import { computeCostUsd, type PricedUsageEvent } from "../models/prices";
+import { setUsageRecorder } from "../models/usage-hook";
 import { configureBudget } from "../policy/budget";
 import { recordLedgerCall } from "../stores/usage";
 import type { StartupContext } from "./context";
@@ -14,7 +14,16 @@ import type { StartupContext } from "./context";
  */
 export async function startupS2Ledger(ctx: StartupContext): Promise<void> {
   const { db } = ctx;
-  setUsageRecorder((event: ModelUsageEvent) => {
+  setUsageRecorder((event: PricedUsageEvent) => {
+    // The provider's own figure is the bill; the price table is the estimate when it gives none.
+    const reported = event.reportedCostUsd;
+    const costUsd = reported ?? computeCostUsd({
+      provider: event.provider,
+      model: event.model,
+      inputTokens: event.inputTokens,
+      cachedInputTokens: event.cachedInputTokens,
+      outputTokens: event.outputTokens,
+    });
     recordLedgerCall(db, {
       provider: event.provider,
       model: event.model,
@@ -22,13 +31,8 @@ export async function startupS2Ledger(ctx: StartupContext): Promise<void> {
       outputTokens: event.outputTokens,
       cachedInputTokens: event.cachedInputTokens,
       latencyMs: event.latencyMs,
-      costUsd: computeCostUsd({
-        provider: event.provider,
-        model: event.model,
-        inputTokens: event.inputTokens,
-        cachedInputTokens: event.cachedInputTokens,
-        outputTokens: event.outputTokens,
-      }),
+      costUsd,
+      costSource: costUsd === null ? null : reported !== undefined ? "reported" : "table",
       agentID: event.agentID,
       jobID: event.jobID,
       rootJobID: event.rootJobID,
