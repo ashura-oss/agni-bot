@@ -1,0 +1,30 @@
+/* Desktop: the reference's shape --------------------------------------- */
+/**
+ * On a wide screen the roster is a rail of agent marks that opens into the
+ * full panel: favourites first, then the rest, each with its tag and the last
+ * thing it said. The agent's name sits in a pill at the top of the column and
+ * the conversation fills the rest.
+ */
+@media (min-width: 721px) {
+  .sidebar {
+    flex: 0 0 288px;
+    width: 288px;
+  }
+
+  /* The pill sits in the middle of the column, as it does in the reference. */
+  .thread-header {
+    justify-content: flex-end;
+  }
+
+  .agent-pill {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+  }
+}
+.chatgpt-connection { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.chatgpt-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.chatgpt-connection .settings-row { flex-wrap: wrap; gap: 10px; overflow-wrap: anywhere; }
+.chatgpt-welcome { z-index: 110; }
+

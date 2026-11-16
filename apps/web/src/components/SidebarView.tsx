@@ -5,7 +5,7 @@
  * Each agent has one enduring conversation surface; sessions are seams in it,
  * not list entries (blueprint v3 §5).
  */
-import { UserRound, CalendarDays, CheckCircle2, CheckSquare, Clock3, Inbox, PanelLeftClose, Plus, Search, Star, X } from "lucide-react";
+import { UserRound, CalendarDays, CheckCircle2, CheckSquare, Clock3, Inbox, PanelLeftClose, Plus, Search, Star, Users, X } from "lucide-react";
 import { useState, type FormEvent, type ReactNode } from "react";
 import { useAppModel, useAppSnapshot } from "../state/use-app-model";
 import { AppTile, SidebarAgentBadge, connectionShortStatus } from "./bits";
@@ -41,6 +41,9 @@ export function SidebarView({ onCollapse, collapsed = false }: { onCollapse?: ()
   const connected = snapshot.plugins.filter((plugin) => plugin.status === "connected");
   const total = snapshot.plugins.length;
   const owner = profileName(snapshot.settings.deviceName);
+  const groups = snapshot.groups ?? [];
+  // A group page or a not-found page is not a bot's conversation: no bot row is "open" then.
+  const onConversation = snapshot.route.kind !== "group" && !snapshot.notFound;
 
   /** The newest thing each agent said, one line. */
   const previewFor = (agentID: string): { updatedAt: string; preview?: string } | undefined => {
@@ -55,7 +58,7 @@ export function SidebarView({ onCollapse, collapsed = false }: { onCollapse?: ()
   };
 
   const row = (agent: (typeof roster)[number]) => {
-    const selected = snapshot.conversation.agentID === agent.id;
+    const selected = onConversation && snapshot.conversation.agentID === agent.id;
     // A private agent is worth saying out loud: other agents see a
     // receipt for its work, not the work itself.
     const state = snapshot.agentStates[agent.id];
@@ -192,7 +195,7 @@ export function SidebarView({ onCollapse, collapsed = false }: { onCollapse?: ()
         {favourites.length > 0 ? (
           <div className="sidebar-grid">
             {favourites.map((agent) => {
-              const selected = snapshot.conversation.agentID === agent.id;
+              const selected = onConversation && snapshot.conversation.agentID === agent.id;
               return (
                 <button
                   type="button"
@@ -223,6 +226,31 @@ export function SidebarView({ onCollapse, collapsed = false }: { onCollapse?: ()
         ) : (
           others.map(row)
         )}
+
+        {groups.length > 0 ? (
+          <>
+            <div className="sidebar-groups-title" id="sidebar-groups-title">Groups</div>
+            <div role="group" aria-labelledby="sidebar-groups-title">
+              {groups.map((group) => {
+                const selected = snapshot.route.kind === "group" && snapshot.route.id === group.id;
+                return (
+                  <button
+                    type="button"
+                    key={group.id}
+                    className={`sidebar-group-row${selected ? " selected" : ""}`}
+                    aria-label={`Open ${group.name} group`}
+                    aria-current={selected ? "page" : undefined}
+                    onClick={() => model.openGroup(group.id)}
+                  >
+                    <Users size={16} aria-hidden="true" />
+                    <span className="sidebar-row-title">{group.name}</span>
+                    <span className="sidebar-group-count">{group.agentIds.length}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </>
+        ) : null}
       </div>}
 
       <div className="sidebar-footer">
