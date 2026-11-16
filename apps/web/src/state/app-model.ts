@@ -1676,11 +1676,9 @@ export class AppModel {
         return;
 
       case "durableReloadRequired": {
-        // The roster rides in the frames the daemon could not replay: what is held is stale until the
-        // daemon sends it again (right behind this event), and no address resolves against it meanwhile.
-        this.rosterKnown = false;
-        this.agents = seedAgents();
-        this.mentionAgents = seedAgents();
+        // The roster is not forgotten here. The daemon releases its held frames (the fresh `agents.update`
+        // among them) after a 1 s timer, which can be before this event's error frame arrives, and nothing
+        // sends the roster twice. A browser that never had one still waits for it: `rosterKnown` is false.
         // The daemon could not replay. Only a restart kills what it was running; a replay log that
         // merely moved on while this browser slept leaves the running turn alive and streaming.
         const deadTurn = this.conversation.inFlightTurnID;

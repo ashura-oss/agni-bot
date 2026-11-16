@@ -68,12 +68,9 @@ describe("a stale session (resync_gap)", () => {
     expect(document.title).toBe("Scout");
   });
 
-  it("forgets the roster when the daemon cannot replay, and waits for the fresh one", () => {
+  it("error first: shows loading until the roster that follows the error arrives", () => {
     const { model } = openAt("/agent/scout");
     show(model);
-    frame(model, rosterFrame);
-    expect(screen.queryByRole("status", { name: /loading/i })).not.toBeInTheDocument();
-
     event(model, { type: "durableReloadRequired", restarted: false });
     frame(model, { type: "error", seq: 95, code: "resync_gap", message: "cannot replay from 3" });
     expect(screen.getByRole("status", { name: /loading/i })).toBeInTheDocument();
@@ -82,6 +79,22 @@ describe("a stale session (resync_gap)", () => {
     frame(model, { ...rosterFrame, seq: 96 });
     expect(screen.queryByRole("status", { name: /loading/i })).not.toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: /message scout/i })).toBeInTheDocument();
+  });
+
+  it("roster first: a roster that arrived before the error is not thrown away", () => {
+    // The daemon releases held frames after 1 s, which can be before the resync_gap error;
+    // nothing sends the roster again, so forgetting it would leave the address loading forever.
+    const { model } = openAt("/agent/scout");
+    show(model);
+    frame(model, rosterFrame);
+    expect(screen.getByRole("textbox", { name: /message scout/i })).toBeInTheDocument();
+
+    event(model, { type: "durableReloadRequired", restarted: false });
+    frame(model, { type: "error", seq: 95, code: "resync_gap", message: "cannot replay from 3" });
+    expect(screen.queryByRole("status", { name: /loading/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: /message scout/i })).toBeInTheDocument();
+    expect(model.getSnapshot().conversation.agentID).toBe("scout");
+    expect(document.title).toBe("Scout");
   });
 
   it("calls an unknown bot not found once the roster is known, with no default thread", () => {
