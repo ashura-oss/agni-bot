@@ -7,8 +7,8 @@ import { peerEnvelope, stripPeerTags } from "./peer-message";
 import { ApprovalBroker, waitForApprovalDecision } from "./approval-broker";
 import { gateToolCall } from "./tool-gate";
 import { abortReasonOf } from "./abort-reason";
-import { audit } from "../policy/audit-sink";
-import { addTaint, createRunContext, isPeerPrincipal, isTainted, mergeTaint, packTaint } from "../policy/context";
+import { markRun } from "../policy/carry";
+import { createRunContext, isTainted, packTaint } from "../policy/context";
 import { decide } from "../policy/engine";
 import { policyHooks } from "../policy/hooks";
 import { policyFor, taintFrom } from "../policy/metadata";
@@ -1237,12 +1237,7 @@ function noteTaint(run: RunContext, tool: { name: string; meta?: ToolMeta }, arg
   const failed = typeof result === "object" && result !== null && typeof (result as { error?: unknown }).error === "string";
   if (failed) return;
   const source = taintFrom(policyFor(tool.name, tool.meta), tool.name, args, result, nowISO());
-  if (!source || !addTaint(run, source)) return;
-  try {
-    audit({ kind: "policy.taint", actor: run.bot, turnID: run.turnID, ...(run.jobID ? { jobID: run.jobID } : {}), detail: { kind: source.kind, label: source.label, tool: tool.name, sources: run.taint.sources.length } });
-  } catch (error) {
-    log.warn(`turn ${run.turnID}: could not record that the run read outside content: ${error instanceof Error ? error.message : String(error)}`);
-  }
+  if (source) markRun(run, source);
 }
 
 /** Who started this run, in the policy's terms. */

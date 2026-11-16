@@ -24,15 +24,25 @@ import type { RunContext, TaintSource } from "./types";
 export function carryTaint(run: Pick<RunContext, "taint" | "bot" | "turnID" | "jobID"> | undefined, from: string, sources: readonly TaintSource[], via: string): boolean {
   if (!run || sources.length === 0) return false;
   const label = entry(from, 60).replace(/\s+/g, " ").trim() || "another bot";
-  const marked = addTaint(run, { kind: "peer", label, tool: via, at: nowISO() });
-  if (!marked) return false;
+  return markRun(run, { kind: "peer", label, tool: via, at: nowISO() }, { carried: sources.slice(0, 5).map((source) => ({ kind: source.kind, label: source.label })) });
+}
+
+/** A note the bot kept from outside text and has now read back: what is in it is outside text again. */
+export function carryNoteTaint(run: Pick<RunContext, "taint" | "bot" | "turnID" | "jobID"> | undefined, items: ReadonlyArray<{ fromOutside?: boolean }>, via: string): boolean {
+  if (!run || !items.some((item) => item.fromOutside)) return false;
+  return markRun(run, { kind: "unknown", label: "a note kept from outside content", tool: via, at: nowISO() });
+}
+
+/** Mark the run and write the change down. A failed audit row never un-marks the run. */
+export function markRun(run: Pick<RunContext, "taint" | "bot" | "turnID" | "jobID">, source: TaintSource, extra: Record<string, unknown> = {}): boolean {
+  if (!addTaint(run, source)) return false;
   try {
     audit({
       kind: "policy.taint", actor: run.bot, turnID: run.turnID, ...(run.jobID ? { jobID: run.jobID } : {}),
-      detail: { kind: "peer", label, tool: via, carried: sources.slice(0, 5).map((source) => ({ kind: source.kind, label: source.label })) },
+      detail: { kind: source.kind, label: source.label, tool: source.tool, ...extra },
     });
   } catch (error) {
-    log.warn(`turn ${run.turnID}: could not record the carried taint: ${error instanceof Error ? error.message : String(error)}`);
+    log.warn(`turn ${run.turnID}: could not record that the run read outside content: ${error instanceof Error ? error.message : String(error)}`);
   }
   return true;
 }

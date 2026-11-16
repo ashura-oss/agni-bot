@@ -26,6 +26,7 @@ import type { MailAccountResolver } from "../plugins/credentials";
 import { shareThread } from "../share/document";
 import { scheduleTaskReminder } from "../jobs/task-reminders";
 import { ctxTainted } from "../policy/context";
+import { carryNoteTaint } from "../policy/carry";
 
 const objectSchema = (properties: Record<string, unknown>, required: string[]): Record<string, unknown> => ({
   type: "object", properties, required, additionalProperties: false,
@@ -94,13 +95,15 @@ export function buildTaskToolRegistry(db: Database, mailAccounts?: MailAccountRe
         limit: optionalLimit(v.limit),
         scope: v.scope === undefined ? undefined : boundedString(v.scope, 32),
       }));
-      return recallFact(db, {
+      const recalled = recallFact(db, {
         ...input,
         agentID: input.scope === "agent" ? ctx.chain?.currentAgentID ?? null : null,
         callerAgentID: ctx.chain?.currentAgentID ?? null,
-        // The model asked on purpose: it may read its own notes kept from outside text (they are data, not facts).
+        // The model asked on purpose: it may read its own notes kept from outside text (they are data, not facts), and the run is marked when it does.
         includeUntrusted: true,
       });
+      carryNoteTaint(ctx.run, recalled.facts, "recall_fact");
+      return recalled;
     },
   });
   register({

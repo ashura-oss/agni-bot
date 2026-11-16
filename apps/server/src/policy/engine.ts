@@ -33,7 +33,7 @@ import { assessCall, policyFor } from "./metadata";
 import type {
   ApprovalCard, CallAssessment, Decision, Operation, PolicyInput, RefusalCode, RunContext, ToolTier,
 } from "./types";
-import { hostOf } from "./resources";
+import { domainAllowed } from "../routines/egress";
 
 export interface DecideOptions {
   /**
@@ -138,8 +138,8 @@ function routineDomainCheck(run: RunContext, tool: string, args: Record<string, 
   if (!allowed) return null;
   const blocked = (): Decision => refuse("domain_not_allowed", "domain is not allowed", "outside the routine's domain list");
   if (tool === "web_fetch") {
-    const host = typeof args.url === "string" ? hostOf(args.url) : null;
-    if (!host || !allowed.some((domain) => host === domain || host.endsWith(`.${domain}`))) return blocked();
+    // The routine's own rule (routines/egress.ts), so the two cannot drift apart.
+    if (typeof args.url !== "string" || !domainAllowed(args.url, allowed)) return blocked();
   } else if (tool === "web_search" && allowed.length === 0) {
     return blocked();
   }

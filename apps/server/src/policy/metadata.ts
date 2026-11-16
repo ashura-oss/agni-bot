@@ -26,6 +26,8 @@ type Args = Record<string, unknown>;
 
 export interface TaintedBy {
   kind: TaintKind;
+  /** Only some calls bring outside text in (a shell command that can reach the network); absent means every call. */
+  when?: (args: Args) => boolean;
   /** One short line naming what was read. Cleaned for display by the caller. */
   label: (args: Args, result: unknown) => string;
 }
@@ -140,8 +142,15 @@ export const TOOL_POLICY: Readonly<Record<string, ToolPolicy>> = {
   grep: readOnly(["private-reader"]),
   glob: readOnly(["private-reader"]),
   write_file: { classes: ["effector"], tier: 1, assess: assessWrite, resources: (args) => (typeof args.path === "string" ? [pathResource(args.path)] : []) },
-  bash: { classes: ["effector", "private-reader"], tier: 3, assess: assessShell },
-  run_privileged: { classes: ["effector", "private-reader"], tier: 3 },
+  // What an approved command prints can be a web page (curl) or a file someone else wrote: outside text. A read-only command in scratch is not.
+  bash: {
+    classes: ["effector", "private-reader"], tier: 3, assess: assessShell,
+    taintedBy: { kind: "unknown", when: (args) => !isReadOnlyCommand(String(args.command ?? ""), typeof args.cwd === "string" && args.cwd ? args.cwd : undefined), label: (args) => `output of: ${clean(args.command, 60)}` },
+  },
+  run_privileged: {
+    classes: ["effector", "private-reader"], tier: 3,
+    taintedBy: { kind: "unknown", label: (args) => `output of: ${clean(args.command, 60)}` },
+  },
 
   // Outside text comes in through these.
   web_search: readOnly(["untrusted-reader"], { taintedBy: fromWeb((args) => `search: ${clean(args.query, 60)}`) }),
@@ -239,7 +248,7 @@ export function asksWhenClean(tool: string, args: Args, own?: ToolMeta): boolean
 /** The taint a result brings, or null when the tool's result is not outside text. */
 export function taintFrom(policy: ToolPolicy | null, tool: string, args: Args, result: unknown, at: string): TaintSource | null {
   const by = policy?.taintedBy;
-  if (!by) return null;
+  if (!by || by.when?.(args) === false) return null;
   return { kind: by.kind, label: by.label(args, result) || tool, tool, at };
 }
 
