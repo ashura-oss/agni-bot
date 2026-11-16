@@ -21,7 +21,7 @@ describe("getJobByPrefix", () => {
     expect(getJobByPrefix(db, "_")).toBeNull();
     expect(getJobByPrefix(db, "jo_")).toBeNull(); // would match "job" as a pattern
     expect(getJobByPrefix(db, `${job.id.slice(0, 4)}%`)).toBeNull();
-    expect(getJobByPrefix(db, `${job.id.slice(0, 3)}_`)).toBeNull();
+    expect(getJobByPrefix(db, "j_b_")).toBeNull(); // as a pattern the _ would stand for the o
   });
 
   test("a prefix two jobs share is ambiguous, and an empty prefix finds nothing", () => {
