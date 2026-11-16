@@ -19,8 +19,8 @@ import type { TaskTurnSettings } from "../agent/task-loop";
 import type { Router } from "../models/router";
 import type { GuardrailState } from "../agent/guardrails";
 import { handoff, type HandoffDeps, type HandoffRequest } from "../agent/handoff";
-import { teamRoster, resolvePersona } from "../agent/personas";
-import { DEFAULT_VISIBILITY, redactForCaller } from "../agent/visibility";
+import { assertTeammate, getPersona, resolvePersona } from "../agent/personas";
+import { DEFAULT_VISIBILITY, redactResultForCaller } from "../agent/visibility";
 import { appendChannelMessage, ensureDMChannel } from "../stores/channels";
 import { checkPeerRequest, fingerprintPeerRequest } from "../stores/peer-chains";
 import { stripPeerTags } from "../agent/peer-message";
@@ -45,14 +45,13 @@ export interface HandoffToolDeps {
 
 export function registerHandoffTool(registry: ToolRegistry, deps: HandoffToolDeps): void {
   if (registry.get("handoff")) return;
-  const team = teamRoster(deps.db, { exclude: deps.currentAgentID });
   const nameOf = (agentID: string): string => {
     const row = deps.db
       .query<{ display_name: string | null; avatar_color: string | null }, [string]>(
         "SELECT display_name, avatar_color FROM agents WHERE id = ?",
       )
       .get(agentID);
-    return row?.display_name?.trim() || team.find((member) => member.id === agentID)?.name || agentID;
+    return row?.display_name?.trim() || getPersona(agentID)?.name || agentID;
   };
   const colorOf = (agentID: string): string | undefined => {
     const row = deps.db
@@ -106,9 +105,9 @@ export function registerHandoffTool(registry: ToolRegistry, deps: HandoffToolDep
     kind: "static",
     timeoutMs: 120_000,
     schema: objectSchema({
-      toAgentID: team.length > 0
-        ? { type: "string", enum: team.map((member) => member.id), description: team.map((member) => `${member.id}: ${member.role}`).join("; ") }
-        : stringProp,
+      // Not an enum: the roster changes while a turn runs (a bot can create
+      // one), so the target is checked against the live roster when called.
+      toAgentID: { ...stringProp, description: "The id of a teammate (see your team list). An unknown id is refused with the current team." },
       task: { type: "string", minLength: 1, description: "The brief for the other agent." },
       context: { type: "string", minLength: 1, description: "Optional extra context for the other agent." },
       intent: {
@@ -120,9 +119,7 @@ export function registerHandoffTool(registry: ToolRegistry, deps: HandoffToolDep
     handler: async (args: Record<string, unknown>, ctx) => {
       const toAgentID = String(args.toAgentID ?? "").trim();
       if (!toAgentID) throw new Error("handoff requires a toAgentID");
-      if (team.length > 0 && !team.some((member) => member.id === toAgentID)) {
-        throw new Error(`unknown agent ${toAgentID}; the team is ${team.map((member) => member.id).join(", ")}`);
-      }
+      assertTeammate(deps.db, deps.currentAgentID, toAgentID);
       const task = String(args.task ?? "").trim();
       if (!task) throw new Error("handoff requires a task");
       const intent = readIntent(args.intent);
@@ -155,6 +152,10 @@ export function registerHandoffTool(registry: ToolRegistry, deps: HandoffToolDep
         task,
         context: context || undefined,
         intent,
+        // The bot's own chat goes with the brief only on a chain that began
+        // with the owner's own message in the main chat or a direct chat:
+        // not a peer-started or wake turn, not a group, not a deeper link.
+        includeOwnChat: !ctx.peerInput && deps.guardrail.depth === 1 && isOwnerChannel(deps.channelID),
         emit: deps.emit,
         signal: deps.signal,
       };
@@ -180,7 +181,9 @@ export function registerHandoffTool(registry: ToolRegistry, deps: HandoffToolDep
       // context, so the one place visibility is applied. A private agent
       // gives the caller a receipt, not its answer.
       const visibility = resolvePersona(deps.db, toAgentID)?.visibility ?? DEFAULT_VISIBILITY;
-      const visible = redactForCaller(result.text, toAgentID, deps.currentAgentID, visibility);
+      // The answer is the deliverable of work this caller asked for: a
+      // `summary` bot's comes back in full up to RESULT_MAX_CHARS.
+      const visible = redactResultForCaller(result.text, toAgentID, deps.currentAgentID, visibility);
       return {
         childTurnID: result.childTurnID,
         agentID: result.agentID,
@@ -193,6 +196,11 @@ export function registerHandoffTool(registry: ToolRegistry, deps: HandoffToolDep
       };
     },
   });
+}
+
+/** The owner's own channels: the main chat and a direct chat with a bot. Not a group, not a job. */
+function isOwnerChannel(channelID: string | undefined): boolean {
+  return channelID === "main" || Boolean(channelID?.startsWith("dm:"));
 }
 
 /** Read the optional intent; absent means "request", invalid is an error. */
