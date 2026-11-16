@@ -93,6 +93,81 @@ describe("project Semgrep rules: shape", () => {
   });
 });
 
+/**
+ * Review-round coverage (S3-2 fix round). Semgrep is not required to run these:
+ * they hold each rule and its fixture to the cases the review found missing, by
+ * reading the YAML and the annotated fixture lines. They do not replace
+ * `semgrep --test` below, which is the only thing that exercises matching.
+ */
+function ruleOf(name: string): Rule {
+  return loadRules(`${name}.yaml`)[0]!;
+}
+
+function fixtureText(name: string): string {
+  return readFileSync(join(RULES_DIR, `${name}.ts`), "utf8");
+}
+
+/** The code line that follows each `// <kind>: <name>` annotation in the fixture. */
+function annotatedLines(name: string, kind: "ruleid" | "ok"): string[] {
+  const lines = fixtureText(name).split(/\r?\n/);
+  const out: string[] = [];
+  lines.forEach((line, index) => {
+    if (new RegExp(`//\\s*${kind}:\\s*${name}\\s*$`).test(line)) out.push(lines[index + 1] ?? "");
+  });
+  return out;
+}
+
+const CHILD_CALL = /\b(Bun\.)?(spawn|spawnSync|exec|execSync|execFile|execFileSync|fork)\(/;
+
+describe("project Semgrep rules: review-round coverage", () => {
+  test("agni-env-spread-to-child: a child started with no env option is a positive, never a negative", () => {
+    const positives = annotatedLines("agni-env-spread-to-child", "ruleid").filter((line) => CHILD_CALL.test(line) && !/\benv\b/.test(line));
+    // node spawn, Bun.spawn and an exec* call, each with no env at all.
+    expect(positives.some((line) => /(^|[^.\w])spawn\(/.test(line))).toBe(true);
+    expect(positives.some((line) => /Bun\.spawn(Sync)?\(/.test(line))).toBe(true);
+    expect(positives.some((line) => /\bexec(Sync|File|FileSync)?\(/.test(line))).toBe(true);
+    const negatives = annotatedLines("agni-env-spread-to-child", "ok").filter((line) => CHILD_CALL.test(line));
+    for (const line of negatives) expect(line).toMatch(/\benv\b/);
+  });
+
+  test("agni-env-spread-to-child: the rule has a branch for 'no env option'", () => {
+    const text = JSON.stringify(ruleOf("agni-env-spread-to-child"));
+    expect(text).toContain("pattern-not");
+    expect(text).toContain("env: $E");
+    // no options object at all, and an options object that lacks env
+    expect(text).toContain("$F($CMD)");
+    expect(text).toContain("$F(..., {...}, ...)");
+  });
+
+  test("agni-model-json-into-sql: tool handler arguments are a source, with a positive fixture", () => {
+    const sources = JSON.stringify(ruleOf("agni-model-json-into-sql")["pattern-sources"]);
+    expect(sources).toContain("handler");
+    expect(sources).toContain("$ARGS");
+    expect(fixtureText("agni-model-json-into-sql")).toMatch(/handler:\s*async\s*\(\s*args/);
+    expect(annotatedLines("agni-model-json-into-sql", "ruleid").length).toBeGreaterThanOrEqual(3);
+  });
+
+  test("agni-model-json-into-sql: parsed tool-call args and arguments are sources", () => {
+    const sources = JSON.stringify(ruleOf("agni-model-json-into-sql")["pattern-sources"]);
+    expect(sources).toMatch(/\bargs\b/);
+    expect(sources).toContain("arguments");
+    expect(fixtureText("agni-model-json-into-sql")).toContain("JSON.parse(call.args)");
+  });
+
+  test("agni-fetch-without-ssrf-guard: every guard names the same URL value as the fetch", () => {
+    const rule = ruleOf("agni-fetch-without-ssrf-guard") as unknown as { patterns: Record<string, string>[] };
+    const guards = rule.patterns.filter((entry) => entry["pattern-not-inside"] !== undefined);
+    expect(guards.length).toBeGreaterThanOrEqual(4);
+    for (const guard of guards) expect(guard["pattern-not-inside"]).toContain("$URL");
+  });
+
+  test("agni-fetch-without-ssrf-guard: a guard on a different value does not clear the fetch", () => {
+    const fixture = fixtureText("agni-fetch-without-ssrf-guard");
+    expect(fixture).toContain("positiveGuardOnAnotherValue");
+    expect(fixture).toContain("negativeGuardedUrlObject");
+  });
+});
+
 const semgrep = resolveTool(TOOLS.semgrep, { env: process.env, exists: existsSync, which: (name) => Bun.which(name), home: process.env.USERPROFILE || process.env.HOME || homedir() });
 
 describe("project Semgrep rules: matching", () => {

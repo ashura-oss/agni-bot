@@ -4,8 +4,9 @@ rules:
     mode: taint
     severity: ERROR
     message: >-
-      JSON parsed from model output reaches the text of an SQL statement.
-      Model output is untrusted data. Keep the statement fixed and pass every
+      Model output reaches the text of an SQL statement: JSON parsed from a
+      completion or a tool call, or the arguments a tool handler receives
+      (the model chose them). Model output is untrusted data. Keep the statement fixed and pass every
       value as a bound parameter (db.run("... WHERE id = ?", [value])). Only
       a number coerced with Number() or a list of "?" placeholders may be
       interpolated.
@@ -15,11 +16,31 @@ rules:
       owasp: "A03:2021 - Injection"
       sprint: S3-11
     pattern-sources:
+      # JSON parsed from model output, including the arguments of a tool call
+      # (call.function.arguments, toolCall.arguments, call.args, row.args).
       - patterns:
           - pattern: JSON.parse($ARG)
           - metavariable-regex:
               metavariable: $ARG
-              regex: (?i)(completion|response|reply|choice|message|content|output|answer|arguments|tool_?call|llm|model|text)
+              regex: (?i)(completion|response|reply|choice|message|content|output|answer|arguments|args|tool_?call|llm|model|text)
+      # The first parameter of a tool handler is the arguments object the model
+      # chose; treat every read of it as tainted.
+      - patterns:
+          - pattern-inside: |
+              { ..., handler: async ($ARGS, ...) => { ... }, ... }
+          - pattern: $ARGS
+      - patterns:
+          - pattern-inside: |
+              { ..., handler: ($ARGS, ...) => { ... }, ... }
+          - pattern: $ARGS
+      - patterns:
+          - pattern-inside: |
+              { ..., handler: async function ($ARGS, ...) { ... }, ... }
+          - pattern: $ARGS
+      - patterns:
+          - pattern-inside: |
+              { ..., async handler($ARGS, ...) { ... }, ... }
+          - pattern: $ARGS
     pattern-sanitizers:
       - pattern: Number(...)
       - pattern: parseInt(...)

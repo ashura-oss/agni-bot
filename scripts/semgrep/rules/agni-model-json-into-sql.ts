@@ -36,3 +36,48 @@ export function negativePlaceholders(db: Database, completion: { content: string
   // ok: agni-model-json-into-sql
   db.run(`DELETE FROM jobs WHERE id IN (${marks})`, ids);
 }
+
+declare const sharedDb: Database;
+
+/** The arguments a tool handler receives were chosen by the model. */
+export const positiveToolHandlerArgs = {
+  name: "purge",
+  handler: async (args: { table: string }) => {
+    // ruleid: agni-model-json-into-sql
+    sharedDb.exec(`DELETE FROM ${args.table}`);
+    return { ok: true };
+  },
+};
+
+export const positiveToolHandlerWithContext = {
+  name: "rename",
+  handler: async (args: Record<string, unknown>, ctx: { threadID: string }) => {
+    // ruleid: agni-model-json-into-sql
+    sharedDb.run("UPDATE threads SET title = '" + String(args.title) + "' WHERE id = ?", [ctx.threadID]);
+    return { ok: true };
+  },
+};
+
+export function positiveStoredToolCallArgs(db: Database, call: { args: string }): void {
+  const parsed = JSON.parse(call.args) as { column: string };
+  // ruleid: agni-model-json-into-sql
+  db.query(`SELECT ${parsed.column} FROM tool_calls`).all();
+}
+
+export const negativeToolHandlerBound = {
+  name: "rename",
+  handler: async (args: { id: string; title: string }) => {
+    // ok: agni-model-json-into-sql
+    sharedDb.run("UPDATE threads SET title = ? WHERE id = ?", [args.title, args.id]);
+    return { ok: true };
+  },
+};
+
+export const negativeToolHandlerNumeric = {
+  name: "trim",
+  handler: async (args: { keep: string }) => {
+    // ok: agni-model-json-into-sql
+    sharedDb.run(`DELETE FROM jobs WHERE n > ${Number(args.keep)}`);
+    return { ok: true };
+  },
+};
