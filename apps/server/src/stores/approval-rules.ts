@@ -146,15 +146,24 @@ function canStillMatch(rule: ApprovalRule): boolean {
 }
 
 /**
- * Active rules that can still match, newest first; with `includeRevoked`, the
- * whole history (revoked and unmatchable rows too).
+ * Active rules that can still match, newest first. A rule that can no longer
+ * match is revoked as it is found. With `includeRevoked`, the whole history.
  */
 export function listApprovalRules(db: Database, options: { includeRevoked?: boolean } = {}): ApprovalRule[] {
   const rows = db
     .query(`SELECT * FROM approval_rules ${options.includeRevoked ? "" : "WHERE revoked_at IS NULL"} ORDER BY created_at DESC, id`)
     .all() as RuleRow[];
   const rules = rows.map(toRule);
-  return options.includeRevoked ? rules : rules.filter(canStillMatch);
+  if (options.includeRevoked) return rules;
+  const live = rules.filter(canStillMatch);
+  // A rule the list hides is not left active: a scratch folder that moves, or a
+  // path that changes case, could make it matchable again. It stays in the history.
+  const dead = rules.filter((rule) => !live.includes(rule) && rule.revokedAt === null);
+  if (dead.length > 0) {
+    const when = nowISO();
+    for (const rule of dead) db.run("UPDATE approval_rules SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", [when, rule.id]);
+  }
+  return live;
 }
 
 /** Revoke a rule. True when an active rule was revoked; false for an unknown or already revoked id. */
