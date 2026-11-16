@@ -129,7 +129,7 @@ describe("plugin connect flow", () => {
     writeFileSync(pluginsPath, JSON.stringify({ version: 1, plugins: {} }));
     const service = new PluginService({ config: fakeConfig(), db, emit: () => {}, pluginsPath });
 
-    const result = service.configure("gmail", "agent", { user: "agni@example.com", pass: "app-pass" });
+    const result = service.configure("gmail", "agent", { user: "agni@example.com", pass: "fake-mail-secret-7731" });
     expect(result.error).toBeUndefined();
 
     const stored = JSON.parse(readFileSync(pluginsPath, "utf8")) as {
@@ -137,7 +137,7 @@ describe("plugin connect flow", () => {
     };
     expect(stored.plugins.gmail?.enabled).toBe(true);
     expect(stored.plugins.gmail?.auth.user).toBe("agni@example.com");
-    expect(stored.plugins.gmail?.auth.pass).toBe("app-pass");
+    expect(stored.plugins.gmail?.auth.pass).toBe("fake-mail-secret-7731");
 
     const connection = getConnectionFor(db, "gmail", "agent");
     expect(connection?.status).toBe("connected");
@@ -431,19 +431,19 @@ describe("plugin credentials reach the tools", () => {
   }
 
   test("a mailbox connected in the UI is the one the mail tool uses", () => {
-    writePlugins({ account: "agent", enabled: true, auth: { kind: "app-password", user: "agni@example.com", pass: "app-pass" } });
+    writePlugins({ account: "agent", enabled: true, auth: { kind: "app-password", user: "agni@example.com", pass: "fake-mail-secret-7731" } });
 
     const credentials = mailCredentialsFromPlugins(pluginsPath, "agent");
-    expect(credentials).toEqual({ user: "agni@example.com", pass: "app-pass" });
+    expect(credentials).toEqual({ user: "agni@example.com", pass: "fake-mail-secret-7731" });
 
     const config = resolveMailConfig("agent", pluginMailResolver(pluginsPath));
     expect(config?.user).toBe("agni@example.com");
-    expect(config?.pass).toBe("app-pass");
+    expect(config?.pass).toBe("fake-mail-secret-7731");
     expect(config?.imapHost).toBe("imap.gmail.com");
   });
 
   test("a plugin that is not connected yields no credentials", () => {
-    writePlugins({ account: "agent", enabled: false, auth: { kind: "app-password", user: "agni@example.com", pass: "app-pass" } });
+    writePlugins({ account: "agent", enabled: false, auth: { kind: "app-password", user: "agni@example.com", pass: "fake-mail-secret-7731" } });
     expect(mailCredentialsFromPlugins(pluginsPath, "agent")).toBeNull();
     writePlugins(null);
     expect(mailCredentialsFromPlugins(pluginsPath, "owner")).toBeNull();
