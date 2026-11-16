@@ -33,7 +33,7 @@ const deepseek: ProviderConfig = { id: "openrouter", label: "OpenRouter", baseUr
 interface LedgerRow {
   id: string; turn_id: string | null; provider: string; model: string; input_tokens: number; output_tokens: number;
   cached_input_tokens: number; cost_usd: number | null; agent_id: string | null; job_id: string | null;
-  root_job_id: string | null; call_kind: string | null; purpose: string | null; day: string; created_at: string;
+  root_job_id: string | null; call_kind: string | null; purpose: string | null; cost_source: string | null; day: string; created_at: string;
 }
 const rows = (db: Database): LedgerRow[] => db.query<LedgerRow, []>("SELECT * FROM usage_ledger ORDER BY created_at, rowid").all();
 
@@ -137,14 +137,15 @@ describe("ledger recorder (startupS2Ledger)", () => {
     expect(rows(db)[0]!.cost_usd).toBeNull();
   });
 
-  test("a provider that reports no usage still leaves a row (zero tokens, cost null)", async () => {
+  test("a provider that reports no usage leaves a row priced from the estimate, never unknown (S2-INT 2)", async () => {
     await install();
     const router = new Router([deepseek], new HealthTracker(), asFetch(() => sse(undefined)));
     await router.route(options);
     const all = rows(db);
     expect(all).toHaveLength(1);
-    expect(all[0]!.input_tokens).toBe(0);
-    expect(all[0]!.cost_usd).toBeNull();
+    expect(all[0]!.input_tokens).toBeGreaterThan(0);
+    expect(all[0]!.cost_usd).not.toBeNull();
+    expect(all[0]!.cost_source).toBe("estimate");
   });
 
   test("one call from each kind of caller yields exactly one row, retried calls included", async () => {

@@ -96,6 +96,13 @@ function estimateInputTokens(messages: ChatMessage[], tools: ToolSpec[] | undefi
   return tokens;
 }
 
+/** Rough size of what a call produced: its text, its reasoning and its tool-call arguments. */
+function estimateOutputTokens(result: ChatResult): number {
+  let tokens = estimateTokens(result.text) + estimateTokens(result.reasoning ?? "");
+  for (const call of result.toolCalls ?? []) tokens += estimateTokens(`${call.function.name}${call.function.arguments}`);
+  return tokens;
+}
+
 /**
  * How many times to try a single provider on a fast, retryable failure
  * (network, 408, 429, 5xx). A timeout gets one attempt: retrying a stalled
@@ -280,13 +287,17 @@ export class Router {
           } finally { lease?.release(); }
           this.health.markSuccess(provider.id);
           const latencyMs = Date.now() - beganAt;
+          // A provider that reports no usage at all is priced from what was sent and what streamed back, so
+          // one such call is a small estimate in the ledger and not an unknown cost that blocks the day.
+          const noUsage = result.inputTokens === undefined && result.outputTokens === undefined && result.reportedCostUsd === undefined;
           const usageEvent: PricedUsageEvent = {
             provider: provider.id,
             model: provider.model,
-            inputTokens: result.inputTokens,
-            outputTokens: result.outputTokens,
+            inputTokens: noUsage ? estimateInputTokens(options.messages, options.tools) : result.inputTokens,
+            outputTokens: noUsage ? estimateOutputTokens(result) : result.outputTokens,
             cachedInputTokens: result.cachedInputTokens,
             reportedCostUsd: result.reportedCostUsd,
+            ...(noUsage ? { estimated: true } : {}),
             latencyMs,
             purpose: options.purpose,
             agentID: options.agentID,
