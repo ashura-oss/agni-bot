@@ -1,0 +1,136 @@
+/* Phone touch targets and fields (Sprint 4 exit-test fixes). -------------------
+ * Loaded last, so it wins over the desktop sizes in tasks, settings and the
+ * sidebar. Visual size mostly stays as it was; the element grows to the 44px
+ * target and keeps its footprint with negative margins or a drawn circle.
+ * Nothing here applies above 720px (the dialog stacking above 420px).
+ */
+@media (max-width: 720px) {
+  /* Task rows. The 17px box (tasks.css) is drawn by ::before so the button itself is 44x44;
+   * the negative margin keeps its 17px footprint in the row. */
+  .dashboard-task-check {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: var(--touch-target);
+    height: var(--touch-target);
+    flex: 0 0 var(--touch-target);
+    margin: calc((17px - var(--touch-target)) / 2);
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+  }
+
+  .dashboard-task-check::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 17px;
+    height: 17px;
+    box-sizing: border-box;
+    transform: translate(-50%, -50%);
+    border: 1.5px solid color-mix(in srgb, var(--ink-tertiary) 78%, transparent);
+    border-radius: 5px;
+    transition: border-color 120ms ease, background 120ms ease;
+  }
+
+  .dashboard-task-check svg {
+    position: relative;
+  }
+
+  .dashboard-task-check:hover,
+  .dashboard-task-check:focus-visible {
+    background: transparent;
+  }
+
+  .dashboard-task-check:hover::before,
+  .dashboard-task-check:focus-visible::before {
+    border-color: var(--accent);
+    background: var(--accent);
+  }
+
+  .dashboard-task.completed .dashboard-task-check {
+    background: transparent;
+  }
+
+  .dashboard-task.completed .dashboard-task-check::before {
+    border-color: #65b895;
+    background: #65b895;
+  }
+
+  .dashboard-task-title {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    min-height: var(--touch-target);
+  }
+
+  .task-action-menu > summary,
+  .dashboard-task-utility-actions .task-card-action {
+    width: var(--touch-target);
+    height: var(--touch-target);
+  }
+
+  /* The menu button is 14px wider than before; give the room back at its left edge. */
+  .task-action-menu {
+    margin-left: -7px;
+  }
+
+  .dashboard-snooze,
+  .dashboard-done,
+  .task-action-option {
+    min-height: var(--touch-target);
+  }
+
+  /* The pin star sits inside a roster row; take the room from the row's own padding. */
+  .sidebar-star {
+    width: var(--touch-target);
+    height: var(--touch-target);
+    margin: -10px -8px -10px 0;
+  }
+
+  /* Settings: tabs, segmented choices and buttons. */
+  .settings-tab,
+  .settings-back,
+  .segmented button,
+  .settings-overlay .btn,
+  .settings-overlay .icon-btn {
+    min-height: var(--touch-target);
+  }
+
+  .settings-overlay .icon-btn {
+    min-width: var(--touch-target);
+  }
+
+  .segmented button {
+    padding-inline: 14px;
+  }
+
+  /* The custom colour control: 16px text (no iOS zoom on focus) and finger-sized parts. */
+  .colour-control label,
+  .colour-control input[type="text"] {
+    font-size: 16px;
+  }
+
+  .colour-control input[type="text"],
+  .colour-control input[type="color"] {
+    min-height: var(--touch-target);
+  }
+
+  .colour-control input[type="color"] {
+    width: 56px;
+  }
+
+  .task-composer .text-input,
+  .task-composer .text-area,
+  .task-composer .select {
+    font-size: 16px;
+  }
+}
+
+/* The new-task dialog: one column when two would be too narrow for a date field. */
+@media (max-width: 420px) {
+  .task-composer-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

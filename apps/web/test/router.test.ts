@@ -34,6 +34,17 @@ describe("parseRoute", () => {
     expect(parseRoute("/settings/bogus")).toEqual({ kind: "not-found", path: "/settings/bogus" });
     expect(parseRoute("/agent/%E0%A4%A")).toEqual({ kind: "not-found", path: "/agent/%E0%A4%A" });
   });
+
+  it("does not show Today for a task view that does not exist", () => {
+    expect(parseRoute("/tasks/bogus")).toEqual({ kind: "not-found", path: "/tasks/bogus" });
+    expect(parseRoute("/tasks/collection")).toEqual({ kind: "not-found", path: "/tasks/collection" });
+    expect(parseRoute("/tasks/inbox/extra")).toEqual({ kind: "not-found", path: "/tasks/inbox/extra" });
+    expect(parseRoute("/tasks/collection/lst_a/extra")).toEqual({ kind: "not-found", path: "/tasks/collection/lst_a/extra" });
+  });
+
+  it("still reads /tasks/today as Today", () => {
+    expect(parseRoute("/tasks/today")).toEqual({ kind: "tasks", view: { kind: "today" } });
+  });
 });
 
 describe("routePath", () => {

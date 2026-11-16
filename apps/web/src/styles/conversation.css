@@ -330,7 +330,7 @@
 
 .task-composer-fields {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 12px;
 }
 
@@ -338,8 +338,16 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
+  min-width: 0;
   color: var(--ink-secondary);
   font-size: var(--text-caption);
+}
+
+/* A datetime field has an intrinsic width; let it shrink to its column instead of pushing past the edge. */
+.task-composer-fields input,
+.task-composer-fields select {
+  min-width: 0;
+  width: 100%;
 }
 
 .task-composer-attachments {

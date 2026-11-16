@@ -153,6 +153,25 @@ describe("deep links", () => {
     expect(window.location.pathname).toBe("/settings/bogus");
   });
 
+  it("call an unknown task view not found instead of showing Today, and keep the address", () => {
+    const { model } = openAt("/tasks/bogus");
+    show(model);
+    frame(model, rosterFrame);
+    expect(screen.queryByTestId("tasks-stub")).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /not found/i })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/tasks/bogus");
+  });
+
+  it("put the focus on the open Settings section, not on the first tab", () => {
+    const { model } = openAt("/settings/models");
+    show(model);
+    frame(model, rosterFrame);
+    const active = document.activeElement as HTMLElement;
+    expect(active).toHaveTextContent("Models & providers");
+    expect(active).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("button", { name: "Appearance" })).not.toHaveFocus();
+  });
+
   it("do not show Settings over the pairing screen", () => {
     window.history.replaceState({}, "", "/settings/models");
     const model = new AppModel({ makeTransport: idleTransport, healthFetch: async () => health, notifier: silentNotifications, healthPollMs: 0 });

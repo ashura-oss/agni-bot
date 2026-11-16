@@ -5,7 +5,7 @@
  *   /agent/<id>              a bot's conversation
  *   /group/<id>              a group channel
  *   /task/<id>               one task, open on the Tasks screen
- *   /tasks[/<view>]          the Tasks screen (today, inbox, upcoming, ...)
+ *   /tasks[/<view>]          the Tasks screen (today, inbox, upcoming, ...); an unknown view is not found
  *   /settings[/<section>]    Settings, over whatever is behind it
  *
  * Anything else keeps its address and shows a not-found state.
@@ -52,11 +52,12 @@ export function parseRoute(pathname: string): Route {
     return parts.length === 2 && isSettingsSection(second) ? { kind: "settings", section: second } : missing;
   }
   if (head === "tasks") {
-    const view: TaskViewRoute =
-      (TASK_VIEWS as readonly string[]).includes(second ?? "") ? { kind: second as (typeof TASK_VIEWS)[number] }
-      : second === "collection" && third ? { kind: "list", listID: third }
-      : { kind: "today" };
-    return { kind: "tasks", view };
+    if (second === undefined || (second === "today" && parts.length === 2)) return { kind: "tasks", view: { kind: "today" } };
+    if (parts.length === 2 && (TASK_VIEWS as readonly string[]).includes(second)) {
+      return { kind: "tasks", view: { kind: second as (typeof TASK_VIEWS)[number] } };
+    }
+    if (parts.length === 3 && second === "collection" && third) return { kind: "tasks", view: { kind: "list", listID: third } };
+    return missing;
   }
   return missing;
 }

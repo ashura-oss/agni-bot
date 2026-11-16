@@ -79,13 +79,18 @@ export function SettingsView() {
   const [editingProvider, setEditingProvider] = useState<ProviderStatus | null>(null);
   const [connectingPlugin, setConnectingPlugin] = useState<PluginInfo | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
-  useDialog(rootRef, () => model.closeSettings());
+  useDialog(rootRef, () => model.closeSettings(), ".settings-tab.active");
 
   useEffect(() => {
     void model.refreshSettingsData();
     // The pane refreshes once when it opens, like the Mac sheet's .task.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // On a phone the tabs scroll sideways; keep the open section's tab in view (a deep link can land past the edge).
+  useEffect(() => {
+    rootRef.current?.querySelector<HTMLElement>(".settings-tab.active")?.scrollIntoView?.({ block: "nearest", inline: "center" });
+  }, [section]);
 
   const current = SECTIONS.find((item) => item.id === section) ?? SECTIONS[0]!;
 
@@ -101,6 +106,7 @@ export function SettingsView() {
                 type="button"
                 key={item.id}
                 className={`settings-tab${section === item.id ? " active" : ""}`}
+                aria-current={section === item.id ? "page" : undefined}
                 onClick={() => model.selectSettingsSection(item.id)}
               >
                 <Icon size={14} />

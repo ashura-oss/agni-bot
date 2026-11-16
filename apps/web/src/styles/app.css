@@ -20,6 +20,7 @@
  *   overrides-v3.css - Live appearance controls and the V3 desktop messaging overrides.
  *   phone-baseline.css - The 375px baseline for the shell and conversation (wins over the above).
  *   routes.css - Not-found and group pages.
+ *   phone-touch.css - Phone touch targets (44px), 16px fields and the narrow new-task dialog.
  */
 @import "./base.css";
 @import "./sidebar.css";
@@ -37,3 +38,4 @@
 @import "./overrides-v3.css";
 @import "./phone-baseline.css";
 @import "./routes.css";
+@import "./phone-touch.css";
