@@ -21,7 +21,7 @@ export interface PauseVerdict {
   /** Why, in words the model may read. Absent when not paused. */
   reason?: string;
   /** What stopped it: everything (pause-all) or this one bot (turned off). Absent when not paused. */
-  scope?: "all" | "agent";
+  scope?: "all" | "bot";
 }
 
 export interface PauseActor {
@@ -101,7 +101,7 @@ export function isRunPaused(run: { agentID?: string | null }): PauseVerdict {
   }
   const name = run.agentID ? state.off.get(run.agentID) : undefined;
   if (name !== undefined) {
-    return { paused: true, reason: `${name} is turned off by the owner. Do not retry. Tell the owner if this task needs ${name}.`, scope: "agent" };
+    return { paused: true, reason: `${name} is turned off by the owner. Do not retry. Tell the owner if this task needs ${name}.`, scope: "bot" };
   }
   return { paused: false };
 }

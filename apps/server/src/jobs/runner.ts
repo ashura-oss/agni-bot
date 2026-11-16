@@ -176,11 +176,11 @@ export class JobRunner {
       return false;
     }
     if (!verdict.paused) return false;
-    const result = verdict.scope === "agent" ? "skipped (bot off)" : "skipped (paused)";
+    const result = verdict.scope === "bot" ? "skipped (bot off)" : "skipped (paused)";
     try {
       const delegationID = parseJobPayload<{ delegationTaskID?: string }>(job).delegationTaskID;
       if (delegationID) {
-        setDelegationState(this.db, delegationID, "failed", verdict.scope === "agent" ? "Not run: the owner turned this bot off." : "Not run: the owner paused all bots.");
+        setDelegationState(this.db, delegationID, "failed", verdict.scope === "bot" ? "Not run: the owner turned this bot off." : "Not run: the owner paused all bots.");
       }
     } catch {
       // An unreadable payload has no delegation to fail.

@@ -636,6 +636,13 @@ export class Conversation {
       case "approval.rule.revoke.ok":
         return [];
 
+      // Sprint 2 answers (full card text, pause state, spend). Their UI is S2-6's; until then the
+      // reducer leaves them alone so the new frames never break an older client's transcript.
+      case "approval.full.ok":
+      case "policy.pause.ok":
+      case "spend.status.ok":
+        return [];
+
       case "approval.closed":
         // The card is no longer actionable (answered here or elsewhere, timed
         // out, or its turn ended). The id spaces of approvals and forms are

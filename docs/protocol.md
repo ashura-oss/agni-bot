@@ -313,7 +313,12 @@ database, so `agni pause` / `agni resume` from a terminal works on a running ser
   `skipped (paused)` or `skipped (bot off)`; it does not run late on resume (a recurring job
   waits for its next slot). Housekeeping, task reminders and the morning brief start no bot
   and go on;
-- approval cards already open stay; an answer is recorded but the run does not continue.
+- an approval card that belongs to a stopped turn is closed (`approval.closed`, `cancelled`); a late
+  answer to it is an `unknown_request` error, as for any card whose turn ended.
+
+A pause made with `agni pause` on the command line stops running turns within a second and starts
+held messages within a second of `agni resume`, but sends no per-turn `Stopped:` notice (the turn's
+`turn.end` still says `cancelled`).
 
 Pause-all and per-bot off are independent: resuming all does not turn on a bot that was off.
 A client learns the state from `policy.pause.ok` after `hello` and whenever it changes;
