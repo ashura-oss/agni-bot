@@ -36,6 +36,8 @@ export interface SessionMessage {
   role: string;
   text: string;
   created_at: string;
+  /** The turn that wrote the row, when one did. */
+  turnID: string | null;
 }
 
 /** Get the agent's conversation, creating it (empty, blockless) if needed. */
@@ -240,12 +242,16 @@ export function conversationTranscript(
   db: Database,
   conversationID: string,
   limit = 200,
+  options: { excludeSystem?: boolean } = {},
 ): SessionMessage[] {
+  // `system` rows are instructions the server fed a turn (a scheduled job's
+  // prompt, a delegated task's result): not something the owner said, and
+  // left out when `excludeSystem` is set so they do not use up the limit.
   const rows = db
     .query<SessionMessage, [string, number]>(
-      `SELECT m.id, m.thread_id AS sessionID, m.role, m.text, m.created_at
+      `SELECT m.id, m.thread_id AS sessionID, m.role, m.text, m.created_at, m.turn_id AS turnID
        FROM messages m JOIN threads t ON t.id = m.thread_id
-       WHERE t.conversation_id = ?
+       WHERE t.conversation_id = ?${options.excludeSystem ? " AND m.role <> 'system'" : ""}
        ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?`,
     )
     .all(conversationID, limit);

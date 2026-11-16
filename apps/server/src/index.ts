@@ -27,7 +27,9 @@ import { setFirecrawlPluginsPath } from "./tools/web";
 import {
   daemonStatus,
   fetchHealth,
+  formatHealthLines,
   followLog,
+  type HealthAnswer,
   healthURL,
   startDaemon,
   stopDaemon,
@@ -44,9 +46,9 @@ import { scheduleTagger } from "./jobs/tagger";
 import { log } from "./log";
 import { HealthTracker } from "./models/health";
 import { Router } from "./models/router";
-import { deleteJob, enqueueJob, getJobByPrefix, listJobs, requeueStuckJobs, setJobEnabled, wakeJob } from "./stores/jobs";
+import { deleteJob, describeWake, enqueueJob, getJobByPrefix, listJobs, requeueStuckJobs, setJobEnabled, wakeJob } from "./stores/jobs";
 import { formatDuration, parseDurationMs, parseWhen } from "./util/time";
-import { startServer, type HealthReport, type RunningServer } from "./ws/server";
+import { startServer, type RunningServer } from "./ws/server";
 import { agniHome, loadHomeEnv, migrateHomeLayout } from "./home";
 import { browserOpenCommand } from "./util/open-url";
 import { secureDirectory, secureDirectoryIfNeeded, secureFile } from "./util/private-file";
@@ -267,21 +269,8 @@ async function daemonStatusCommand(config: Config): Promise<void> {
   printHealth(status.health, config);
 }
 
-function printHealth(health: HealthReport | undefined, config: Config): void {
-  if (!health) return;
-  const uptime = formatDuration(health.uptimeMs);
-  const usage = health.usageToday;
-  console.log(`  up ${uptime} · protocol v${health.v} · seq ${health.seq} · today ${usage.turns} turns (${usage.inputTokens} in / ${usage.outputTokens} out tokens)`);
-  console.log(`  model streams ${health.modelCapacity?.active ?? 0}/${health.modelCapacity?.capacity ?? 0}`);
-  for (const provider of health.providers) {
-    const state = provider.available
-      ? "ok"
-      : `cooling ${Math.ceil(provider.cooldownRemainingMs / 1000)}s${provider.lastError ? `: ${provider.lastError}` : ""}`;
-    console.log(`    ${provider.id.padEnd(11)} ${provider.model} ${state}`);
-  }
-  if (health.providers.length === 0) {
-    console.log(`    (no providers configured — set a key in ~/.agni/config.env; server ${config.host}:${config.port} is up)`);
-  }
+function printHealth(health: HealthAnswer | undefined, config: Config): void {
+  for (const line of formatHealthLines(health, config)) console.log(line);
 }
 
 // --- jobs --------------------------------------------------------------------
@@ -421,8 +410,12 @@ function jobRun(db: ReturnType<typeof openDatabase>, args: string[]): void {
     console.error(`no unique job matching "${target}"`);
     process.exit(1);
   }
-  wakeJob(db, job.id);
-  console.log(`${job.id} is due now — the daemon picks it up on its next poll`);
+  const result = describeWake(job.id, wakeJob(db, job.id));
+  if (!result.ok) {
+    console.error(result.message);
+    process.exit(1);
+  }
+  console.log(result.message);
 }
 
 function safePayload(payload: string | null): string {

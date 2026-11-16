@@ -5,7 +5,7 @@
  */
 import { useEffect, useState } from "react";
 import { ChevronDown, Plus, RefreshCw } from "lucide-react";
-import { format, ownerJobs, type JobInfo, type MemoryItem, type TaskInfo } from "@agni/client";
+import { format, ownerJobs, recurrenceLabel, type JobInfo, type MemoryItem, type TaskInfo } from "@agni/client";
 import type { RoutineInfo, RoutineRunInfo } from "@agni/protocol";
 import { useAppModel, useAppSnapshot } from "../state/use-app-model";
 import { AgentAvatar, PresenceDot } from "./bits";
@@ -386,10 +386,15 @@ function humanCadence(cron: string, timezone: string): string {
  */
 function useRunNow(job: JobInfo): { busy: boolean; start: () => void } {
   const model = useAppModel();
+  const refusals = useAppSnapshot().runRefusals;
   const [requested, setRequested] = useState(false);
   useEffect(() => {
     setRequested(false);
   }, [job.state, job.attempts, job.lastResult]);
+  // The daemon said it is already running: stand down at once, it will report the job itself.
+  useEffect(() => {
+    setRequested(false);
+  }, [refusals]);
   useEffect(() => {
     if (!requested) return;
     // If the daemon never reports back, do not leave the button off for good.
@@ -413,16 +418,27 @@ function RoutineRow({ job }: { job: JobInfo }) {
 function PlainRoutineRow({ job }: { job: JobInfo }) {
   const model = useAppModel();
   const runAt = format.parseISO(job.runAt);
-  // Only `everyMs` is reported, so a job that repeats on a clock (daily at 09:00) looks the
-  // same as a one-off here. Say when it runs next rather than claiming it runs once.
+  // The daemon reports how a job repeats: every N minutes (`everyMs`) or on a clock
+  // (`dailyAt`, `days`). A server old enough not to send `internal` does not send
+  // `dailyAt` either, so there a one-off cannot be told from a clock job: say when it
+  // runs next rather than claiming it runs once.
+  const clock = recurrenceLabel(job);
+  const knowsRecurrence = job.internal !== undefined;
+  const next = job.enabled && runAt ? ` · next ${format.stamp(runAt)}` : "";
   const timing =
     job.state === "running"
       ? "Running now"
       : job.everyMs !== undefined
-        ? `${format.cadence(job.everyMs, runAt)}${job.enabled && runAt ? ` · next ${format.stamp(runAt)}` : ""}`
-        : runAt
-          ? `${job.state === "done" ? "Last ran" : "Next run"} ${format.stamp(runAt)}`
-          : "Scheduled";
+        ? `${format.cadence(job.everyMs, runAt)}${next}`
+        : clock
+          ? `${clock}${next}`
+          : knowsRecurrence
+            ? runAt
+              ? `Once · ${job.state === "done" ? "ran" : "runs"} ${format.stamp(runAt)}`
+              : "Once"
+            : runAt
+              ? `${job.state === "done" ? "Last ran" : "Next run"} ${format.stamp(runAt)}`
+              : "Scheduled";
   const run = useRunNow(job);
   return (
     <div className="routine-row">

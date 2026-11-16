@@ -37,6 +37,7 @@ export {
   MAX_ATTACHMENTS,
   MAX_ATTACHMENT_BYTES,
   type JobInfo,
+  type ApprovalRuleInfo,
   type MemoryItem,
   type TaskInfo,
   type TaskListInfo,

@@ -18,9 +18,10 @@ never reason about thread ids.
 ## Envelope
 
 - One WebSocket per client: `GET /ws` (HTTP upgrade). The upgrade is refused
-  (403) when an `Origin` header names a non-loopback host other than
-  `AGNI_HOST`; native clients send no `Origin`. The first frame must be
-  `hello`; every other frame before auth gets `error {code:"unauthorized"}`.
+  (403) when the `Host` or `Origin` header is not one the server answers to
+  (see "Who may connect" below); native clients send no `Origin`. The first
+  frame must be `hello`; every other frame before auth gets
+  `error {code:"unauthorized"}`.
 - Frames are JSON text. Client frames carry no sequence number. **Every**
   server frame carries `seq`: a positive, monotonically increasing integer
   assigned by the server. Exception: `error` frames go only to the
@@ -39,13 +40,76 @@ never reason about thread ids.
   `lastSeq` is higher (server crash + restart) must treat the difference as a
   gap and reload.
 
+## Who may connect
+
+Two exact checks run on every HTTP request and on the WebSocket upgrade. There
+is no "any loopback" and no wildcard.
+
+- **Host.** The `Host` header must name this server: the bind address
+  (`AGNI_HOST`), the loopback names (`127.0.0.1`, `localhost`, `[::1]`) when it
+  is bound to loopback or a wildcard address, or the host of an allowed origin
+  below. Anything else is `403 forbidden host`, before any route runs. This
+  stops DNS-rebinding pages, which reach the server under their own name.
+- **Origin.** Browsers send `Origin`; native clients (Mac, CLI) send none and
+  skip this check. An `Origin` must be one of: the server's own origin;
+  `AGNI_PUBLIC_ORIGIN` (the https name a proxy such as `tailscale serve`
+  publishes); an entry of `AGNI_ALLOWED_ORIGINS` (comma-separated http or https
+  origins such as `http://192.168.1.9:8787`; paths and junk are dropped); or,
+  only when `AGNI_DEV=1` and the server is bound to loopback, the Vite dev
+  server at `http://127.0.0.1:5173` or `http://localhost:5173`. Any other
+  origin is `403 forbidden origin`. CORS answers echo the request's own origin
+  when allowed and never `*`, except `GET /health` (below).
+- **`AGNI_DEV`.** `1` turns on the Vite dev-server trust above and nothing
+  else. It is off in a normal install, so whatever else serves port 5173 on the
+  machine cannot ride the owner's session.
+
+At boot the server logs when the bind address would lock browsers out (a
+wildcard or non-loopback bind with neither `AGNI_PUBLIC_ORIGIN` nor
+`AGNI_ALLOWED_ORIGINS` set).
+
+### `GET /health` tiers
+
+`/health` answers any origin so a web client can tell the daemon is up before it
+pairs, so what it returns depends on who asks.
+
+- **Not paired** (no `Authorization: Bearer <device token>` and no session
+  cookie, or a token that is revoked or unknown): liveness only,
+  `{ok, v, serverTime, uptimeMs}`.
+- **Paired device** (bearer token or the paired browser's cookie): the same plus
+  `seq`, `providers`, `usageToday` and `modelCapacity`. The cross-origin CORS
+  headers do not allow `Authorization`, so the full report is read same-origin
+  or by a native client.
+
+`agni daemon status` sends the device token in `AGNI_TOKEN` (from the
+environment or `config.env`) when one is set, and prints "details need a paired
+device" when it gets liveness only.
+
+### Share links
+
+`thread.export` publishes a self-contained HTML file at `GET /share/<token>`
+(the token is 32 hex characters and is the only access control).
+
+- A link works for **7 days** from publish. Expired files are deleted at boot.
+- `DELETE /share/<token>` revokes it at once. It needs a paired device (bearer
+  token or cookie, else `401`) and an allowed `Origin` (else `403`), and answers
+  `{ok: true}`; an unknown token answers `404`.
+- An expired, revoked or never-issued link all answer the same `404`
+  ("This export no longer exists."), so a stale token reveals nothing.
+
+### Input limits
+
+`msg.send` accepts at most **100,000 characters** in total (`text`, or every
+part of `texts` together). A longer message is refused before anything is stored
+or echoed with `error {code: "bad_frame"}` whose message names the limit, so a
+client can show it and keep the draft.
+
 ## client → server
 
 | Frame | Payload | Notes |
 | --- | --- | --- |
 | `hello` | `{v, token?, device}` | First frame. `v` is the protocol version. `token` may be left out only when a paired browser's `agni_session` cookie authenticated the socket upgrade. |
 | `resync` | `{lastSeq}` | Replay everything after `lastSeq`. |
-| `msg.send` | `{threadID?, text, files?, conversationID?, channelId?, toAgentId?, texts?}` | Channel clients target a channel (default `main`) and may address an agent. `texts` batches multiple bodies; legacy clients continue to send `text`. A message sent while its thread is mid-turn is queued and runs when the turn ends; `stop` (or `cancel`, `never mind`) is a control message that interrupts that turn instead. |
+| `msg.send` | `{threadID?, text, files?, conversationID?, channelId?, toAgentId?, texts?}` | Channel clients target a channel (default `main`) and may address an agent. `texts` batches multiple bodies; legacy clients continue to send `text`. A message sent while its thread is mid-turn is queued and runs when the turn ends; `stop` (or `cancel`, `never mind`) is a control message that interrupts that turn instead. While a new primary bot is waiting for its first name, a short one-line message in `main` (up to three words, no trailing `?` or `!`) is taken as the name: it is stored and echoed as the owner's message, then `agent.updated` follows. Any other message is an ordinary message and the bot stays unnamed. The whole message is limited to 100,000 characters (see "Input limits"). |
 | `user.typing` | `{channelId?, isTyping}` | Extends server-side message coalescing while the user is typing. |
 | `agent.rename` | `{agentId, name}` | Renames an agent and completes primary-agent onboarding. |
 | `agent.profile` | `{agentId, role?, visibility?, model?, critic?}` | Edits an agent's profile from the app: `role` is the tag the roster shows ("chief of staff"), `visibility` is what other agents may see of its work (`private \| summary \| shared`), `model` is the bot's own model (`provider`, `provider:model` or a model id; `null` or `""` clears it), which the router tries first and falls back from when that provider is unavailable. `critic` (opt-in) names another bot that reviews this bot's email drafts before the approval card; its notes ride on the card. `null` or `""` turns it off. At least one field is required. The answer is an `agent.updated` carrying the new `role` and `visibility`; the same change the `update_agent` chat tool makes, so the two cannot drift apart. |
@@ -71,8 +135,10 @@ never reason about thread ids.
 | `thread.list` | `{limit?}` | Recent threads, newest first (default 20, max 200). |
 | `thread.history` | `{threadID, limit?}` | Durable messages, last N chronological (default 50, max 500). |
 | `job.list` | `{limit?}` | Tasks and routines, newest/next due first. |
-| `job.set` | `{jobID, action}` | `action`: `pause \| resume \| run`. |
+| `job.set` | `{jobID, action}` | `action`: `pause \| resume \| run`. Answered by a fresh `job.list.ok`; `run` on a job that is already running queues nothing and answers an `error` with code `already_running` instead. |
 | `job.delete` | `{jobID}` | Deletes a task unless it is running; replies with a refreshed `job.list.ok`. |
+| `approval.rules.list` | `{}` | The standing "Always allow" rules, newest first. Answered by `approval.rules.list.ok`. Additive in v2. |
+| `approval.rule.revoke` | `{id}` | Revokes one rule; it never matches again. Answered by `approval.rule.revoke.ok`, or by an `error` with code `not_found` when the id is unknown or already revoked. Additive in v2. |
 | `task.list` | `{status?, limit?}` | Lists durable tasks and task lists; status is `open \| done \| snoozed \| all`. |
 | `task.create` | `{title, description?, dueAt?, deadlineAt?, reminderAt?, labels?, repeatRule?, priority?, listID?, parentTaskID?, attachmentIDs?}` | Creates a task or subtask, optionally with a schedule, deadline, labels, repeat cadence and uploaded files. |
 | `task.list.create` | `{name}` | Creates a task list and returns the current list navigation data. |
@@ -131,7 +197,7 @@ accountLabel?, error?, connectedAt?}`.
 | `tool.start` | `{callID, name, preview?}` | Tool activity strip. |
 | `tool.update` | `{callID, preview?}` | |
 | `tool.end` | `{callID, ok, preview?}` | |
-| `approval.request` | `{requestID, action, preview, buttons}` | `buttons`: subset of `once \| always \| reject`. |
+| `approval.request` | `{requestID, action, preview, buttons}` | `buttons`: subset of `once \| always \| reject`. `always` is offered only when the call can be remembered (one bot, one tool, one target); it is never offered for `run_privileged` or for a shell command that can run code. A card replayed to a reconnecting client carries the same `buttons` it was first sent with. |
 | `approval.closed` | `{requestID, kind, reason}` | The card for an `approval.request` or `form.request` is no longer actionable; clients remove it. `requestID` is the `apr_...` id of the approval, or the id of the form. `kind`: `approval \| form`. `reason`: `decided` (an answer was recorded, here or on another device) `\| expired` (it timed out) `\| cancelled` (its turn ended or was stopped). Additive in v2 (no version bump); clients that predate it ignore it as an unknown frame. |
 | `secret.request` | `{requestID, purpose, command, kind, expiresAt, threadID?, conversationID?}` | A command needs the owner's password. The frame carries no secret; the owner types it into a secure field. Replayable on reconnect; expires after two minutes. |
 | `secret.cancel` | `{requestID, reason}` | The prompt was resolved, expired, cancelled, or its turn stopped. Replayable. |
@@ -139,12 +205,14 @@ accountLabel?, error?, connectedAt?}`.
 | `notify` | `{title, body, sound?, threadID?, agentId?}` | Push-worthy event; Mac opens the referenced thread when clicked. |
 | `agents.update` | `{agents: [{id, name, color?, model?, role?, tools?, onboarded?, visibility?}]}` | Roster snapshot. `onboarded` is set once the agent has been named, which settles the "what should I call you?" prompt. `role` is what the agent is for, in the owner's words ("inbox manager"). `visibility` is what other agents may see of that agent's work: `private` (a receipt only), `summary` (one line) or `shared` (full text). |
 | `thread.list.ok` | `{threads: [{id, agentID, title?, updatedAt}]}` | Answer to `thread.list`; addressed to the requester. |
-| `thread.history.ok` | `{threadID, title?, messages: [{id, role, text, createdAt, turnID?}]}` | Answer to `thread.history`; addressed to the requester. |
+| `thread.history.ok` | `{threadID, title?, messages: [{id, role, text, createdAt, turnID?, stopReason?}]}` | Answer to `thread.history`; addressed to the requester. `stopReason` is how the turn that produced an assistant message ended (`end`, `cancelled`, `error`, `timeout`, `budget`, ...); it is absent for other roles and while the turn is still running. Additive in v2. |
 | `conversation.ok` | `{conversationID, agentID, sessionID}` | Answer to `conversation.open`; `sessionID`: the active block, `""` before the first block. Addressed, not replayed. |
 | `session.start` | `{conversationID, sessionID, reason}` | A block boundary inside the conversation; `reason`: `manual \| context \| background`. Replayable. |
-| `conversation.history.ok` | `{conversationID, messages: [{id, role, text, createdAt, turnID?, sessionID?}]}` | Answer to `conversation.history`; addressed to the requester. Clients render a session divider wherever consecutive `sessionID`s differ. |
+| `conversation.history.ok` | `{conversationID, messages: [{id, role, text, createdAt, turnID?, sessionID?, stopReason?}]}` | Answer to `conversation.history`; addressed to the requester. Clients render a session divider wherever consecutive `sessionID`s differ. Rows the server fed a turn (a scheduled job's instructions, a delegated task's wake text) are stored with role `system` and are left out; system notices the app posted to the channel (an interrupted reply, a handoff) are kept. `stopReason` is as on `thread.history.ok`. |
 | `thread.export.ok` | `{conversationID, url, token, records, createdAt}` | Answer to `thread.export`; addressed to the requester, not replayed. `url` is absolute and served by this daemon at `GET /share/<token>`; the token is the only access control on the file, so it is never logged or replayed. |
-| `job.list.ok` | `{jobs: [...]}` | Answer to `job.list`, `job.set`, or `job.delete`; addressed to the requester. |
+| `job.list.ok` | `{jobs: [...]}` | Answer to `job.list`, `job.set`, or `job.delete`; addressed to the requester. Each job also carries, additively: `dailyAt` (`"HH:MM"` in the server's time zone, for a wall-clock recurrence), `days` (with `dailyAt`: the weekdays it fires on as `sun`..`sat`; absent means every day), and `internal` (`true` for the daemon's own housekeeping: `tagger`, `memory.embed`, `memory.consolidate`, `summary.rollup`, `rollover.summarize`, `db.backup`, `harness.review`; the server always sends it, and a job without it is the owner's). A job with `everyMs` recurs on an interval instead. |
+| `approval.rules.list.ok` | `{rules: [{id, agentID, agentName, toolName, target, createdAt}]}` | Answer to `approval.rules.list`; addressed to the requester, not replayed. A rule is scoped to one bot, one tool and one target (the exact command, the resolved path, or the recipient list). `agentName` is `null` when the bot no longer exists. |
+| `approval.rule.revoke.ok` | `{id}` | Answer to `approval.rule.revoke`; addressed to the requester, not replayed. |
 | `task.list.ok` | `{tasks: [...], lists: [...]}` | Task snapshots include due date, deadline, priority, workflow status (`not_started`, `in_progress`, `ai_review`), current progress note, list/collection, labels, optional parent, notes, reminder time, repeat cadence and attachment IDs. Lists include open task counts. A delegation task also carries `ownerAgentId`, `origin`, `intent`, `delegateState`, `jobId`, `result` and `resultRedacted`. `intent` is what the delegation is for (`request`, `result`, `question`, `status`, `fyi`) and reads as `request` when absent. The owner sees every result; `resultRedacted` is true when a result exists that this viewer may not see. |
 | `task.create.ok` | `{task: {...}}` | Newly persisted task. |
 | `task.list.create.ok` | `{lists: [...]}` | Updated task list navigation. |
@@ -186,10 +254,11 @@ bubble. A client that ignores `reset` still shows the right answer: the sealing
 
 `bad_frame`, `unauthorized`, `version_mismatch`, `unknown_thread`, `unknown_conversation`,
 `unknown_agent`, `unknown_request`, `unknown_job`, `unknown_task`,
-`bad_task_action`, `capture_failed`, `job_running`, `no_provider`, `provider_failed`,
+`bad_task_action`, `capture_failed`, `job_running`, `already_running`, `no_provider`, `provider_failed`,
 `unknown_provider`, `invalid_key`, `provider_exists`, `provider_storage`, `provider_auth`,
 `unknown_plugin`, `unknown_connection`, `plugin_not_configured`, `plugin_unavailable`,
-`plugin_connect_failed`, `unknown_background`, `resync_gap`, `internal`.
+`plugin_connect_failed`, `unknown_background`, `unknown_channel`, `invalid_attachment`,
+`invalid_domains`, `resync_gap`, `not_found`, `internal`.
 
 ## Versioning
 

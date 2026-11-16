@@ -44,6 +44,8 @@ import {
   enqueueJob,
   setJobEnabled,
   wakeJob,
+  describeWake,
+  isInternalJobKind,
   type JobRow,
 } from "../stores/jobs";
 import { appendMessage, createThread, createTurn, finishTurn, getThread, listThreadsWithPreview, recentMessages, titleThreadFromFirstMessage, touchThread, type ThreadRow } from "../stores/threads";
@@ -81,7 +83,10 @@ import { scheduleTaskReminder } from "../jobs/task-reminders";
 import type { PluginService } from "../plugins/service";
 import { pluginMailResolver } from "../plugins/credentials";
 import type { FrameLog } from "./frame-log";
-import { buildConversationHistory } from "./history";
+import { buildConversationHistory, stopReasonsByTurn } from "./history";
+import { replayButtons } from "./approval-replay";
+import { looksLikeNameAnswer } from "./name-answer";
+import { DAY_NAMES } from "../jobs/schedule";
 import { cancelTurn, cancelTurnsForDevice, isServerStopping, registerTurn, unregisterTurn } from "./turn-registry";
 import { activateAppearanceProfile, deleteAppearanceProfile, listAppearanceProfiles, saveAppearanceProfile } from "../stores/appearance";
 import { getRoutineByJobID, listRuns, updateRoutineState } from "../stores/routines";
@@ -89,6 +94,7 @@ import { normalizeAllowedDomains } from "../routines/egress";
 import { deleteRoutineJob } from "../tools/routines-tool";
 import { removeSubscription, saveSubscription, type PushService } from "../push/web-push";
 import { getProactivity, setProactivity } from "../stores/proactivity";
+import { listApprovalRules, revokeApprovalRule } from "../stores/approval-rules";
 
 export interface Session {
   id: string;
@@ -210,6 +216,10 @@ export async function dispatch(deps: DispatchDeps, session: Session, raw: string
       return handleRoutineDomainsSet(deps, session, frame);
     case "job.delete":
       return handleJobDelete(deps, session, frame);
+    case "approval.rules.list":
+      return handleApprovalRulesList(deps);
+    case "approval.rule.revoke":
+      return handleApprovalRuleRevoke(deps, session, frame);
     case "task.list":
       return handleTaskList(deps, session, frame);
     case "task.create":
@@ -358,11 +368,12 @@ function handleHello(deps: DispatchDeps, session: Session, frame: Extract<Client
     }
     // H36: the same for approval and form cards a turn in this process is still waiting on.
     // Only a card whose turn is still running can be answered; a dead one stays quiet (S1-05).
-    for (const approval of deps.db.query<{ id: string; action: string; preview: string; thread_id: string | null; turn_id: string | null }, [string]>(
-      "SELECT id, action, preview, thread_id, turn_id FROM approvals WHERE status = 'pending' AND created_at >= ? ORDER BY created_at",
+    for (const approval of deps.db.query<{ id: string; action: string; preview: string; thread_id: string | null; turn_id: string | null; call_id: string | null; tool_name: string | null }, [string]>(
+      "SELECT id, action, preview, thread_id, turn_id, call_id, tool_name FROM approvals WHERE status = 'pending' AND created_at >= ? ORDER BY created_at",
     ).all(PROCESS_STARTED_AT)) {
       if (!cardIsLive(deps.db, approval.thread_id, approval.turn_id)) continue;
-      deps.reply({ type: "approval.request", requestID: approval.id, action: approval.action, preview: approval.preview, buttons: ["once", "always", "reject"] });
+      // The same buttons the broker offered: no "always" where the call cannot be remembered.
+      deps.reply({ type: "approval.request", requestID: approval.id, action: approval.action, preview: approval.preview, buttons: replayButtons(deps.db, approval) });
     }
     for (const { id } of deps.db.query<{ id: string }, [string]>(
       "SELECT id FROM forms WHERE status = 'pending' AND created_at >= ? ORDER BY created_at",
@@ -727,7 +738,19 @@ async function runUserMessage(
     "SELECT count(*) AS count FROM channel_messages WHERE channel_id = 'main' AND ui_hint = 'onboarding_name_prompt'",
   ).get()?.count ?? 0;
   const primary = deps.db.query<{ onboarded: number }, []>("SELECT onboarded FROM agents WHERE id = 'ea'").get();
-  if (!attachments.length && !mention && frame.channelId === "main" && channelID === "main" && primary?.onboarded === 0 && onboardingPrompt > 0) {
+  // Only a message that reads like a name is the answer; a question or a
+  // sentence goes on as an ordinary message. The answer is the owner's line
+  // like any other, so it is stored and echoed before the rename (it used to
+  // vanish, and a failed rename dropped it silently).
+  if (!attachments.length && !mention && frame.channelId === "main" && channelID === "main" && primary?.onboarded === 0 && onboardingPrompt > 0 && looksLikeNameAnswer(text)) {
+    if (channel) {
+      const answer = appendChannelMessage(deps.db, { channelID, fromType: "user", fromID: session.device?.id ?? "user", text, salience: "temp" });
+      deps.emit({
+        type: "msg.new", id: answer.id, channelId: channelID, fromType: "user",
+        fromId: answer.from_id, senderName: session.device?.name ?? "You", text,
+        internal: false, uiHint: "normal", createdAt: answer.created_at,
+      });
+    }
     completeAgentRename(deps, "ea", text);
     return;
   }
@@ -1458,13 +1481,16 @@ function handleThreadHistory(
   if (!requireAuth(deps, session)) return;
   const thread = getThread(deps.db, frame.threadID);
   if (!thread) return sendError(deps, session, "unknown_thread", `no thread ${frame.threadID}`);
-  const messages = recentMessages(deps.db, thread.id, frame.limit ?? 50).map((message) => ({
+  const rows = recentMessages(deps.db, thread.id, frame.limit ?? 50);
+  const stopReasons = stopReasonsByTurn(deps.db, rows.flatMap((message) => (message.turn_id ? [message.turn_id] : [])));
+  const messages = rows.map((message) => ({
     id: message.id,
     role: message.role,
     text: message.text,
     attachments: messageAttachments(deps.db, message.id),
     createdAt: message.created_at,
     ...(message.turn_id ? { turnID: message.turn_id } : {}),
+    ...(message.role === "assistant" && message.turn_id && stopReasons.has(message.turn_id) ? { stopReason: stopReasons.get(message.turn_id)! } : {}),
   }));
   deps.reply({
     type: "thread.history.ok",
@@ -1511,7 +1537,11 @@ function handleJobSet(
     case "run": {
       // "Run now" resumes a paused job: a claim would skip it otherwise.
       // Run now does not reset the failure streak: only resume does.
-      wakeJob(deps.db, job.id);
+      const woken = wakeJob(deps.db, job.id);
+      if (woken === "running") {
+        // Nothing was queued: say so, rather than answer as if it had been.
+        return sendError(deps, session, "already_running", describeWake(job.id, woken).message);
+      }
       break;
     }
   }
@@ -1553,6 +1583,28 @@ function handleJobDelete(
     return sendError(deps, session, "job_running", `task ${job.id} is running and cannot be deleted yet`);
   }
   deps.reply({ type: "job.list.ok", jobs: jobSnapshot(deps.db, 50) });
+}
+
+/** The standing "Always allow" rules, newest first, with each bot's current display name. */
+function handleApprovalRulesList(deps: DispatchDeps): void {
+  const rules = listApprovalRules(deps.db).map((rule) => ({
+    id: rule.id,
+    agentID: rule.agentID,
+    agentName: resolvePersona(deps.db, rule.agentID)?.name ?? null,
+    toolName: rule.toolName,
+    target: rule.target,
+    createdAt: rule.createdAt,
+  }));
+  deps.reply({ type: "approval.rules.list.ok", rules });
+}
+
+function handleApprovalRuleRevoke(
+  deps: DispatchDeps,
+  session: Session,
+  frame: Extract<ClientFrame, { type: "approval.rule.revoke" }>,
+): void {
+  if (!revokeApprovalRule(deps.db, frame.id)) return sendError(deps, session, "not_found", `no active rule ${frame.id}`);
+  deps.reply({ type: "approval.rule.revoke.ok", id: frame.id });
 }
 
 async function handleProviderAdd(
@@ -1726,6 +1778,9 @@ function jobInfo(db: Database, row: JobRow): JobInfo {
     enabled: row.enabled === 1,
     attempts: row.attempts,
     ...(payload.everyMs ? { everyMs: payload.everyMs } : {}),
+    ...(payload.dailyAt ? { dailyAt: payload.dailyAt } : {}),
+    ...(payload.dailyAt && payload.days && payload.days.length > 0 ? { days: weekdayNames(payload.days) } : {}),
+    internal: isInternalJobKind(row.kind),
     ...(payload.text ? { title: clip(payload.text, 120) } : {}),
     ...(payload.threadID ? { threadID: payload.threadID } : {}),
     ...(routine ? {
@@ -1740,6 +1795,11 @@ function jobInfo(db: Database, row: JobRow): JobInfo {
     } : {}),
     ...(row.result ? { lastResult: row.result } : {}),
   };
+}
+
+/** Weekday numbers (0 = Sunday) as the names the `jobs` tool takes, in week order, without repeats. */
+function weekdayNames(days: number[]): string[] {
+  return [...new Set(days)].filter((day) => day >= 0 && day <= 6).sort((a, b) => a - b).map((day) => DAY_NAMES[day]!);
 }
 
 /** A non-turn job (or a damaged payload) simply has nothing to say. */

@@ -14,6 +14,7 @@ import {
   Plus,
   Puzzle,
   Settings,
+  ShieldCheck,
   UserRound,
 } from "lucide-react";
 import type { PluginInfo, ProviderStatus } from "@agni/client";
@@ -23,10 +24,11 @@ import { AddProviderView } from "./AddProviderView";
 import { ConfigurePluginView } from "./ConfigurePluginView";
 import { ChatGPTConnectionView } from "./ChatGPTConnectionView";
 import { AppearanceView } from "./AppearanceView";
+import { ApprovalRulesView } from "./ApprovalRulesView";
 import { useDialog } from "./use-dialog";
 import { providerLabel } from "../state/display";
 
-type Section = "general" | "appearance" | "plugins" | "models" | "device";
+type Section = "general" | "appearance" | "plugins" | "approvals" | "models" | "device";
 
 const SECTIONS: { id: Section; title: string; icon: typeof Settings; subtitle: string }[] = [
   {
@@ -46,6 +48,12 @@ const SECTIONS: { id: Section; title: string; icon: typeof Settings; subtitle: s
     title: "Plugins",
     icon: Puzzle,
     subtitle: "Connections Agni can use on your behalf. Tokens stay on the daemon.",
+  },
+  {
+    id: "approvals",
+    title: "Always allow",
+    icon: ShieldCheck,
+    subtitle: "Actions you chose to always allow. Revoke one and the bot asks again next time.",
   },
   {
     id: "models",
@@ -116,6 +124,7 @@ export function SettingsView() {
           {section === "general" ? <GeneralSection /> : null}
           {section === "appearance" ? <AppearanceView /> : null}
           {section === "plugins" ? <PluginsSection onConnect={setConnectingPlugin} /> : null}
+          {section === "approvals" ? <ApprovalRulesView /> : null}
           {section === "models" ? (
             <ModelsSection
               onAdd={() => {

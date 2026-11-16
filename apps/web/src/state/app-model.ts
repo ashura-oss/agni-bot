@@ -20,6 +20,7 @@ import {
   websocketURL,
   type AgentInfo,
   type ApprovalRow,
+  type ApprovalRuleInfo,
   type ChatMessage,
   type ClientFrame,
   type ChatGPTConnection,
@@ -133,6 +134,12 @@ export interface AppSnapshot {
   focusComposerToken: number;
   statusText: string | null;
   toast: NoticeRow | null;
+  /** The standing "Always allow" rules; null until the daemon has answered. */
+  approvalRules: ApprovalRuleInfo[] | null;
+  /** Counts the daemon's "already running" refusals of Run now, so a button can stand down. */
+  runRefusals: number;
+  /** A message the daemon refused as too long: its text goes back to the composer. */
+  rejectedDraft: { token: number; text: string; message: string } | null;
 }
 
 export interface AppModelEnv {
@@ -159,8 +166,8 @@ function seedAgents(): AgentInfo[] {
 const NEW_AGENT_NAME = "New bot";
 const NEW_AGENT_PROMPT = `You are {name}, an agent {user} just created in the app. You have no job description yet.
 
-Open with one short line, then ask two things: what they want to call you, and what you should do for them.
-When they give you a name, call rename_agent so the app shows it — do not simply agree in prose.
+Open with one short line, then ask what you should do for them.
+You cannot rename yourself. If they want to call you something else, tell them to change your name in your profile (the name at the top of this chat) and carry on.
 When they describe your job, call update_agent with a short role and a prompt written as instructions to yourself.
 Until then, answer what is asked, briefly.`;
 
@@ -271,6 +278,13 @@ export class AppModel {
   private focusComposerToken = 0;
   private statusText: string | null = null;
   private toast: NoticeRow | null = null;
+  private approvalRules: ApprovalRuleInfo[] | null = null;
+  private runRefusals = 0;
+  private rejectedDraft: AppSnapshot["rejectedDraft"] = null;
+  /** The local echo of the message just sent, so a refusal can take it back. */
+  private lastSent: { localID: string; text: string } | null = null;
+  /** The card the owner answered last: an `unknown_request` error is about it. */
+  private lastAnswered: string | null = null;
 
   private connection: AgniConnection | null = null;
   private pendingPairing: { settings: ServerSettings; token: string } | null = null;
@@ -379,6 +393,9 @@ export class AppModel {
       focusComposerToken: this.focusComposerToken,
       statusText: this.statusText,
       toast: this.toast,
+      approvalRules: this.approvalRules,
+      runRefusals: this.runRefusals,
+      rejectedDraft: this.rejectedDraft,
     };
   }
 
@@ -893,6 +910,7 @@ export class AppModel {
     const outgoing = mention ? mention.text : content;
     if (outgoing.length === 0) return false;
     const localID = this.conversation.appendLocalUserMessage(outgoing, new Date(), attachments);
+    this.lastSent = { localID, text: content };
     this.publish();
     const connection = this.connection;
     if (!connection || !isReady(this.connectionState)) {
@@ -1030,6 +1048,7 @@ export class AppModel {
    * (`keep`; secrets are never kept, their value must not outlive the form).
    */
   private reply(requestID: string, frame: ClientFrame, resolve: () => void, keep = true): void {
+    this.lastAnswered = requestID;
     const connection = this.connection;
     const failed = (): void => {
       if (keep) this.unsent.set(requestID, { frame, resolve });
@@ -1289,6 +1308,24 @@ export class AppModel {
     void this.connection.send({ type: "provider.auth.acknowledge", providerID: "chatgpt", accountID }).catch(() => {
       this.chatgptError = "Could not save your preference. Please try again."; this.publish();
     });
+  }
+
+  // MARK: approval rules
+
+  refreshApprovalRules(): void {
+    const connection = this.connection;
+    if (!connection || !isReady(this.connectionState)) return;
+    void connection.send({ type: "approval.rules.list" }).catch(() => undefined);
+  }
+
+  /** Take one "Always allow" rule away; the list shown follows the daemon's answer. */
+  revokeApprovalRule(id: string): void {
+    const connection = this.connection;
+    if (!connection || !isReady(this.connectionState)) {
+      this.showToast(notice("failure", "Not revoked", "Reconnect to the daemon first."));
+      return;
+    }
+    void connection.send({ type: "approval.rule.revoke", id }).catch(() => undefined);
   }
 
   // MARK: chrome
@@ -1755,6 +1792,18 @@ export class AppModel {
       return;
     }
 
+    if (frame.type === "approval.rules.list.ok") {
+      this.approvalRules = frame.rules;
+      this.publish();
+      return;
+    }
+
+    if (frame.type === "approval.rule.revoke.ok") {
+      this.approvalRules = (this.approvalRules ?? []).filter((rule) => rule.id !== frame.id);
+      this.publish();
+      return;
+    }
+
     if (frame.type === "job.list.ok") {
       this.jobs = frame.jobs;
       this.publish();
@@ -1902,6 +1951,40 @@ export class AppModel {
     if (frame.type === "hello.ok") return;
 
     if (frame.type === "error") {
+      if (frame.code === "not_found") {
+        // A rule that was already revoked (here or on another device): show what is true now.
+        this.showToast(notice("info", "Already gone", frame.message));
+        this.refreshApprovalRules();
+        return;
+      }
+      if (frame.code === "already_running") {
+        this.runRefusals += 1;
+        // The daemon names the job by id; the owner knows it by what it does.
+        const named = this.jobs.reduce((text, job) => (job.title ? text.split(job.id).join(`“${job.title}”`) : text), frame.message);
+        this.showToast(notice("info", "Already running", named));
+        return;
+      }
+      if (frame.code === "unknown_request") {
+        // The card was answered elsewhere or timed out: it is gone, not an error to puzzle over.
+        const id = this.lastAnswered;
+        if (id) {
+          this.unsent.delete(id);
+          this.conversation.apply({ type: "approval.closed", seq: frame.seq, requestID: id, kind: "approval", reason: "expired" });
+          this.conversation.apply({ type: "approval.closed", seq: frame.seq, requestID: id, kind: "form", reason: "expired" });
+          this.conversation.resolveSecret(id);
+        }
+        this.showToast(notice("info", "Request expired", "That request expired or was already answered."));
+        return;
+      }
+      if (frame.code === "bad_frame" && /too long/i.test(frame.message) && this.lastSent) {
+        // Nothing was stored: take the bubble back and hand the text to the composer.
+        const sent = this.lastSent;
+        this.lastSent = null;
+        this.conversation.discardLocalEcho(sent.localID);
+        this.rejectedDraft = { token: (this.rejectedDraft?.token ?? 0) + 1, text: sent.text, message: frame.message };
+        this.publish();
+        return;
+      }
       if (frame.code === "provider_auth") {
         this.chatgptError = frame.message; this.chatgptBusy = false;
         this.isAddingProvider = false; this.pendingProviderID = null;
@@ -2043,6 +2126,7 @@ export class AppModel {
     this.refreshPlugins();
     this.refreshChatGPT();
     this.refreshAppearance();
+    this.refreshApprovalRules();
   }
 
   refreshAppearance(): void {
