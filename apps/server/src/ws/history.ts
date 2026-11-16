@@ -63,7 +63,10 @@ interface ChannelRow {
  */
 export function buildConversationHistory(db: Database, conversationID: string, limit: number): HistoryMessage[] {
   const conversation = getConversation(db, conversationID)!;
-  const threadRows = conversationTranscript(db, conversationID, limit);
+  // System-role thread rows are what the server told a turn (job instructions,
+  // wake text), not the owner's conversation. The channel's own system notices
+  // (an interrupted reply, a delegation note) are shown, and come in below.
+  const threadRows = conversationTranscript(db, conversationID, limit, { excludeSystem: true });
   // `agni` is the legacy id for the same assistant as `ea`; both read and
   // write the main channel, so normalize before choosing the surface.
   const channelID = canonicalAgentID(conversation.agent_id) === "ea" ? "main" : `dm:${conversation.agent_id}`;

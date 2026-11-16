@@ -76,4 +76,27 @@ describe("buildConversationHistory", () => {
     expect(messages.filter((message) => message.text === "message 2")).toHaveLength(1);
     expect(messages).toHaveLength(4);
   });
+
+  test("system-role thread rows (job instructions, wake text) are not owner messages and do not use up the limit", () => {
+    db = openDatabase(":memory:");
+    const conversationID = seedChannel(db, 4);
+    const conversation = ensureConversation(db, "ea");
+    db.run("INSERT INTO threads (id, agent_id, conversation_id, created_at, updated_at) VALUES ('thr_1', 'ea', ?, ?, ?)", [conversation.id, "2026-11-01T00:00:00.000Z", "2026-11-01T00:00:00.000Z"]);
+    db.run("INSERT INTO messages (id, thread_id, turn_id, role, text, created_at) VALUES ('msg_job', 'thr_1', NULL, 'system', 'Scheduled job: send the weekly summary', '2026-11-01T00:00:09.000Z')");
+    db.run("INSERT INTO messages (id, thread_id, turn_id, role, text, created_at) VALUES ('msg_wake', 'thr_1', NULL, 'system', 'A delegated task finished: result inside', '2026-11-01T00:00:10.000Z')");
+    const messages = buildConversationHistory(db, conversationID, 4);
+    expect(messages.map((message) => message.id)).toEqual(["m001", "m002", "m003", "m004"]);
+    expect(messages.some((message) => message.text.includes("Scheduled job"))).toBe(false);
+  });
+
+  test("a system notice the app posted to the channel is still shown", () => {
+    db = openDatabase(":memory:");
+    const conversationID = seedChannel(db, 2);
+    db.run(
+      `INSERT INTO channel_messages (id, channel_id, from_type, from_id, text, internal, compacted, salience, created_at)
+       VALUES ('m_note', 'main', 'system', 'ea', 'That reply was interrupted.', 0, 0, 'recent_turns', '2026-11-01T00:00:09.000Z')`,
+    );
+    const messages = buildConversationHistory(db, conversationID, 50);
+    expect(messages.find((message) => message.id === "m_note")).toMatchObject({ role: "system" });
+  });
 });
