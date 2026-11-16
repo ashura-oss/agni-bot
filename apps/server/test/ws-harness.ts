@@ -57,6 +57,12 @@ export function toolThenText(first: () => Response, text = "ok"): typeof fetch {
   return (async () => (++calls === 1 ? first() : sseResponse(text))) as unknown as typeof fetch;
 }
 
+/** The first provider calls return `calls` in order; every later call returns plain text. */
+export function toolsThenText(calls: Array<() => Response>, text = "ok"): typeof fetch {
+  let index = 0;
+  return (async () => (index < calls.length ? calls[index++]!() : sseResponse(text))) as unknown as typeof fetch;
+}
+
 /** A provider fetch that waits for `gate` (or for the request to be aborted) before answering. */
 export function gatedFetch(gate: Promise<void>, deltas = ["done"]): typeof fetch {
   return (async (_url: string, init?: RequestInit) => {
