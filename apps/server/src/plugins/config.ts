@@ -23,7 +23,10 @@
  *   app-password: { kind, user, pass }
  *   api-key:       { kind, key?, url? }        // key = cloud API key, url = self-hosted
  *   oauth:         { kind, refresh_token?, access_token?, expires_at? }
- *   mcp:           { kind }                     // browser OAuth, no stored creds
+ *   mcp:           { kind, key?, url? }         // bearer token / server URL
+ *
+ * An MCP entry may also carry `trustedTools: string[]`, the owner's list of the
+ * server's tools that may run without asking (see PluginEntry).
  */
 import { chmodSync, closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
@@ -70,6 +73,14 @@ export interface PluginEntry {
   label?: string;
   /** Epoch ms of the last successful connect. */
   connectedAt?: number;
+  /**
+   * MCP plugins: the server's own tool names (as it lists them, e.g. "search")
+   * that the owner has marked trusted. Only these can run without an approval
+   * card, and only when the catalog's `read` mode is `free`. A server's own
+   * `readOnlyHint` never counts. Edited by hand in plugins.json for now; read
+   * when the server connects, so a change needs a reconnect or restart.
+   */
+  trustedTools?: string[];
 }
 
 export interface OAuthClient {
@@ -148,6 +159,12 @@ export function upsertPlugin(config: PluginsFile, pluginID: string, entry: Plugi
 
 export function removePlugin(config: PluginsFile, pluginID: string): void {
   delete config.plugins[pluginID];
+}
+
+/** The owner's trusted tool names for an MCP plugin; anything not a non-empty string is ignored. */
+export function trustedMcpTools(config: PluginsFile, pluginID: string): string[] {
+  const list = config.plugins[pluginID]?.trustedTools;
+  return Array.isArray(list) ? list.filter((name): name is string => typeof name === "string" && name !== "") : [];
 }
 
 /** All plugin IDs that are enabled, for auto-connect on daemon start. */

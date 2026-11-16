@@ -32,6 +32,7 @@ import {
   removePlugin,
   enabledPluginIDs,
   type PluginsFile,
+  trustedMcpTools,
   type PluginEntry,
 } from "./config";
 
@@ -48,6 +49,8 @@ export class PluginService {
   private deps: PluginDeps;
   /** Test hook: injected fetch for Google endpoints. */
   fetchOverride?: typeof fetch;
+  /** Test hook: stands in for the shared MCP hub. */
+  mcpHubOverride?: Pick<typeof mcpHub, "connect" | "disconnect">;
   /** In-memory view of plugins.json, loaded on construction. */
   private pluginsFile: PluginsFile;
 
@@ -199,6 +202,8 @@ export class PluginService {
         enabled: true,
         auth: { kind: "mcp", key: credentials.key?.trim() || undefined, url: credentials.url?.trim() || undefined },
         connectedAt: Date.now(),
+        // Re-entering the URL or token must not forget which tools the owner trusts.
+        ...(this.pluginsFile.plugins[pluginID]?.trustedTools ? { trustedTools: this.pluginsFile.plugins[pluginID]!.trustedTools } : {}),
       });
       this.save();
       return this.connect(pluginID, account);
@@ -345,7 +350,7 @@ export class PluginService {
 
   private async reachMcp(pluginID: string, connectionID: string, url: string, token?: string): Promise<void> {
     try {
-      await mcpHub.connect(pluginID, url, token);
+      await (this.mcpHubOverride ?? mcpHub).connect(pluginID, url, token, undefined, trustedMcpTools(this.pluginsFile, pluginID));
     } catch (error) {
       markError(this.deps.db, connectionID, error instanceof Error ? error.message : String(error));
       this.emitState();
@@ -403,7 +408,7 @@ export class PluginService {
       // A Google-side failure must not strand the credential locally.
     }
     deleteConnection(this.deps.db, row.id);
-    await mcpHub.disconnect(row.plugin_id);
+    await (this.mcpHubOverride ?? mcpHub).disconnect(row.plugin_id);
     // Clear tokens from plugins.json.
     if (entry) {
       entry.auth = { kind: manifestFor(row.plugin_id)?.authKind === "mcp" ? "mcp" : "oauth" };
