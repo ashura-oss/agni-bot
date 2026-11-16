@@ -28,6 +28,13 @@ export interface DelegationBrief {
   goal: string;
   chainID?: string;
   /**
+   * The run this delegation belongs to: the root turn and, for a job, the root job. Whatever the owner refused
+   * under that root still holds in the child, in its resumed runs and in the wake that reports back, and one time
+   * limit covers them all.
+   */
+  rootTurnID?: string;
+  rootJob?: string | null;
+  /**
    * What this delegation is for. Phase 1 stores and reports it; the value is
    * not yet used to route or gate the work.
    */
@@ -384,6 +391,16 @@ function briefIntent(brief: string | null): PeerIntent {
 export function briefChainID(raw: string | null): string | undefined {
   if (!raw) return undefined;
   try { const value = JSON.parse(raw) as { chainID?: unknown }; return typeof value.chainID === "string" ? value.chainID : undefined; } catch { return undefined; }
+}
+
+/** The root run a delegation was started under; absent for briefs written before roots were kept. */
+export function briefRoot(raw: string | null): { rootTurnID: string; rootJob: string | null } | undefined {
+  if (!raw) return undefined;
+  try {
+    const value = JSON.parse(raw) as { rootTurnID?: unknown; rootJob?: unknown };
+    if (typeof value.rootTurnID !== "string" || value.rootTurnID === "") return undefined;
+    return { rootTurnID: value.rootTurnID, rootJob: typeof value.rootJob === "string" && value.rootJob !== "" ? value.rootJob : null };
+  } catch { return undefined; }
 }
 
 function parseAttachmentIDs(value: string): string[] {

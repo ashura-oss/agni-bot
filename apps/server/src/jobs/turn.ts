@@ -37,6 +37,7 @@ import {
   taskInfo,
   trackRunningDelegation,
   briefChainID,
+  briefRoot,
 } from "../stores/tasks";
 import { saveArtifact } from "../stores/artifacts";
 import { scheduleTagger } from "./tagger";
@@ -587,6 +588,8 @@ function wakeParent(deps: TurnJobDeps, taskID: string, summary: string, parentDe
         wakeKey,
         depth: parentDepth,
         chainID: briefChainID(task.brief),
+        // The wake is part of the request the task came from: what the owner refused there is refused here (S2-07).
+        ...briefRoot(task.brief),
         results: [item],
       },
     });

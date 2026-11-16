@@ -186,6 +186,8 @@ export function registerDelegateTaskTool(registry: ToolRegistry, deps: DelegateT
         throw new Error(`not done: ${running} delegations are already running for this task, and ${mostAtOnce} is the most at once. Wait for one to finish with delegate_wait, or do part of the work yourself.`);
       }
       brief.chainID = chainID;
+      // The task row remembers its root, so a wake or a resumed run reports back inside the same request.
+      if (ctx.run) { brief.rootTurnID = ctx.run.rootTurnID; brief.rootJob = ctx.run.rootJob; }
       const task = createDelegationTask(deps.db, {
         ownerAgentID: toAgentID,
         brief,
