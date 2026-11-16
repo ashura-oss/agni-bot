@@ -501,3 +501,104 @@ describe("S1-30 the turn's failure travels in turn.end, not an error frame", () 
     expect(emitted.find((frame) => frame.type === "turn.end")).toMatchObject({ stopReason: "error" });
   });
 });
+
+describe("review round 1: owner waits have a ceiling", () => {
+  test("an approval nobody answers is expired at the ceiling, and a background-style turn goes on", async () => {
+    db = openDatabase(":memory:");
+    const p = { ...persona, tools: ["write_file"] };
+    const thread = createThread(db, p.id);
+    const outside = scratchOutside();
+    const router = routerFor((request) => request === 1
+      ? callsResponse([{ id: "w", name: "write_file", args: { path: outside, content: "x" } }])
+      : textResponse("Not written."));
+    const emitted: Frame[] = [];
+    const began = Date.now();
+    // Nothing aborts this signal and nobody answers: the ceiling is the only way out.
+    const result = await runTaskTurn(db, router, { firstTokenTimeoutMs: 1000, turnTimeoutMs: 60_000, ownerWaitMs: 150 }, {
+      threadID: thread.id, text: "write outside", persona: p, signal: new AbortController().signal,
+      emit: (frame) => emitted.push(frame as Frame),
+    });
+    rmSync(outside, { force: true });
+
+    expect(Date.now() - began).toBeLessThan(3_000);
+    expect(result.stopReason).toBe("end");
+    const row = db.query<{ id: string; status: string }, [string]>("SELECT id, status FROM approvals WHERE turn_id = ?").get(result.turnID)!;
+    expect(row.status).toBe("expired");
+    expect(emitted.filter((frame) => frame.type === "approval.closed")).toEqual([{ type: "approval.closed", requestID: row.id, kind: "approval", reason: "expired" }]);
+    const content = db.query<{ result: string }, [string]>("SELECT result FROM tool_calls WHERE turn_id = ?").get(result.turnID)!.result;
+    expect(content).toContain("nobody answered in time");
+  });
+
+  test("a form nobody answers is expired at the ceiling too", async () => {
+    db = openDatabase(":memory:");
+    const thread = createThread(db, persona.id);
+    const router = routerFor((request) => request === 1
+      ? callsResponse([{ id: "q", name: "ask", args: { question: "Which?", options: ["a"] } }])
+      : textResponse("No answer."));
+    const emitted: Frame[] = [];
+    const result = await runTaskTurn(db, router, { firstTokenTimeoutMs: 1000, turnTimeoutMs: 60_000, ownerWaitMs: 150 }, {
+      threadID: thread.id, text: "ask", persona, signal: new AbortController().signal,
+      emit: (frame) => emitted.push(frame as Frame),
+    });
+    expect(result.stopReason).toBe("end");
+    const form = db.query<{ id: string; status: string }, [string]>("SELECT id, status FROM forms WHERE turn_id = ?").get(result.turnID)!;
+    expect(form.status).toBe("expired");
+    expect(emitted.filter((frame) => frame.type === "approval.closed")).toEqual([{ type: "approval.closed", requestID: form.id, kind: "form", reason: "expired" }]);
+  });
+});
+
+describe("review round 1: resume closes the dead turn's cards", () => {
+  test("pending approval and form rows of the old turn are expired and closed on resume", async () => {
+    db = openDatabase(":memory:");
+    const thread = createThread(db, persona.id);
+    createTurn(db, { id: "trn_old", threadID: thread.id, agentID: persona.id });
+    const log = [
+      { role: "user", content: "Write it" },
+      { role: "assistant", content: "", toolCalls: [{ id: "call-w", type: "function", function: { name: "write_file", arguments: "{}" } }] },
+    ];
+    db.run("INSERT INTO agent_sessions (thread_id, turn_id, state, message_log, max_steps, max_tokens, created_at, updated_at) VALUES (?, 'trn_old', 'awaiting_approval', ?, 0, 0, datetime('now'), datetime('now'))", [thread.id, JSON.stringify(log)]);
+    db.run("INSERT INTO approvals (id, thread_id, turn_id, action, preview, status, call_id, tool_name, created_at) VALUES ('apr_old', ?, 'trn_old', 'x', 'x', 'pending', 'call-w', 'write_file', datetime('now'))", [thread.id]);
+    db.run("INSERT INTO forms (id, thread_id, turn_id, kind, question, multiple, status, created_at) VALUES ('frm_old', ?, 'trn_old', 'choice', 'Which?', 0, 'pending', datetime('now'))", [thread.id]);
+    const emitted: Frame[] = [];
+    await runTaskTurn(db, routerFor(() => textResponse("Resumed.")), settings, {
+      threadID: thread.id, turnID: "trn_new", text: "Continue", persona,
+      emit: (frame) => emitted.push(frame as Frame), signal: new AbortController().signal,
+    });
+    const closed = emitted.filter((frame) => frame.type === "approval.closed");
+    expect(closed).toContainEqual({ type: "approval.closed", requestID: "apr_old", kind: "approval", reason: "expired" });
+    expect(closed).toContainEqual({ type: "approval.closed", requestID: "frm_old", kind: "form", reason: "expired" });
+    expect(db.query<{ status: string }, []>("SELECT status FROM approvals WHERE id = 'apr_old'").get()!.status).toBe("expired");
+    expect(db.query<{ status: string }, []>("SELECT status FROM forms WHERE id = 'frm_old'").get()!.status).toBe("expired");
+    // The call that was waiting still gets its result.
+    expect(sessionLog(thread.id).some((message) => message.role === "tool" && message.toolCallID === "call-w")).toBe(true);
+  });
+});
+
+describe("review round 1: a provider that rejects max_tokens", () => {
+  test("a 400 naming max_tokens is retried once for that step without max_tokens", async () => {
+    db = openDatabase(":memory:");
+    const thread = createThread(db, persona.id);
+    const sent: Array<unknown> = [];
+    const router = new Router([provider], new HealthTracker(), (async (_input: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      sent.push(body.max_tokens);
+      return body.max_tokens !== undefined
+        ? new Response("{\"error\":{\"message\":\"max_tokens is too large: 8192. This model supports at most 4096 completion tokens\"}}", { status: 400 })
+        : textResponse("Fine.");
+    }) as unknown as typeof fetch);
+    const result = await runTaskTurn(db, router, settings, { threadID: thread.id, text: "hi", persona, emit: () => undefined, signal: new AbortController().signal });
+    expect(result.stopReason).toBe("end");
+    expect(result.text).toBe("Fine.");
+    expect(sent).toEqual([8192, undefined]);
+  });
+
+  test("any other 400 is not retried", async () => {
+    db = openDatabase(":memory:");
+    const thread = createThread(db, persona.id);
+    let calls = 0;
+    const router = new Router([provider], new HealthTracker(), (async () => { calls += 1; return new Response("bad tool schema", { status: 400 }); }) as unknown as typeof fetch);
+    const result = await runTaskTurn(db, router, settings, { threadID: thread.id, text: "hi", persona, emit: () => undefined, signal: new AbortController().signal });
+    expect(result.stopReason).toBe("error");
+    expect(calls).toBe(1);
+  });
+});

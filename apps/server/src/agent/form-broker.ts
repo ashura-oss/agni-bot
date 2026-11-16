@@ -14,6 +14,7 @@
 import type { Database } from "bun:sqlite";
 import type { ServerFrameBody } from "@agni/protocol";
 import { answerForm, createForm, getForm, type FormEmail, type FormKind } from "../stores/forms";
+import { OWNER_WAIT_CEILING_MS, expireCard } from "./pending-cards";
 
 /** Waiters are process-local; the row remains the durable authority. */
 const formWaiters = new Map<string, (answer: string) => void>();
@@ -70,6 +71,8 @@ export interface FormBrokerDeps {
    * not the model's.
    */
   hold?: () => () => void;
+  /** The longest the owner is waited for (default 10 minutes); then the form expires. */
+  ownerWaitMs?: number;
 }
 
 export class FormBroker {
@@ -96,8 +99,12 @@ export class FormBroker {
       email: form.email ?? undefined,
     });
     const release = this.deps.hold?.();
+    const waitSignal = AbortSignal.any([signal, AbortSignal.timeout(this.deps.ownerWaitMs ?? OWNER_WAIT_CEILING_MS)]);
     try {
-      return await waitForFormAnswer(this.deps.db, form.id, signal);
+      const answer = await waitForFormAnswer(this.deps.db, form.id, waitSignal);
+      // Nobody answered in time (the turn itself was not stopped): the card is dead.
+      if (answer === null && !signal.aborted && waitSignal.aborted) expireCard(this.deps.db, "form", form.id, "expired", this.deps.emit);
+      return answer;
     } finally {
       release?.();
     }

@@ -44,7 +44,7 @@ import type { MailAccountResolver } from "../plugins/credentials";
 import { domainAllowed } from "../routines/egress";
 import { log } from "../log";
 import { TurnTimer } from "./turn-timer";
-import { expirePendingForTurn } from "./pending-cards";
+import { OWNER_WAIT_CEILING_MS, expireApprovalForCall, expirePendingForTurn } from "./pending-cards";
 
 export interface TaskTurnSettings {
   firstTokenTimeoutMs: number;
@@ -61,6 +61,8 @@ export interface TaskTurnSettings {
    * nothing is injected.
    */
   minRecallScore?: number;
+  /** The longest an approval card or owner question is waited on (default 10 minutes). */
+  ownerWaitMs?: number;
 }
 export interface TaskTurnRun {
   attachmentIDs?: string[];
@@ -306,6 +308,9 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   let tokenCount = recovering ? existing.token_count : 0;
   if (recovering) {
     messages = parseSessionMessages(existing.message_log);
+    // The dead turn's cards are dead too: expire them and tell clients, before
+    // recovery rejects the calls that were waiting on them.
+    expirePendingForTurn(db, existing.turn_id, "expired", run.emit);
     // The dead turn's tool calls and approvals are filed under its own ID.
     recoverToolResults(db, existing.turn_id, messages);
     if (turnID !== existing.turn_id) {
@@ -429,6 +434,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
     db,
     emit: (body) => run.emit(body),
     hold: () => timer.hold(),
+    ownerWaitMs: settings.ownerWaitMs,
   });
   db.run(
     `INSERT INTO agent_sessions (thread_id, turn_id, state, message_log, summary, step_count, token_count, max_steps, max_tokens, created_at, updated_at)
@@ -597,20 +603,33 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
       activeStepText = "";
       // Allowlist order is kept so the tool prefix stays stable across steps.
       const tools = taskToolSpecs(registry, callableTools.filter((name) => !deferred.includes(name) || loadedTools.has(name)), "static");
-      const result = await router.route({
-        messages: await withAttachmentContent(db, requestMessages),
+      const stepMessages = await withAttachmentContent(db, requestMessages);
+      const routeStep = (maxTokens: number | undefined) => router.route({
+        messages: stepMessages,
         signal: controller.signal,
         firstTokenTimeoutMs: settings.firstTokenTimeoutMs,
         tools,
         toolChoice: tools.length ? "auto" : "none",
         preferredModel: persona.model,
-        // Every step has an output ceiling, so one runaway response cannot run on unbounded.
-        maxTokens: tokenLimit === null ? maxOutputTokens() : Math.min(2_048, tokenLimit - tokenCount),
+        ...(maxTokens === undefined ? {} : { maxTokens }),
         onDelta: (delta: string) => {
           activeStepText += delta;
           emitToken(delta);
         },
       });
+      // Every step has an output ceiling, so one runaway response cannot run on unbounded.
+      const stepMaxTokens = tokenLimit === null ? maxOutputTokens() : Math.min(2_048, tokenLimit - tokenCount);
+      let result: Awaited<ReturnType<typeof routeStep>>;
+      try {
+        result = await routeStep(stepMaxTokens);
+      } catch (error) {
+        // A model whose own output limit is lower than ours says so with a 400
+        // naming max_tokens. That step runs once more without the ceiling.
+        if (!rejectsMaxTokens(error) || controller.signal.aborted) throw error;
+        log.warn(`turn ${turnID}: a provider rejected max_tokens=${stepMaxTokens}; retrying the step without it`);
+        activeStepText = "";
+        result = await routeStep(undefined);
+      }
       const streamedText = activeStepText;
       activeStepText = "";
       // Counted for the record (the debugger shows it), not enforced.
@@ -640,6 +659,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
       const toolHooks: ToolHooks = {
         isUnloaded: (name) => deferred.includes(name) && !loadedTools.has(name),
         hold: () => timer.hold(),
+        ownerWaitMs: settings.ownerWaitMs ?? OWNER_WAIT_CEILING_MS,
       };
       // Several read-only lookups in one step start together; the loop below
       // still consumes them in order, so guards and message order are unchanged.
@@ -809,6 +829,11 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
     ...(run.delegation?.taskID ? { taskId: run.delegation.taskID } : {}),
   });
   return { turnID, text: answerText, stopReason };
+}
+
+/** Did every provider turn the step down because of the max_tokens we sent? */
+function rejectsMaxTokens(error: unknown): boolean {
+  return error instanceof RouterError && error.code === "provider_failed" && /HTTP 400/.test(error.message) && /max_(?:completion_)?tokens/i.test(error.message);
 }
 
 type TurnUsage = { provider: string; model: string; inputTokens?: number; outputTokens?: number; latencyMs: number };
@@ -1000,6 +1025,8 @@ interface ToolHooks {
   isUnloaded: (name: string) => boolean;
   /** Stop the turn's clock while the call waits on the owner; the result ends the wait. */
   hold: () => () => void;
+  /** The longest the owner is waited for before the card expires. */
+  ownerWaitMs: number;
 }
 
 async function executeTool(  db: Database, threadID: string, turnID: string, call: ToolCall, allowlist: string[],
@@ -1065,12 +1092,21 @@ async function executeTool(  db: Database, threadID: string, turnID: string, cal
     // The owner's time to decide is not the turn's.
     const release = hooks.hold();
     let decision: Decision | null;
+    const waitSignal = AbortSignal.any([signal, AbortSignal.timeout(hooks.ownerWaitMs)]);
     try {
-      decision = await broker.request(threadID, turnID, tool.name, call.id, args, signal);
+      decision = await broker.request(threadID, turnID, tool.name, call.id, args, waitSignal);
     } finally {
       release();
     }
     setState("running");
+    // Nobody answered in time (the turn itself was not stopped): expire the card.
+    if (!decision && !signal.aborted && waitSignal.aborted) {
+      expireApprovalForCall(db, turnID, call.id, "expired", emit);
+      const content = JSON.stringify({ error: "Not approved: nobody answered in time, so the action was not run." });
+      storeResult(content, false, "approval_expired");
+      emit({ type: "tool.end", callID: call.id, ok: false, preview: "expired" });
+      return { content, awaiting: true };
+    }
     if (!decision || decision === "reject") {
       const content = JSON.stringify({ error: decision ? "User denied this action." : "Approval was cancelled." });
       storeResult(content, false, "approval_rejected");
