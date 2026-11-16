@@ -224,6 +224,8 @@ export class Conversation {
    * their own, so this is the only way to tell them from this chat's.
    */
   private declinedTurns = new Set<string>();
+  /** Turns whose turn.end this view has seen, so a late history answer cannot bring one back. */
+  private endedTurns = new Set<string>();
   /**
    * Turns started in a conversation while this chat did not yet know its own (after a reload,
    * the replay arrives before `conversation.open` answers). They are judged when the chat binds.
@@ -425,10 +427,51 @@ export class Conversation {
   }
 
   /** The conversation transcript across session blocks (v2). */
-  loadConversationHistory(conversationID: string, agentID: string | null, incoming: MessageInfo[]): void {
+  loadConversationHistory(
+    conversationID: string,
+    agentID: string | null,
+    incoming: MessageInfo[],
+    runningTurn?: { turnID: string; threadID: string; agentID: string } | null,
+  ): void {
     this.conversationID = conversationID;
     if (agentID) this.agentID = agentID;
     this.replaceDurable(incoming);
+    if (runningTurn) this.adoptRunningTurn(runningTurn);
+  }
+
+  /**
+   * The daemon says a turn of this conversation is running right now. A page that was just
+   * loaded saw no turn.start for it (the replay does not reach back that far), so without this
+   * there is no Writing, no Stop and no bubble until the turn ends.
+   */
+  private adoptRunningTurn(turn: { turnID: string; threadID: string; agentID: string }): void {
+    if (turn.agentID !== this.agentID) return;
+    if (this.endedTurns.has(turn.turnID) || this.declinedTurns.has(turn.turnID)) return;
+    this.adoptedTurns.add(turn.turnID);
+    this.turnAgents.set(turn.turnID, turn.agentID);
+    this.inFlightTurnID = turn.turnID;
+    this.inFlightThreadID = turn.threadID;
+    const id = Conversation.assistantID(turn.turnID);
+    const existing = this.messages.find((message) => message.id === id);
+    if (existing) {
+      existing.state = { kind: "streaming" };
+      return;
+    }
+    this.messages.push(
+      newMessage({
+        id,
+        role: "assistant",
+        text: "",
+        createdAt: new Date(),
+        turnID: turn.turnID,
+        agentID: turn.agentID,
+        sessionID: turn.threadID,
+        state: { kind: "streaming" },
+        isBackground: this.threadID !== null && this.threadID !== turn.threadID,
+        // Whatever was written before this page loaded is not here: the full text comes with the reload at the end.
+        isContinuation: true,
+      }),
+    );
   }
 
   /**
@@ -692,9 +735,12 @@ export class Conversation {
         this.turnAgents.set(frame.turnID, frame.agentID);
         // A turn bound in by conversation but running in a block other than the
         // open one is background work (a reminder, a brief), not the owner's chat.
+        // A chat that does not know its own block yet (a fresh conversation) cannot compare
+        // blocks: then the owner's message waiting for its answer is what marks a turn as theirs.
         const isBackground =
-          frame.conversationID !== undefined && this.threadID !== null && this.threadID !== frame.threadID;
-        this.adopt(frame.threadID);
+          frame.conversationID !== undefined &&
+          (this.threadID !== null ? this.threadID !== frame.threadID : !this.messages.some((message) => message.isLocalEcho));
+        if (!isBackground) this.adopt(frame.threadID);
         this.inFlightTurnID = frame.turnID;
         this.inFlightThreadID = frame.threadID;
         const id = Conversation.assistantID(frame.turnID);
@@ -755,6 +801,8 @@ export class Conversation {
       case "turn.end": {
         const adopted = this.adoptedTurns.delete(frame.turnID);
         const wasDeclined = this.declinedTurns.delete(frame.turnID);
+        this.endedTurns.add(frame.turnID);
+        for (const old of [...this.endedTurns].slice(0, Math.max(0, this.endedTurns.size - 100))) this.endedTurns.delete(old);
         this.pendingTurns.delete(frame.turnID);
         const isOurs =
           adopted ||
@@ -763,6 +811,7 @@ export class Conversation {
         const id = Conversation.assistantID(frame.turnID);
         const message = this.messages.find((candidate) => candidate.id === id);
         const answerID = this.turnAnswers.get(frame.turnID);
+        let droppedSilentBackground = false;
         this.turnAgents.delete(frame.turnID);
         if (message) {
           if (message.text.length === 0 && answerID !== undefined) {
@@ -777,8 +826,10 @@ export class Conversation {
           ) {
             // A background job that finished and said nothing is not a failed reply in the
             // owner's chat. One that failed or timed out keeps its bubble, so the owner
-            // hears that their reminder did not run.
+            // hears that their reminder did not run. Its saved result, if it left one, comes
+            // from the durable history: a routine streams nothing, so nothing else shows it.
             this.messages = this.messages.filter((candidate) => candidate !== message);
+            droppedSilentBackground = true;
           } else {
             // A turn that ended badly keeps the daemon's own explanation when
             // one arrived while it was running.
@@ -809,7 +860,7 @@ export class Conversation {
         // So is a turn of this conversation whose tokens were not shown (its block was not known
         // yet): there is no bubble, but the durable history has the reply.
         const unseen = !message && !wasDeclined && isOurs && frame.stopReason === "end" && frame.conversationID !== undefined && frame.conversationID === this.conversationID && answerID === undefined;
-        const pickedUpMidStream = unseen || (message?.isContinuation === true && message.text.length > 0);
+        const pickedUpMidStream = unseen || droppedSilentBackground || (message?.isContinuation === true && message.text.length > 0);
         if (!isOurs) return [{ kind: "unread", threadID: frame.threadID }, { kind: "refreshThreadList" }];
         if (this.inFlightTurnID === frame.turnID) {
           this.inFlightTurnID = null;

@@ -534,6 +534,71 @@ describe("transcript", () => {
     expect(chat.messages).toHaveLength(0);
   });
 
+  test("a routine turn that streams nothing asks for the durable reply when it ends (int11)", () => {
+    const chat = new Conversation("ea");
+    chat.bind("cnv_1", "ea", "thr_active");
+    chat.apply(startFrame("trn_r", "thr_routine", "ea", "cnv_1"));
+    const effects = chat.apply(endFrame("trn_r", "thr_routine", "end", { conversationID: "cnv_1" }));
+    expect(chat.messages).toHaveLength(0);
+    expect(effects).toContainEqual({ kind: "reloadDurableState" });
+  });
+
+  test("history that names a running turn shows Writing and takes its tokens at once (int11)", () => {
+    const chat = new Conversation("ea");
+    chat.bind("cnv_1", "ea", "thr_1");
+    chat.loadConversationHistory("cnv_1", "ea", [info({ id: "m1", role: "user", text: "long task", turnID: "trn_1", sessionID: "thr_1" })], {
+      turnID: "trn_1", threadID: "thr_1", agentID: "ea",
+    });
+    expect(chat.isStreaming).toBe(true);
+    expect(chat.inFlightTurnID).toBe("trn_1");
+    const bubble = chat.messages.find((message) => message.id === Conversation.assistantID("trn_1"));
+    expect(bubble?.state.kind).toBe("streaming");
+    chat.apply(tokenFrame("trn_1", "thr_1", "partial"));
+    expect(chat.messages.find((message) => message.id === Conversation.assistantID("trn_1"))?.text).toBe("partial");
+    // Loading the history again does not stack a second bubble.
+    chat.loadConversationHistory("cnv_1", "ea", [info({ id: "m1", role: "user", text: "long task", turnID: "trn_1", sessionID: "thr_1" })], {
+      turnID: "trn_1", threadID: "thr_1", agentID: "ea",
+    });
+    expect(chat.messages.filter((message) => message.turnID === "trn_1" && message.role === "assistant")).toHaveLength(1);
+  });
+
+  test("a turn that already ended is not brought back by a late history answer (int11)", () => {
+    const chat = new Conversation("ea");
+    chat.bind("cnv_1", "ea", "thr_1");
+    chat.apply(startFrame("trn_1", "thr_1", "ea", "cnv_1"));
+    chat.apply(endFrame("trn_1", "thr_1", "end", { conversationID: "cnv_1" }));
+    chat.loadConversationHistory("cnv_1", "ea", [], { turnID: "trn_1", threadID: "thr_1", agentID: "ea" });
+    expect(chat.isStreaming).toBe(false);
+  });
+
+  test("a running turn of another conversation is not adopted", () => {
+    const chat = new Conversation("ea");
+    chat.bind("cnv_1", "ea", "thr_1");
+    chat.loadConversationHistory("cnv_1", "ea", [], { turnID: "trn_x", threadID: "thr_x", agentID: "other_bot" });
+    expect(chat.isStreaming).toBe(false);
+  });
+
+  test("a routine turn in a chat that has no block yet is still background work (int11)", () => {
+    const chat = new Conversation("ea");
+    chat.bind("cnv_1", "ea", null);
+    chat.apply(startFrame("trn_r", "thr_routine", "ea", "cnv_1"));
+    expect(chat.messages[0]?.isBackground).toBe(true);
+    // The routine's block is not the chat's own block.
+    expect(chat.threadID).toBeNull();
+    const effects = chat.apply(endFrame("trn_r", "thr_routine", "end", { conversationID: "cnv_1" }));
+    expect(chat.messages).toHaveLength(0);
+    expect(effects).toContainEqual({ kind: "reloadDurableState" });
+  });
+
+  test("the owner's first message in a chat with no block yet is not background", () => {
+    const chat = new Conversation("ea");
+    chat.bind("cnv_1", "ea", null);
+    chat.appendLocalUserMessage("hello");
+    chat.apply(startFrame("trn_1", "thr_new", "ea", "cnv_1"));
+    expect(chat.messages.find((message) => message.turnID === "trn_1")?.isBackground).toBe(false);
+    expect(chat.threadID).toBe("thr_new");
+  });
+
   test("a turn this chat declined at its start stays declined even if its block is later adopted", () => {
     const chat = new Conversation("bot_b");
     chat.bind("cnv_b", "bot_b", null);
