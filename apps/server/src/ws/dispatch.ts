@@ -89,6 +89,7 @@ import { normalizeAllowedDomains } from "../routines/egress";
 import { deleteRoutineJob } from "../tools/routines-tool";
 import { removeSubscription, saveSubscription, type PushService } from "../push/web-push";
 import { getProactivity, setProactivity } from "../stores/proactivity";
+import { listApprovalRules, revokeApprovalRule } from "../stores/approval-rules";
 
 export interface Session {
   id: string;
@@ -210,6 +211,10 @@ export async function dispatch(deps: DispatchDeps, session: Session, raw: string
       return handleRoutineDomainsSet(deps, session, frame);
     case "job.delete":
       return handleJobDelete(deps, session, frame);
+    case "approval.rules.list":
+      return handleApprovalRulesList(deps);
+    case "approval.rule.revoke":
+      return handleApprovalRuleRevoke(deps, session, frame);
     case "task.list":
       return handleTaskList(deps, session, frame);
     case "task.create":
@@ -1553,6 +1558,28 @@ function handleJobDelete(
     return sendError(deps, session, "job_running", `task ${job.id} is running and cannot be deleted yet`);
   }
   deps.reply({ type: "job.list.ok", jobs: jobSnapshot(deps.db, 50) });
+}
+
+/** The standing "Always allow" rules, newest first, with each bot's current display name. */
+function handleApprovalRulesList(deps: DispatchDeps): void {
+  const rules = listApprovalRules(deps.db).map((rule) => ({
+    id: rule.id,
+    agentID: rule.agentID,
+    agentName: resolvePersona(deps.db, rule.agentID)?.name ?? null,
+    toolName: rule.toolName,
+    target: rule.target,
+    createdAt: rule.createdAt,
+  }));
+  deps.reply({ type: "approval.rules.list.ok", rules });
+}
+
+function handleApprovalRuleRevoke(
+  deps: DispatchDeps,
+  session: Session,
+  frame: Extract<ClientFrame, { type: "approval.rule.revoke" }>,
+): void {
+  if (!revokeApprovalRule(deps.db, frame.id)) return sendError(deps, session, "not_found", `no active rule ${frame.id}`);
+  deps.reply({ type: "approval.rule.revoke.ok", id: frame.id });
 }
 
 async function handleProviderAdd(
