@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { extraHelpLines, runExtraCommand, type CommandTable } from "../src/cli/extra-commands";
+import { extraHelpLines, mergeCommandTables, runExtraCommand, type CommandTable } from "../src/cli/extra-commands";
 import { s2Commands } from "../src/cli/s2-commands";
 import { s3Commands } from "../src/cli/s3-commands";
 import { openDatabase } from "../src/db";
@@ -13,6 +13,9 @@ import { recordModelUsage, setUsageRecorder, type ModelUsageEvent } from "../src
 import { audit, setAuditSink, type AuditEvent, type AuditSink } from "../src/policy/audit-sink";
 import type { ToolMeta } from "../src/policy/tool-meta";
 import { startupS2 } from "../src/startup/s2";
+import { startupS2Audit } from "../src/startup/s2-audit";
+import { startupS2Ledger } from "../src/startup/s2-ledger";
+import { startupS3Vault } from "../src/startup/s3-vault";
 import { startupS3 } from "../src/startup/s3";
 import { runStartupHooks } from "../src/startup";
 import { registerSecret, redact } from "../src/util/redact";
@@ -43,8 +46,38 @@ describe("P0 extra CLI commands", () => {
     expect(extraHelpLines()).toEqual([]);
   });
 
+  test("mergeCommandTables spreads commands, concatenates help, and throws on a duplicate name", () => {
+    const a: CommandTable = { commands: { one: () => {} }, help: ["  one"] };
+    const b: CommandTable = { commands: { two: () => {} }, help: ["  two"] };
+    const merged = mergeCommandTables(a, b);
+    expect(Object.keys(merged.commands)).toEqual(["one", "two"]);
+    expect(merged.help).toEqual(["  one", "  two"]);
+    expect(() => mergeCommandTables(a, { commands: { one: () => {} }, help: [] })).toThrow(/duplicate CLI command "one"/);
+  });
+
   test("runExtraCommand returns false for a command no table knows", async () => {
     expect(await runExtraCommand("nope", [])).toBe(false);
+  });
+
+  test("the real entry point runs a command that only an extra table has, and lists its help", async () => {
+    const home = mkdtempSync(join(tmpdir(), "agni-p0-home-"));
+    const run = async (...argv: string[]) => {
+      const proc = Bun.spawn(
+        ["bun", "--preload", join(import.meta.dir, "p0-extra-preload.ts"), join(import.meta.dir, "../src/index.ts"), ...argv],
+        { env: { ...process.env, AGNI_HOME: home }, stdout: "pipe", stderr: "pipe" },
+      );
+      const [out, err, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited]);
+      return { out, err, code };
+    };
+    try {
+      const ran = await run("p0-extra-probe", "x", "y");
+      expect(ran.err).not.toContain("unknown command");
+      expect(ran.out).toContain('p0-extra-probe ran with ["x","y"]');
+      expect(ran.code).toBe(0);
+      expect((await run("help")).out).toContain("p0-extra-probe     test-only command");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   test("an unknown command still prints the unknown-command error and exits 1", async () => {
@@ -74,6 +107,9 @@ describe("P0 startup hooks", () => {
     ]);
     expect(calls).toEqual(["s2", "s3"]);
     // The real hooks are callable and resolve without effect.
+    await startupS2Audit(ctx);
+    await startupS2Ledger(ctx);
+    await startupS3Vault(ctx);
     await startupS2(ctx);
     await startupS3(ctx);
     await runStartupHooks(ctx);
@@ -99,6 +135,13 @@ describe("P0 audit sink", () => {
     setAuditSink({ record: (event) => { seen.push(event); } });
     audit({ kind: "tool.call", actor: "bot", turnID: "t1", detail: { n: 1 } });
     expect(seen).toEqual([{ kind: "tool.call", actor: "bot", turnID: "t1", detail: { n: 1 } }]);
+  });
+});
+
+describe("P0 audit failure mode", () => {
+  test("a sink that throws propagates to the caller (fail closed)", () => {
+    setAuditSink({ record() { throw new Error("audit store down"); } });
+    expect(() => audit({ kind: "x", detail: {} })).toThrow("audit store down");
   });
 });
 
@@ -157,6 +200,32 @@ describe("P0 usage hook", () => {
     setUsageRecorder(() => { throw new Error("ledger down"); });
     const router = new Router([provider], new HealthTracker(), (async () => ok()) as unknown as typeof fetch);
     expect((await router.route(options)).text).toBe("hi");
+  });
+
+  test("agent, job and kind on the route options reach the recorder", async () => {
+    const events: ModelUsageEvent[] = [];
+    setUsageRecorder((event) => { events.push(event); });
+    const router = new Router([provider], new HealthTracker(), (async () => ok()) as unknown as typeof fetch);
+    await router.route({ ...options, agentID: "agent_1", jobID: "job_2", rootJobID: "job_1", kind: "side" });
+    expect(events[0]).toMatchObject({ agentID: "agent_1", jobID: "job_2", rootJobID: "job_1", kind: "side" });
+  });
+
+  test("a recorder that rejects asynchronously does not fail the model call", async () => {
+    setUsageRecorder(async () => { throw new Error("async ledger down"); });
+    const router = new Router([provider], new HealthTracker(), (async () => ok()) as unknown as typeof fetch);
+    expect((await router.route(options)).text).toBe("hi");
+    await new Promise((resolve) => setTimeout(resolve, 5)); // the rejection is caught, not unhandled
+  });
+
+  test("a 503 then a success records exactly one event", async () => {
+    const events: ModelUsageEvent[] = [];
+    setUsageRecorder((event) => { events.push(event); });
+    let calls = 0;
+    const flaky = (async () => (++calls === 1 ? new Response("down", { status: 503 }) : ok())) as unknown as typeof fetch;
+    const result = await new Router([provider], new HealthTracker(), flaky).route(options);
+    expect(calls).toBe(2);
+    expect(result.attempts).toBe(2);
+    expect(events).toHaveLength(1);
   });
 
   test("a failed route records nothing", async () => {

@@ -67,6 +67,11 @@ export interface RouteOptions {
   preferredModel?: string | null;
   /** What the call is for ("chat", "summary", ...); passed through to the usage hook untouched. */
   purpose?: string;
+  /** Who and what the call belongs to; passed through to the usage hook untouched. */
+  agentID?: string;
+  jobID?: string;
+  rootJobID?: string;
+  kind?: "turn" | "side";
 }
 
 export interface RouteResult {
@@ -222,6 +227,10 @@ export class Router {
             outputTokens: result.outputTokens,
             latencyMs,
             purpose: options.purpose,
+            agentID: options.agentID,
+            jobID: options.jobID,
+            rootJobID: options.rootJobID,
+            kind: options.kind,
           });
           return {
             provider: provider.id,

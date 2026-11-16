@@ -22,6 +22,11 @@ export function setAuditSink(sink: AuditSink): void {
   current = sink;
 }
 
+/**
+ * Send an event to the current sink. Errors the sink throws propagate to the
+ * caller (fail closed): a caller that must not lose its audit row lets the
+ * failure stop the action; one that can carry on catches it.
+ */
 export function audit(event: AuditEvent): void {
   current.record(event);
 }

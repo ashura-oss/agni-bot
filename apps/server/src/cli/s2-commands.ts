@@ -1,4 +1,5 @@
-import type { CommandTable } from "./extra-commands";
+import { mergeCommandTables } from "./command-table";
+import { s2OpsCommands } from "./s2-ops";
 
-/** Sprint 2's extra CLI commands. Add entries to `commands` and one line each to `help`. */
-export const s2Commands: CommandTable = { commands: {}, help: [] };
+/** Sprint 2's extra CLI commands, merged from one table per task. */
+export const s2Commands = mergeCommandTables(s2OpsCommands);

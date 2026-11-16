@@ -1,13 +1,15 @@
 import { s2Commands } from "./s2-commands";
 import { s3Commands } from "./s3-commands";
+import type { CommandTable } from "./command-table";
 
-/** A table of extra CLI commands a sprint adds, with the help lines `usage()` prints for them. */
-export interface CommandTable {
-  commands: Record<string, (args: string[]) => Promise<void> | void>;
-  help: string[];
-}
+export { mergeCommandTables, type CommandTable } from "./command-table";
 
 const TABLES: CommandTable[] = [s2Commands, s3Commands];
+
+/** Add a table after the sprint ones. Used by tests that need a command only an extra table has. */
+export function registerCommandTable(table: CommandTable): void {
+  TABLES.push(table);
+}
 
 /** Every extra help line, in table order. */
 export function extraHelpLines(tables: CommandTable[] = TABLES): string[] {

@@ -78,7 +78,9 @@ else if (command === "devices") devices();
 else if (command === "revoke") revoke(args);
 else if (command === "help" || command === "--help" || command === "-h") usage();
 else if (command === "version" || command === "--version" || command === "-v") console.log(agniVersion());
-else {
+else if (await runExtraCommand(command, args)) {
+  // A command a sprint added in cli/s2-*.ts or cli/s3-*.ts ran.
+} else {
   console.error(`unknown command "${command}"\n`);
   usage(1);
 }

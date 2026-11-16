@@ -1,3 +1,5 @@
+import { log } from "../log";
+
 /**
  * One event per successful model completion, reported by the router. The
  * default recorder drops it; Sprint 2 registers the real one at startup.
@@ -11,21 +13,33 @@ export interface ModelUsageEvent {
   cachedInputTokens?: number;
   latencyMs: number;
   purpose?: string;
+  agentID?: string;
+  jobID?: string;
+  rootJobID?: string;
+  /** "turn": the bot's own reply; "side": any other model call made for it. */
+  kind?: "turn" | "side";
 }
 
-import { log } from "../log";
+export type UsageRecorder = (event: ModelUsageEvent) => void | Promise<void>;
 
-let recorder: (event: ModelUsageEvent) => void = () => {};
+let recorder: UsageRecorder = () => {};
 
-export function setUsageRecorder(fn: (event: ModelUsageEvent) => void): void {
+export function setUsageRecorder(fn: UsageRecorder): void {
   recorder = fn;
 }
 
+/**
+ * Hand the event to the recorder. A recorder that throws or rejects is logged and
+ * swallowed: it must never fail a model call that already succeeded.
+ */
 export function recordModelUsage(event: ModelUsageEvent): void {
-  // A broken recorder must never fail the model call that already succeeded.
-  try {
-    recorder(event);
-  } catch (error) {
+  const failed = (error: unknown): void => {
     log.warn(`usage recorder failed: ${error instanceof Error ? error.message : String(error)}`);
+  };
+  try {
+    const pending = recorder(event);
+    if (pending) pending.catch(failed);
+  } catch (error) {
+    failed(error);
   }
 }
