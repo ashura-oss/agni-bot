@@ -4,11 +4,27 @@
  * an assistant performs constantly must run free, and the irreversible ones
  * must still stop for a click.
  */
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApprovalBroker } from "../src/agent/approval-broker";
 import { isOutsideScratch, scratchDir } from "../src/tools/write-file";
+
+// Whether a write is "new" depends on what exists, so the tests use their own scratch tree.
+let scratchRoot: string;
+let savedScratch: string | undefined;
+beforeAll(() => {
+  scratchRoot = mkdtempSync(join(tmpdir(), "agni-policy-scratch-"));
+  savedScratch = process.env.AGNI_SCRATCH_DIR;
+  process.env.AGNI_SCRATCH_DIR = scratchRoot;
+});
+afterAll(() => {
+  if (savedScratch === undefined) delete process.env.AGNI_SCRATCH_DIR;
+  else process.env.AGNI_SCRATCH_DIR = savedScratch;
+  rmSync(scratchRoot, { recursive: true, force: true });
+});
 
 const broker = new ApprovalBroker({
   db: null as unknown as Database,
@@ -39,8 +55,9 @@ describe("approval policy: destructive only", () => {
       ["mail_send", { to: "a@b.c", subject: "hi" }],
       // Only a single read-only command inside scratch runs free.
       ["bash", { command: "ls -la" }],
-      // Writes inside the declared scratch tree are free.
+      // Creating a new file inside the declared scratch tree is free, by absolute or relative path.
       ["write_file", { path: join(scratchDir(), "notes.md"), content: "hi" }],
+      ["write_file", { path: "apps/server/src/index.ts", content: "lands under scratch" }],
     ] as Array<[string, Record<string, unknown>]>;
     for (const [tool, args] of free) {
       expect({ tool, gated: broker.requiresApproval(tool, args) }).toEqual({ tool, gated: false });
@@ -56,7 +73,9 @@ describe("approval policy: destructive only", () => {
       ["bash", { command: "git status" }],
       ["mail_send", { account: "agni", to: "a@b.c", subject: "hi" }],
       ["write_file", { path: "/etc/hosts", content: "127.0.0.1" }],
-      ["write_file", { path: "apps/server/src/index.ts", content: "// clobber" }],
+      // A relative path means a path under scratch (S1-36), so reaching the
+      // repo takes an explicit climb out of it.
+      ["write_file", { path: "../../apps/server/src/index.ts", content: "// clobber" }],
       ["mail_send", { account: "owner", to: "a@b.c", subject: "hi" }],
     ] as Array<[string, Record<string, unknown>]>;
     for (const [tool, args] of gated) {

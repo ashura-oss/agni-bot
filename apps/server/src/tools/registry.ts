@@ -6,6 +6,7 @@
  * model-invoked tools are not enabled until the separate task runner lands.
  * Shell/files/Gmail arrive later with their approval flows.
  */
+import { validateArgs } from "./validate-args";
 
 export interface ToolContext {
   threadID: string;
@@ -51,10 +52,33 @@ export interface ToolDefinition<Args = unknown, Result = unknown> {
 export class ToolRegistry {
   private tools = new Map<string, ToolDefinition<never, unknown>>();
 
+  /**
+   * The handler registered here is the tool's own, behind a check of the
+   * arguments against `schema`: a call that breaks the schema fails with an
+   * error naming the field, and the tool's code never runs.
+   */
   register<Args, Result>(definition: ToolDefinition<Args, Result>): void {
     if (this.tools.has(definition.name)) throw new Error(`tool already registered: ${definition.name}`);
     if (!(definition.timeoutMs > 0)) throw new Error(`tool must declare a positive timeout: ${definition.name}`);
-    this.tools.set(definition.name, definition as ToolDefinition<never, unknown>);
+    const handle = definition.handler;
+    const guarded: ToolDefinition<Args, Result> = {
+      ...definition,
+      handler: async (args, ctx) => {
+        const problem = validateArgs(definition.schema, args);
+        if (problem) throw new Error(problem);
+        return handle(args, ctx);
+      },
+    };
+    this.tools.set(definition.name, guarded as ToolDefinition<never, unknown>);
+  }
+
+  /**
+   * Why `args` would be refused for the named tool, or null when they are
+   * acceptable (or the tool is unknown: that is the caller's own check).
+   */
+  validateArgs(name: string, args: unknown): string | null {
+    const tool = this.tools.get(name);
+    return tool ? validateArgs(tool.schema, args) : null;
   }
 
   get(name: string): ToolDefinition<never, unknown> | undefined {
