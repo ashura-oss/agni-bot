@@ -67,9 +67,9 @@ export class FileVault implements Vault {
     return `${info.mtimeMs}:${info.size}`;
   }
 
-  refresh(): void {
+  refresh(options?: { force?: boolean }): void {
     this.checkedAt = Date.now();
-    if (this.stampOfFile() !== this.stamp) this.load();
+    if (options?.force || this.stampOfFile() !== this.stamp) this.load();
   }
 
   private maybeRefresh(): void {

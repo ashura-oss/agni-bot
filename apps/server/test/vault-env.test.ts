@@ -160,6 +160,22 @@ describe("moving secrets between config.env and the vault", () => {
     expect(readFileSync(file, "utf8")).toBe(original);
   });
 
+  test("the read-back checks the file on disk, so a write that never reached the disk keeps config.env intact", async () => {
+    const home = fresh();
+    const vault = await unlockVault({ home, keystore: createMemoryKeyStore(), create: true });
+    const file = join(home, "config.env");
+    writeFileSync(file, original);
+    const emptyVault = readFileSync(vault.path);
+    const realSet = vault.set.bind(vault);
+    // Memory takes the value, but the file is put back as it was: the write is lost.
+    vault.set = (name: string, value: string) => {
+      realSet(name, value);
+      writeFileSync(vault.path, emptyVault);
+    };
+    expect(() => importEnvFileSecrets(vault, file)).toThrow(/read back/);
+    expect(readFileSync(file, "utf8")).toBe(original);
+  });
+
   test("export writes the vault's env entries back, and only on request", async () => {
     const home = fresh();
     const vault = await unlockVault({ home, keystore: createMemoryKeyStore(), create: true });

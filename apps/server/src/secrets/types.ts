@@ -110,8 +110,12 @@ export interface Vault {
   /** Names and update times, from the vault's own index (the keystore is never listed), sorted by name. Never values. */
   list(prefix?: string): VaultEntryInfo[];
   has(name: string): boolean;
-  /** Re-read the file if another process changed it. Cheap when nothing changed. */
-  refresh(): void;
+  /**
+   * Re-read the file if another process changed it. Cheap when nothing changed.
+   * `force` always re-reads and decrypts the file, so the next `get` shows what
+   * is on disk and not what this process still holds in memory.
+   */
+  refresh(options?: { force?: boolean }): void;
 }
 
 /** What `unlockVault` and `vaultStatus` look at. All fields are optional. */

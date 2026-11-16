@@ -91,8 +91,10 @@ export function importEnvFileSecrets(vault: Vault, envFile: string, isSecret: Se
   const text = readFileSync(envFile, "utf8");
   const names = Object.entries(parseEnvFile(text)).filter(([name, value]) => value !== "" && isSecret(name, value));
   if (names.length === 0) return [];
+  for (const [name, value] of names) vault.set(envEntryName(name), value);
+  // Read back from the file, not from memory: only what is on disk survives a restart.
+  vault.refresh({ force: true });
   for (const [name, value] of names) {
-    vault.set(envEntryName(name), value);
     if (vault.get(envEntryName(name)) !== value) throw new VaultError("WRITE_FAILED", `${name} could not be read back from the vault, so config.env was not changed.`);
   }
   writePrivateFileSync(envFile, withoutLines(text, names.map(([name]) => name)));
