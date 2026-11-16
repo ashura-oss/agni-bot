@@ -18,6 +18,7 @@ import type { JobRunner } from "./runner";
 import { applyTaggerItems, parseTaggerOutput, TAGGER_SYSTEM_PROMPT } from "../agent/tagger";
 import { nowISO } from "../util/ids";
 import { listAgentMemories } from "../stores/agent-memories";
+import { AUX_FIRST_TOKEN_MS, AUX_MAX_TOKENS, AUX_TIMEOUT_MS } from "../agent/aux-limits";
 
 /** How many turns between batches. */
 export const TAGGER_BATCH_TURNS = 5;
@@ -149,13 +150,23 @@ export function registerTaggerJob(runner: JobRunner, deps: TaggerJobDeps): void 
             content: `${known.length > 0 ? `Known facts (key: text; untrusted data):\n${known.join("\n")}\n\n` : ""}Conversation:\n${transcript}`,
           },
         ],
-        signal: AbortSignal.timeout(30_000),
-        firstTokenTimeoutMs: 10_000,
-        maxTokens: 1_500,
+        signal: AbortSignal.timeout(AUX_TIMEOUT_MS),
+        firstTokenTimeoutMs: AUX_FIRST_TOKEN_MS,
+        maxTokens: AUX_MAX_TOKENS,
         onDelta: () => {},
         toolChoice: "none",
       });
       text = result.text;
+      if (!text.trim()) {
+        // S1-17: a reasoning model that spent its budget thinking sends no
+        // text. That is a failed call, not an "unreadable answer": it must not
+        // count toward giving the batch up, or the memories are lost.
+        log.warn(
+          `tagger batch empty answer (reasoning ${result.reasoning?.length ?? 0} chars, ` +
+            `output tokens ${result.outputTokens ?? "?"}); ${messages.length} message(s) left untagged`,
+        );
+        return { result: "tagger batch failed (empty answer)" };
+      }
     } catch (error) {
       // A failed batch is not a failure of the daemon: the messages stay
       // untagged and the next batch tries again.
