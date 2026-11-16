@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDatabase } from "../src/db";
 import { executeRoutine, ROUTINE_TOOL_ALLOWLIST, routineTools } from "../src/routines/run";
-import { buildRoutinePrompt } from "../src/routines/prompt";
+import { buildRoutinePrompt, stripRoutineState } from "../src/routines/prompt";
 import type { Routine } from "../src/routines/types";
 import { insertRoutine, getRoutine } from "../src/stores/routines";
 import { createRoutineTools } from "../src/tools/routines-tool";
@@ -271,5 +271,63 @@ describe("routine execution", () => {
     expect(ROUTINE_TOOL_ALLOWLIST).not.toContain("mail_search");
     expect(routineTools({ allowedDomains: [] })).toContain("mail_search");
     expect(routineTools({ allowedDomains: ["example.com"] })).not.toContain("mail_search");
+  });
+});
+
+describe("a routine's prompt and state block are not shown to the owner", () => {
+  const reply = "Inbox is quiet: 2 new mails, none urgent.\n\nRoutine state (used next run)\n```json\n{\"stateContext\":{\"seen\":2}}\n```";
+  const fakeReply = (text: string) => routerWith(() => ({ text, outputTokens: 20, provider: "fake", model: "fake", latencyMs: 1 }));
+
+  test("the instruction is logged as a system note, not as the owner's message, and the model still gets it", async () => {
+    const r = routine({ preflight: { kind: "none" }, prompt: "Check the inbox and report." });
+    const database = setup(r);
+    let seenByModel = "";
+    const fake = routerWith((request) => {
+      seenByModel = request.messages.filter((message: any) => message.role === "user").map((message: any) => String(message.content)).join("\n");
+      return { text: reply, outputTokens: 20, provider: "fake", model: "fake", latencyMs: 1 };
+    });
+    await executeRoutine({ db: database, router: fake.router, settings, emit: () => {} }, r);
+    expect(seenByModel).toContain("Check the inbox and report.");
+    const rows = database.query<{ role: string; text: string }, []>("SELECT role, text FROM messages ORDER BY rowid").all();
+    expect(rows.filter((row) => row.role === "user")).toEqual([]);
+    expect(rows.find((row) => row.role === "system")?.text).toContain("Check the inbox and report.");
+  });
+
+  test("the stored reply, the run summary and the notification carry no state block; the state is kept", async () => {
+    const r = routine({ preflight: { kind: "none" } });
+    const database = setup(r);
+    const frames: Array<{ type: string; body?: string }> = [];
+    const run = await executeRoutine({ db: database, router: fakeReply(reply).router, settings, emit: (frame) => frames.push(frame as never) }, r);
+
+    expect(getRoutine(database, r.id)?.stateContext).toEqual({ seen: 2 });
+    const stored = database.query<{ text: string }, []>("SELECT text FROM messages WHERE role = 'assistant'").all().map((row) => row.text).join("\n");
+    expect(stored).toContain("Inbox is quiet");
+    for (const text of [stored, run.summary ?? "", frames.find((frame) => frame.type === "notify")?.body ?? ""]) {
+      expect(text).not.toContain("stateContext");
+      expect(text).not.toContain("Routine state");
+    }
+    expect(run.summary).toBe("Inbox is quiet: 2 new mails, none urgent.");
+  });
+
+  test("a reply that is only the state block leaves a plain completion line", async () => {
+    const r = routine({ preflight: { kind: "none" } });
+    const database = setup(r);
+    const frames: Array<{ type: string; body?: string }> = [];
+    const only = "Routine state (used next run)\n```json\n{\"stateContext\":{\"seen\":3}}\n```";
+    const run = await executeRoutine({ db: database, router: fakeReply(only).router, settings, emit: (frame) => frames.push(frame as never) }, r);
+    expect(getRoutine(database, r.id)?.stateContext).toEqual({ seen: 3 });
+    expect(run.summary ?? "").not.toContain("stateContext");
+    expect(frames.find((frame) => frame.type === "notify")?.body).toBe("Routine completed");
+  });
+
+  test("stripRoutineState removes the labelled block, however the label is dressed, and nothing else", () => {
+    const block = "```json\n{\"stateContext\":{\"a\":1}}\n```";
+    expect(stripRoutineState(`Report.\n\n**Routine state (used next run):**\n${block}`)).toBe("Report.");
+    expect(stripRoutineState(`Report.\n${block}`)).toBe("Report.");
+    expect(stripRoutineState(`Report. ${block}`)).toBe("Report.");
+    // Other fenced JSON in the reply is the owner's content and stays.
+    const keep = "```json\n{\"rows\":[1,2]}\n```";
+    expect(stripRoutineState(`Data:\n${keep}\n\nRoutine state (used next run)\n${block}`)).toBe(`Data:\n${keep}`);
+    expect(stripRoutineState("No state here.")).toBe("No state here.");
   });
 });

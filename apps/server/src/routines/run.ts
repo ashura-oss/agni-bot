@@ -9,7 +9,7 @@ import { getThread } from "../stores/threads";
 import { getJob, setJobEnabled } from "../stores/jobs";
 import { newID, nowISO } from "../util/ids";
 import { runPreflight } from "./preflight";
-import { buildRoutinePrompt, parseRoutineState } from "./prompt";
+import { buildRoutinePrompt, parseRoutineState, stripRoutineState } from "./prompt";
 import { getRoutine, recordRun, updateRoutineState } from "../stores/routines";
 import { ROUTINE_LIMITS, type Routine, type RoutineRun } from "./types";
 
@@ -105,6 +105,10 @@ export async function executeRoutine(deps: RoutineRunDeps, routine: Routine): Pr
     const result = await runTaskTurn(deps.db, deps.router, deps.settings, {
       threadID,
       text: buildRoutinePrompt(routine),
+      // The instruction (and the saved state in it) is the daemon's, not something the owner
+      // typed: logged as a system note so history never shows it as the owner's message.
+      // The model still receives it as the turn's input.
+      inputRole: "system",
       persona,
       emit: deps.emit,
       signal,
@@ -115,7 +119,11 @@ export async function executeRoutine(deps: RoutineRunDeps, routine: Routine): Pr
       maxTokens: routine.maxTokens,
       allowedDomains: routine.allowedDomains,
     });
-    run.summary = result.text.slice(0, 200);
+    // The state block is for the next run, not for the owner: it is cut from the stored
+    // reply, the run line and the notification, and read from the full text below.
+    const visibleText = stripRoutineState(result.text);
+    hideRoutineState(deps.db, result.turnID);
+    run.summary = visibleText.slice(0, 200) || null;
     const usage = deps.db.query<{ tokens: number }, [string]>("SELECT COALESCE(SUM(input_tokens + output_tokens), 0) AS tokens FROM usage_ledger WHERE turn_id = ?").get(result.turnID);
     run.tokens = usage?.tokens ?? 0;
     const toolRows = deps.db.query("SELECT tool_name, args FROM tool_calls WHERE turn_id = ? ORDER BY created_at").all(result.turnID) as Array<{ tool_name: string; args: string }>;
@@ -148,6 +156,17 @@ export async function executeRoutine(deps: RoutineRunDeps, routine: Routine): Pr
     maybePause(deps, routine, updateStreak(deps, routine, false));
   }
   return record(deps, run);
+}
+
+/** Remove the state block from the replies this turn stored, so a reload shows only what the routine had to say. */
+function hideRoutineState(db: Database, turnID: string): void {
+  const rows = db.query<{ id: string; text: string }, [string]>("SELECT id, text FROM messages WHERE turn_id = ? AND role = 'assistant'").all(turnID);
+  for (const row of rows) {
+    const visible = stripRoutineState(row.text);
+    if (visible === row.text.trim()) continue;
+    if (visible) db.run("UPDATE messages SET text = ? WHERE id = ?", [visible, row.id]);
+    else db.run("DELETE FROM messages WHERE id = ?", [row.id]);
+  }
 }
 
 function safeJson(value: string): unknown {
