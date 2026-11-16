@@ -56,6 +56,11 @@ export interface ToolDefinition<Args = unknown, Result = unknown> {
   kind?: ToolKind;
   /** What the policy engine should know about this tool when it is not in the central table (a connector tool). */
   meta?: ToolMeta;
+  /**
+   * What the schema cannot say: why these arguments can never be run (a working directory outside scratch), or
+   * null. Checked with the schema before the call is judged, so a refused call never raises an approval card.
+   */
+  validate?: (args: Record<string, unknown>) => string | null;
   handler: (args: Args, ctx: ToolContext) => Promise<Result>;
 }
 
@@ -94,7 +99,10 @@ export class ToolRegistry {
    */
   validateArgs(name: string, args: unknown): string | null {
     const tool = this.tools.get(name);
-    return tool ? validateArgs(tool.schema, args) : null;
+    if (!tool) return null;
+    const broken = validateArgs(tool.schema, args);
+    if (broken) return broken;
+    return tool.validate && typeof args === "object" && args !== null && !Array.isArray(args) ? tool.validate(args as Record<string, unknown>) : null;
   }
 
   get(name: string): ToolDefinition<never, unknown> | undefined {

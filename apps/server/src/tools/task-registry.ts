@@ -13,7 +13,7 @@ import { grep, glob } from "./search";
 import { readFile } from "./read-file";
 import { writeFile } from "./write-file";
 import { webSearch, webFetch, deepResearch, DEFAULT_FETCH_CHARS, MAX_FETCH_CHARS } from "./web";
-import { runBash } from "./bash";
+import { bashCwdProblem, runBash } from "./bash";
 import { skillsList, skillsLoad, skillsResource } from "./skills";
 import { createMailTools } from "./mail";
 import { createGoogleTools } from "./google";
@@ -216,7 +216,10 @@ export function buildTaskToolRegistry(db: Database, mailAccounts?: MailAccountRe
   register({
     name: "bash", description: "Run a shell command (cwd defaults to scratch). Only simple read-only commands inside scratch run without approval; everything else needs an approval card.", kind: "static",
     schema: objectSchema({ command: { type: "string", minLength: 1 }, timeoutMs: { type: "integer", minimum: 1000, maximum: 120_000 }, cwd: pathProp }, ["command"]), timeoutMs: 120_000,
-    handler: async (args) => runBash(parseObject(args, (v) => ({ command: string(v.command), timeoutMs: v.timeoutMs === undefined ? undefined : number(v.timeoutMs), cwd: v.cwd === undefined ? undefined : string(v.cwd) }))),
+    // A working directory outside scratch can never run: refuse it before a card is raised for it.
+    validate: (args) => bashCwdProblem(typeof args.cwd === "string" ? args.cwd : undefined),
+    // The turn's signal (its stop button, its timeout, a pause) ends the command and its process tree.
+    handler: async (args, ctx) => runBash({ ...parseObject(args, (v) => ({ command: string(v.command), timeoutMs: v.timeoutMs === undefined ? undefined : number(v.timeoutMs), cwd: v.cwd === undefined ? undefined : string(v.cwd) })), signal: ctx.signal }),
   });
   register({
     name: "skills_list", description: "List available skills from ~/.agni/skills.", kind: "static",
