@@ -1,4 +1,6 @@
 import { describe, expect } from "bun:test";
+import { resetS2Startup } from "../../src/startup/s2";
+import { startupS2Ledger } from "../../src/startup/s2-ledger";
 import { scenarioTest, calls, say, textOf, toolPairingProblems, toolResult, useScenarios, type ToolCallSpec } from "./harness";
 
 /**
@@ -39,8 +41,10 @@ describe("S1-08 tool-call cap", () => {
 });
 
 describe("S1-16 usage ledger", () => {
-  scenarioTest("a three-step turn records the usage of all three steps", async () => {
+  scenarioTest("a three-step turn records the usage of all three steps, one ledger row each", async () => {
     const s = await scenarios.start();
+    // What `serve()` does: the router's usage hook writes one row per model call.
+    await startupS2Ledger({ db: s.db, config: {} as never });
     s.model.queue(
       { calls: [{ name: "memory_search", args: { query: "first lookup" }, id: "call_a" }], usage: { in: 100, out: 10 } },
       { calls: [{ name: "memory_search", args: { query: "second lookup" }, id: "call_b" }], usage: { in: 200, out: 20 } },
@@ -51,12 +55,13 @@ describe("S1-16 usage ledger", () => {
     const { turnID, since } = await a.startTurn("look two things up, then answer");
     await a.waitFor("turn.end", { since, match: (frame) => frame.turnID === turnID, why: "the turn to end" });
 
-    const ledger = s.get<{ input: number | null; output: number | null }>(
-      "SELECT SUM(input_tokens) AS input, SUM(output_tokens) AS output FROM usage_ledger WHERE turn_id = ?",
-      turnID,
+    const ledger = s.get<{ input: number | null; output: number | null; rows: number }>(
+      "SELECT SUM(input_tokens) AS input, SUM(output_tokens) AS output, COUNT(*) AS rows FROM usage_ledger",
     );
+    expect(ledger?.rows, "one ledger row per model call").toBe(3);
     expect(ledger?.input, "input tokens recorded for the turn (100 + 200 + 300)").toBe(600);
     expect(ledger?.output, "output tokens recorded for the turn (10 + 20 + 30)").toBe(60);
+    resetS2Startup();
   });
 });
 

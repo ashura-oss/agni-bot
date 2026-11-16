@@ -30,7 +30,7 @@ beforeEach(() => {
   db = openDatabase(":memory:");
   configureBudget(db);
 });
-afterEach(() => db.close());
+afterEach(() => { configureBudget(null); db.close(); });
 
 function spend(costUsd: number | null, who: { agentID?: string; jobID?: string; rootJobID?: string; at?: Date } = {}): void {
   const at = who.at ?? new Date();

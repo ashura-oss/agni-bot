@@ -19,6 +19,8 @@ import { answerFormAndWake } from "../src/agent/form-broker";
 import { resolveApprovalWaiter } from "../src/agent/approval-broker";
 import type { ResolvedPersona } from "../src/agent/personas";
 import { createThread, createTurn } from "../src/stores/threads";
+import { resetS2Startup } from "../src/startup/s2";
+import { startupS2Ledger } from "../src/startup/s2-ledger";
 
 const provider: ProviderConfig = {
   id: "test", label: "Test", baseUrl: "https://test.local/v1", apiKey: "test", model: "mock",
@@ -32,7 +34,7 @@ type Frame = { type: string; [key: string]: unknown };
 const settings = { firstTokenTimeoutMs: 1000, turnTimeoutMs: 5000 };
 
 let db: Database | undefined;
-afterEach(() => { db?.close(); db = undefined; });
+afterEach(() => { resetS2Startup(); db?.close(); db = undefined; });
 
 function streamResponse(events: unknown[]): Response {
   const body = events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("") + "data: [DONE]\n\n";
@@ -448,8 +450,10 @@ describe("S1-15 the off-road guard on Windows paths", () => {
 });
 
 describe("S1-16 the ledger totals every step", () => {
-  test("two steps are summed into the ledger row and turn.end.usage", async () => {
+  test("two steps are two ledger rows (one per model call) that sum, and turn.end.usage", async () => {
     db = openDatabase(":memory:");
+    // The router's usage hook writes one row per model call once the server's recorder is installed.
+    await startupS2Ledger({ db, config: {} as never });
     const thread = createThread(db, persona.id);
     const router = routerFor((request) => request === 1
       ? callsResponse([{ id: "u1", name: "tasks_list", args: {} }], { prompt_tokens: 100, completion_tokens: 10 })
@@ -458,8 +462,8 @@ describe("S1-16 the ledger totals every step", () => {
     const result = await runTaskTurn(db, router, settings, {
       threadID: thread.id, text: "list", persona, emit: (frame) => emitted.push(frame as Frame), signal: new AbortController().signal,
     });
-    const total = db.query<{ i: number; o: number }, [string]>("SELECT SUM(input_tokens) AS i, SUM(output_tokens) AS o FROM usage_ledger WHERE turn_id = ?").get(result.turnID)!;
-    expect(total).toEqual({ i: 300, o: 30 });
+    const total = db.query<{ i: number; o: number; n: number }, []>("SELECT SUM(input_tokens) AS i, SUM(output_tokens) AS o, COUNT(*) AS n FROM usage_ledger").get()!;
+    expect(total).toEqual({ i: 300, o: 30, n: 2 });
     expect(emitted.find((frame) => frame.type === "turn.end")).toMatchObject({ usage: { inputTokens: 300, outputTokens: 30 } });
     expect(db.query("SELECT input_tokens, output_tokens FROM turns WHERE id = ?").get(result.turnID)).toEqual({ input_tokens: 300, output_tokens: 30 });
   });

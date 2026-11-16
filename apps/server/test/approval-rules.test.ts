@@ -414,16 +414,15 @@ describe("the broker uses rules", () => {
   });
 
   test("a card offers 'always' only when a rule could be stored: never for a shell command", async () => {
-    const h = harness(["once", "once", "once", "once", "once", "once"]);
+    // A shell command with a working directory outside scratch is refused before any card (S2-INT 7), so it is not here.
+    const h = harness(["once", "once", "once", "once", "once"]);
     await h.ask("mcp_files_delete", { path: "build" });
     await h.ask("bash", { command: "rm -rf build" });
-    await h.ask("bash", { command: "ls -la", cwd: join(root, "elsewhere") });
     await h.ask("bash", { command: "python3 run.py" });
     await h.ask("run_privileged", { command: "sudo ls", purpose: "list" });
     await h.ask("write_file", { path: join(root, "outside", "x.md"), content: "x" });
     expect(h.frames.map((f) => f.buttons)).toEqual([
       ["once", "always", "reject"],
-      ["once", "reject"],
       ["once", "reject"],
       ["once", "reject"],
       ["once", "reject"],
