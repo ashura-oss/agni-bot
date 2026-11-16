@@ -36,6 +36,17 @@ export function ComposerView() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const focusToken = useRef(snapshot.focusComposerToken);
   const isStreaming = snapshot.conversation.isStreaming;
+  // A message the daemon refused (too long) comes back: the text returns to the box and the
+  // reason is shown, unless the owner has already started something new.
+  const rejected = snapshot.rejectedDraft;
+  const handledRejection = useRef(snapshot.rejectedDraft?.token ?? 0);
+  useEffect(() => {
+    if (!rejected || rejected.token === handledRejection.current) return;
+    handledRejection.current = rejected.token;
+    setDraft((current) => (current.length === 0 ? rejected.text : current));
+    setError(rejected.message);
+  }, [rejected]);
+
   const trimmed = draft.trim();
 
   const commands: Command[] = [
