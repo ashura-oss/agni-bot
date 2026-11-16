@@ -204,11 +204,18 @@ export const RETIRED_PER_SLOT = 8;
 /** A value to hold for a slot, with the time (epoch ms) after which it is known to be dead, when known. */
 export type SlotSecret = string | undefined | null | { value: string | undefined | null; expiresAt?: number };
 
+interface Queued {
+  value: string;
+  until?: number;
+}
+
 interface Slot {
   /** What the slot holds now, with each value's known expiry. */
   live: Map<string, number | undefined>;
-  /** What it let go of (or staged and has not settled), oldest first. */
-  queue: Array<{ value: string; until?: number }>;
+  /** What it let go of, oldest first: at most `RETIRED_PER_SLOT`. */
+  queue: Queued[];
+  /** Values masked ahead of a save that has not succeeded (yet), oldest first: at most `RETIRED_PER_SLOT` too. */
+  staged: Queued[];
 }
 
 const slots = new Map<string, Slot>();
@@ -248,49 +255,50 @@ function holdAll(slot: string, values: Iterable<string>): void {
 function slotOf(name: string): Slot {
   let slot = slots.get(name);
   if (!slot) {
-    slot = { live: new Map(), queue: [] };
+    slot = { live: new Map(), queue: [], staged: [] };
     slots.set(name, slot);
   }
   return slot;
 }
 
-/** Keep the queue within its bound (oldest out), then drop the slot's hold on every value it no longer has. */
+const holds = (slot: Slot, value: string): boolean =>
+  slot.live.has(value) || slot.queue.some((queued) => queued.value === value) || slot.staged.some((staged) => staged.value === value);
+
+/** Keep both queues within their bound (oldest out), then drop the slot's hold on every value it no longer has. */
 function settleSlot(name: string, slot: Slot, candidates: Iterable<string>): void {
-  while (slot.queue.length > RETIRED_PER_SLOT) {
-    const dropped = slot.queue.shift()!;
-    if (!slot.live.has(dropped.value)) releaseSecretFor(slotHolder(name), dropped.value);
+  const gone = [...candidates];
+  for (const list of [slot.queue, slot.staged]) {
+    while (list.length > RETIRED_PER_SLOT) gone.push(list.shift()!.value);
   }
-  for (const value of candidates) {
-    if (!slot.live.has(value) && !slot.queue.some((queued) => queued.value === value)) releaseSecretFor(slotHolder(name), value);
-  }
-  if (slot.live.size === 0 && slot.queue.length === 0) slots.delete(name);
-  for (const queued of slot.queue) if (queued.until !== undefined) nextExpiry = Math.min(nextExpiry, queued.until);
+  for (const value of gone) if (!holds(slot, value)) releaseSecretFor(slotHolder(name), value);
+  if (slot.live.size === 0 && slot.queue.length === 0 && slot.staged.length === 0) slots.delete(name);
+  for (const queued of [...slot.queue, ...slot.staged]) if (queued.until !== undefined) nextExpiry = Math.min(nextExpiry, queued.until);
 }
 
 /**
- * Mask `secrets` before they are saved, holding them for `slot` without letting go of what the
- * slot already holds. A save that fails then leaves the old values (still in the file) and the
- * new ones masked; the new ones wait in the queue like a value that was let go of.
- * `rememberSecretsAt` settles the slot once the save has succeeded.
+ * Mask `secrets` before they are saved, holding them for `slot` without touching what the slot
+ * already holds or has queued. A save that fails then leaves the old values (still in the file)
+ * and the new ones masked, and nothing is pushed out of the queue by a value that was never
+ * saved. `rememberSecretsAt` settles the slot once the save has succeeded.
  */
 export function stageSecretsAt(slot: string, ...secrets: SlotSecret[]): void {
   const next = normalize(secrets);
   holdAll(slot, next.keys());
   const state = slotOf(slot);
   for (const [value, until] of next) {
-    if (state.live.has(value)) continue;
-    const queued = state.queue.find((entry) => entry.value === value);
-    if (queued) queued.until = until ?? queued.until;
-    else state.queue.push({ value, until });
+    if (state.live.has(value) || state.queue.some((entry) => entry.value === value)) continue;
+    const staged = state.staged.find((entry) => entry.value === value);
+    if (staged) staged.until = until ?? staged.until;
+    else state.staged.push({ value, until });
   }
   settleSlot(slot, state, []);
 }
 
 /**
  * Set `slot` to `secrets`, once the save that holds them has succeeded (never before: a save
- * that fails keeps the old values). What the slot held and no longer does is queued, not
- * unmasked; one already past its expiry is let go of now. With no secrets, the slot is emptied
- * the same way.
+ * that fails keeps the old values). What the slot held and no longer does, and what was staged
+ * and is not among `secrets`, is queued, not unmasked; a value already past its expiry is let go
+ * of now. With no secrets, the slot is emptied the same way.
  */
 export function rememberSecretsAt(slot: string, ...secrets: SlotSecret[]): void {
   const next = normalize(secrets);
@@ -298,13 +306,15 @@ export function rememberSecretsAt(slot: string, ...secrets: SlotSecret[]): void 
   const state = slotOf(slot);
   const now = Date.now();
   const dropped = [...state.live].filter(([value]) => !next.has(value));
+  const unsettled = state.staged.filter((entry) => !next.has(entry.value));
   state.live = next;
+  state.staged = [];
   state.queue = state.queue.filter((entry) => !next.has(entry.value));
-  for (const [value, until] of dropped) {
+  for (const { value, until } of [...dropped.map(([value, until]) => ({ value, until })), ...unsettled]) {
     if (until !== undefined && until <= now) continue;
     state.queue.push({ value, until });
   }
-  settleSlot(slot, state, dropped.map(([value]) => value));
+  settleSlot(slot, state, [...dropped.map(([value]) => value), ...unsettled.map((entry) => entry.value)]);
 }
 
 /** Let go of every slot whose name starts with `prefix` and is not in `keep` (an account or plugin that is gone). */
@@ -316,8 +326,10 @@ export function forgetSecretSlots(prefix: string, keep: ReadonlySet<string> = ne
 export function releaseExpiredSecrets(now: number = Date.now()): void {
   nextExpiry = Infinity;
   for (const [name, slot] of [...slots]) {
-    const expired = slot.queue.filter((entry) => entry.until !== undefined && entry.until <= now);
-    slot.queue = slot.queue.filter((entry) => !expired.includes(entry));
+    const due = (entry: Queued): boolean => entry.until !== undefined && entry.until <= now;
+    const expired = [...slot.queue, ...slot.staged].filter(due);
+    slot.queue = slot.queue.filter((entry) => !due(entry));
+    slot.staged = slot.staged.filter((entry) => !due(entry));
     settleSlot(name, slot, expired.map((entry) => entry.value));
   }
 }
@@ -331,6 +343,7 @@ export function releaseRetiredSecrets(...values: string[]): void {
   nextExpiry = Infinity;
   for (const [name, slot] of [...slots]) {
     slot.queue = slot.queue.filter((entry) => !dead.has(entry.value));
+    slot.staged = slot.staged.filter((entry) => !dead.has(entry.value));
     settleSlot(name, slot, dead);
   }
 }

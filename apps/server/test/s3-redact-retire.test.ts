@@ -159,6 +159,26 @@ describe("staging a value before the save that will hold it", () => {
     expect(masked("access-token-two-bbbb")).toBe(true);
   });
 
+  test("staged values do not push a queued value out before the save has succeeded", () => {
+    // The queue is full: a value replaced now would push the oldest out. A staged value is not replaced yet.
+    for (let i = 0; i <= RETIRED_PER_SLOT; i += 1) rememberSecretsAt("conn", `token-number-${i}-zzzzzz`);
+    stageSecretsAt("conn", "token-staged-1-zzzzzz", "token-staged-2-zzzzzz");
+    expect(masked("token-number-0-zzzzzz")).toBe(true);
+    expect(masked("token-staged-1-zzzzzz")).toBe(true);
+    // The save succeeded: now the bound applies, oldest first.
+    rememberSecretsAt("conn", "token-staged-1-zzzzzz", "token-staged-2-zzzzzz");
+    expect(masked("token-number-0-zzzzzz")).toBe(false);
+    expect(masked("token-number-1-zzzzzz")).toBe(true);
+  });
+
+  test("staging again and again (a save that keeps failing) is bounded too", () => {
+    rememberSecretsAt("conn", "token-live-aaaaaaaaaa");
+    for (let i = 0; i < 100; i += 1) stageSecretsAt("conn", `token-staged-${i}-zzzzzz`);
+    expect(secretCount()).toBe(1 + RETIRED_PER_SLOT);
+    expect(masked("token-live-aaaaaaaaaa")).toBe(true);
+    expect(masked("token-staged-99-zzzzzz")).toBe(true);
+  });
+
   test("a staged value that was never settled is let go like any queued one", () => {
     rememberSecretsAt("conn", "access-token-one-aaaa");
     stageSecretsAt("conn", { value: "access-token-two-bbbb", expiresAt: Date.now() + HOUR });
