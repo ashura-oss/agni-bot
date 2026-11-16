@@ -20,6 +20,27 @@ export interface HistoryMessage {
   uiHint?: string;
   attachments?: AttachmentInfo[];
   toAgentId?: string;
+  /** How the turn behind an assistant message ended; absent while it runs and for other roles. */
+  stopReason?: string;
+}
+
+/**
+ * How each of these turns ended, in one query per few hundred. A turn that is
+ * still running has no stop reason yet and is left out.
+ */
+export function stopReasonsByTurn(db: Database, turnIDs: Iterable<string>): Map<string, string> {
+  const ids = [...new Set(turnIDs)];
+  const reasons = new Map<string, string>();
+  for (let start = 0; start < ids.length; start += 400) {
+    const chunk = ids.slice(start, start + 400);
+    const rows = db
+      .query<{ id: string; stop_reason: string }, string[]>(
+        `SELECT id, stop_reason FROM turns WHERE stop_reason IS NOT NULL AND id IN (${chunk.map(() => "?").join(",")})`,
+      )
+      .all(...chunk);
+    for (const row of rows) reasons.set(row.id, row.stop_reason);
+  }
+  return reasons;
 }
 
 /** Two copies of one message (thread row and channel row) closer than this are one message. */
@@ -81,6 +102,10 @@ export function buildConversationHistory(db: Database, conversationID: string, l
     ) ORDER BY created_at, rid`).all(channelID, limit);
 
   const attachments = attachmentsByMessage(db, [...threadRows.map((row) => row.id), ...channelRows.map((row) => row.id)]);
+  const stopReasons = stopReasonsByTurn(db, [...threadRows, ...channelRows].flatMap((row) => {
+    const turnID = "turnID" in row ? row.turnID : row.turn_id;
+    return turnID ? [turnID] : [];
+  }));
   const attachmentsOf = (id: string): AttachmentInfo[] => attachments.get(id) ?? [];
 
   const messages: HistoryMessage[] = threadRows.map((message) => ({
@@ -90,6 +115,7 @@ export function buildConversationHistory(db: Database, conversationID: string, l
     attachments: attachmentsOf(message.id),
     createdAt: message.created_at,
     sessionID: message.sessionID,
+    ...(message.role === "assistant" && message.turnID && stopReasons.has(message.turnID) ? { stopReason: stopReasons.get(message.turnID)! } : {}),
   }));
   // A message stored on both the thread and the channel is one message: index
   // by what makes two copies the same, so each channel row is one lookup.
@@ -122,6 +148,7 @@ export function buildConversationHistory(db: Database, conversationID: string, l
       // A handoff notice names the agent it is about, so the client can
       // make that name a link to that agent's chat.
       ...(row.to_agent_id ? { toAgentId: row.to_agent_id } : {}),
+      ...(role === "assistant" && row.turn_id && stopReasons.has(row.turn_id) ? { stopReason: stopReasons.get(row.turn_id)! } : {}),
     };
     const key = keyOf(role, row.text, files);
     const candidates = seen.get(key) ?? [];

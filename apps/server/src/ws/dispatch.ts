@@ -45,6 +45,7 @@ import {
   setJobEnabled,
   wakeJob,
   describeWake,
+  isInternalJobKind,
   type JobRow,
 } from "../stores/jobs";
 import { appendMessage, createThread, createTurn, finishTurn, getThread, listThreadsWithPreview, recentMessages, titleThreadFromFirstMessage, touchThread, type ThreadRow } from "../stores/threads";
@@ -82,8 +83,9 @@ import { scheduleTaskReminder } from "../jobs/task-reminders";
 import type { PluginService } from "../plugins/service";
 import { pluginMailResolver } from "../plugins/credentials";
 import type { FrameLog } from "./frame-log";
-import { buildConversationHistory } from "./history";
+import { buildConversationHistory, stopReasonsByTurn } from "./history";
 import { replayButtons } from "./approval-replay";
+import { DAY_NAMES } from "../jobs/schedule";
 import { cancelTurn, cancelTurnsForDevice, isServerStopping, registerTurn, unregisterTurn } from "./turn-registry";
 import { activateAppearanceProfile, deleteAppearanceProfile, listAppearanceProfiles, saveAppearanceProfile } from "../stores/appearance";
 import { getRoutineByJobID, listRuns, updateRoutineState } from "../stores/routines";
@@ -1466,13 +1468,16 @@ function handleThreadHistory(
   if (!requireAuth(deps, session)) return;
   const thread = getThread(deps.db, frame.threadID);
   if (!thread) return sendError(deps, session, "unknown_thread", `no thread ${frame.threadID}`);
-  const messages = recentMessages(deps.db, thread.id, frame.limit ?? 50).map((message) => ({
+  const rows = recentMessages(deps.db, thread.id, frame.limit ?? 50);
+  const stopReasons = stopReasonsByTurn(deps.db, rows.flatMap((message) => (message.turn_id ? [message.turn_id] : [])));
+  const messages = rows.map((message) => ({
     id: message.id,
     role: message.role,
     text: message.text,
     attachments: messageAttachments(deps.db, message.id),
     createdAt: message.created_at,
     ...(message.turn_id ? { turnID: message.turn_id } : {}),
+    ...(message.role === "assistant" && message.turn_id && stopReasons.has(message.turn_id) ? { stopReason: stopReasons.get(message.turn_id)! } : {}),
   }));
   deps.reply({
     type: "thread.history.ok",
@@ -1760,6 +1765,9 @@ function jobInfo(db: Database, row: JobRow): JobInfo {
     enabled: row.enabled === 1,
     attempts: row.attempts,
     ...(payload.everyMs ? { everyMs: payload.everyMs } : {}),
+    ...(payload.dailyAt ? { dailyAt: payload.dailyAt } : {}),
+    ...(payload.dailyAt && payload.days && payload.days.length > 0 ? { days: weekdayNames(payload.days) } : {}),
+    internal: isInternalJobKind(row.kind),
     ...(payload.text ? { title: clip(payload.text, 120) } : {}),
     ...(payload.threadID ? { threadID: payload.threadID } : {}),
     ...(routine ? {
@@ -1774,6 +1782,11 @@ function jobInfo(db: Database, row: JobRow): JobInfo {
     } : {}),
     ...(row.result ? { lastResult: row.result } : {}),
   };
+}
+
+/** Weekday numbers (0 = Sunday) as the names the `jobs` tool takes, in week order, without repeats. */
+function weekdayNames(days: number[]): string[] {
+  return [...new Set(days)].filter((day) => day >= 0 && day <= 6).sort((a, b) => a - b).map((day) => DAY_NAMES[day]!);
 }
 
 /** A non-turn job (or a damaged payload) simply has nothing to say. */

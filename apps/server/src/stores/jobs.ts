@@ -97,6 +97,26 @@ export function requeueJob(db: Database, id: string, runAt: string): void {
   db.run("UPDATE jobs SET state = 'queued', run_at = ?, updated_at = ? WHERE id = ?", [runAt, nowISO(), id]);
 }
 
+/**
+ * Job kinds the daemon runs for itself (tagging, embedding, backups, rollover
+ * summaries, the harness review). They are not the owner's to pause, run or
+ * read about. A kind not listed here (a new one, one the owner made) is the
+ * owner's: hiding something they may have created is the worse mistake.
+ */
+const INTERNAL_JOB_KINDS: ReadonlySet<string> = new Set([
+  "tagger",
+  "memory.embed",
+  "memory.consolidate",
+  "summary.rollup",
+  "rollover.summarize",
+  "db.backup",
+  "harness.review",
+]);
+
+export function isInternalJobKind(kind: string): boolean {
+  return INTERNAL_JOB_KINDS.has(kind);
+}
+
 /** What `wakeJob` did: made the job due, left a running copy alone, or found no such job. */
 export type WakeOutcome = "woken" | "running" | "not_found";
 

@@ -140,6 +140,12 @@ export const MessageInfoSchema = z.object({
   /** The agent this message is about — a handoff notice names its target. */
   toAgentId: z.string().optional(),
   uiHint: z.string().optional(),
+  /**
+   * How the turn that produced an assistant message ended (`end`, `cancelled`,
+   * `error`, `timeout`, `budget`, ...); absent for other roles and for a turn
+   * still running. Additive in v2.
+   */
+  stopReason: z.string().optional(),
 });
 export type MessageInfo = z.infer<typeof MessageInfoSchema>;
 
@@ -214,6 +220,17 @@ export const JobInfoSchema = z.object({
   attempts: z.number().int().nonnegative(),
   /** Recurrence in milliseconds; absent for one-shot work. */
   everyMs: z.number().int().positive().optional(),
+  /** Wall-clock recurrence, "HH:MM" in the server's time zone; absent for other jobs. Additive in v2. */
+  dailyAt: z.string().optional(),
+  /** With `dailyAt`: the weekdays it fires on ("sun".."sat"); absent means every day. Additive in v2. */
+  days: z.array(z.string()).optional(),
+  /**
+   * True for the daemon's own housekeeping (tagging, embedding, backups,
+   * rollover summaries): not the owner's to manage. The server always sends
+   * it; a client that meets a server without it treats the job as the owner's.
+   * Additive in v2.
+   */
+  internal: z.boolean().optional(),
   /** The prompt this job runs, trimmed for display. */
   title: z.string().optional(),
   threadID: z.string().optional(),
