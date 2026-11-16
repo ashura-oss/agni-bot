@@ -719,6 +719,20 @@ export const ServerFrameSchema = z.discriminatedUnion("type", [
     buttons: z.array(DecisionSchema).min(1),
   }),
   /**
+   * An `approval.request` or `form.request` card is no longer actionable:
+   * clients remove it. `requestID` is the `apr_...` id of the approval or the
+   * id of the form; `kind` says which. `decided` means an answer was
+   * recorded (here or on another device), `expired` means it timed out, and
+   * `cancelled` means its turn ended or was stopped. Additive in v2.
+   */
+  z.object({
+    type: z.literal("approval.closed"),
+    seq,
+    requestID: z.string(),
+    kind: z.enum(["approval", "form"]),
+    reason: z.enum(["decided", "expired", "cancelled"]),
+  }),
+  /**
    * A command needs the owner's password. The request carries no secret —
    * only what the owner is authorizing. The answer travels on `secret.reply`
    * and is consumed once, server-side.

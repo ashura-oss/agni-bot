@@ -394,6 +394,9 @@ export class Conversation {
       case "appearance.updated":
       case "push.vapid":
       case "agent.proactivity":
+      // TODO(s1): remove the card named by `requestID` (`kind` approval|form). The contract
+      // exists; the client handler is a separate task. Listed here so the switch stays exhaustive.
+      case "approval.closed":
       // Group channels are a roster concern; a group's messages arrive as msg.new.
       case "channel.created":
       case "channel.list.ok":

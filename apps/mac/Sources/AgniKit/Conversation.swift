@@ -341,7 +341,7 @@ public struct Conversation: Sendable, Equatable {
       .jobListOK, .taskListOK, .taskUpdateOK, .memoryListOK, .memoryUpdateOK, .memoryPinOK, .memoryForgetOK,
       .memoryConflictsListOK, .memoryConflictResolveOK, .providerAddOK, .providerModelsOK,
       .pluginListOK, .pluginConnectOK, .pluginState, .appearanceListOK, .appearanceUpdated,
-      .channelCreated, .channelListOK, .channelHistoryOK, .unknown:
+      .channelCreated, .channelListOK, .channelHistoryOK, .approvalClosed, .unknown:
       return []
 
     case .presence(let presence):
