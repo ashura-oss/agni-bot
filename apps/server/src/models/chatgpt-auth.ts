@@ -8,7 +8,8 @@ import type { ChatGPTConnection } from "@agni/protocol";
 import { ProviderError } from "./client";
 import type { ProviderConfig } from "./providers";
 import { chatGPTPage } from "./chatgpt-page";
-import { entryName, eraseFile, forgetSecretSlots, inVaultMode, rememberSecrets, rememberSecretsAt, vaultForReads, vaultForWrites } from "../credentials/vault-mode";
+import { entryName, eraseFile, inVaultMode, vaultForReads, vaultForWrites } from "../credentials/vault-mode";
+import { forgetSecretSlots, rememberSecretsAt, stageSecretsAt } from "../util/redact";
 import { log } from "../log";
 import { VaultError } from "../secrets/types";
 import { restrictToOwnerOnWindowsAsync } from "../util/windows-acl";
@@ -457,7 +458,7 @@ function rememberTokens(store: Store, settle = true): void {
     live.add(slot);
     const { accessToken, refreshToken, idToken } = account.tokens ?? {};
     if (settle) rememberSecretsAt(slot, accessToken, refreshToken, idToken);
-    else rememberSecrets(accessToken, refreshToken, idToken);
+    else stageSecretsAt(slot, accessToken, refreshToken, idToken);
   }
   if (settle) forgetSecretSlots(prefix, live);
 }

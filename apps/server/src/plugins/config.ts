@@ -37,7 +37,8 @@
  */
 import { chmodSync, closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
-import { entryName, forgetSecretSlots, rememberSecrets, rememberSecretsAt, vaultForReads, vaultForWrites } from "../credentials/vault-mode";
+import { entryName, vaultForReads, vaultForWrites } from "../credentials/vault-mode";
+import { forgetSecretSlots, rememberSecretsAt, stageSecretsAt } from "../util/redact";
 import { log } from "../log";
 import { valueCarriesCredential } from "../secrets/classify";
 import { VaultError, type Vault } from "../secrets/types";
@@ -248,7 +249,7 @@ function pluginSecretSlots(config: PluginsFile): Map<string, string> {
 
 /** Make `redact()` mask every secret in the config. Adds only: what a save replaces is let go by `settlePluginSecrets`. */
 function registerPluginSecrets(config: PluginsFile): void {
-  for (const value of pluginSecretSlots(config).values()) rememberSecrets(value);
+  for (const [slot, value] of pluginSecretSlots(config)) stageSecretsAt(slot, value);
 }
 
 /**

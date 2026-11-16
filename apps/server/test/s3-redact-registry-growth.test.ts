@@ -17,8 +17,7 @@ import { ChatGPTAuth } from "../src/models/chatgpt-auth";
 import { emptyPluginsFile, savePluginsFile, type PluginsFile } from "../src/plugins/config";
 import { completeConnect, deleteConnection, startPending, updateTokens } from "../src/plugins/store";
 import { lockVault, unlockVault } from "../src/secrets";
-import { redact, secretCount } from "../src/util/redact";
-import { rememberSecretsAt } from "../src/credentials/vault-mode";
+import { redact, rememberSecretsAt, secretCount } from "../src/util/redact";
 
 const ROUNDS = 1_000;
 // A vault write is an encrypted, fsynced file replace (about 60 ms): 1,000 of them per store is minutes.

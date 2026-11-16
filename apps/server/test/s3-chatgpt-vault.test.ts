@@ -5,21 +5,11 @@
  * once and removed at the first save. No network: the accounts are seeded.
  * Throwaway home, in-memory keystore.
  */
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import * as redactModule from "../src/util/redact";
-
-const registered: string[] = [];
-const realRegister = redactModule.registerSecret;
-mock.module("../src/util/redact", () => ({
-  ...redactModule,
-  registerSecret: (value: string) => {
-    registered.push(value);
-    realRegister(value);
-  },
-}));
+import { clearSecretsForTests, redact } from "../src/util/redact";
 
 import { ChatGPTAuth } from "../src/models/chatgpt-auth";
 import { lockVault, unlockVault, type Vault } from "../src/secrets";
@@ -58,7 +48,6 @@ beforeEach(() => {
   savedMode = process.env.AGNI_SECRETS_MODE;
   delete process.env.AGNI_SECRETS_MODE;
   lockVault();
-  registered.length = 0;
   home = mkdtempSync(join(tmpdir(), "agni-chatgptvault-"));
   path = join(home, "data", "chatgpt", "accounts.json");
   mkdirSync(join(home, "data", "chatgpt"), { recursive: true });
@@ -135,12 +124,12 @@ describe("vault mode", () => {
   test("the tokens are registered for redaction when loaded and when saved", async () => {
     const vault = await vaultMode();
     vault.set("chatgpt/accounts", accountsJson());
-    registered.length = 0;
+    clearSecretsForTests();
     const auth = open();
-    expect(registered).toEqual(expect.arrayContaining([ACCESS, REFRESH, ID_TOKEN]));
-    registered.length = 0;
+    for (const token of [ACCESS, REFRESH, ID_TOKEN]) expect(redact(token)).toBe("[redacted]");
+    clearSecretsForTests();
     await auth.acknowledge("acc1");
-    expect(registered).toEqual(expect.arrayContaining([ACCESS, REFRESH, ID_TOKEN]));
+    for (const token of [ACCESS, REFRESH, ID_TOKEN]) expect(redact(token)).toBe("[redacted]");
   });
 
   test("a plaintext file left over is used, then moved into the vault and removed at the first save", async () => {

@@ -191,18 +191,18 @@ describe("refusing", () => {
 describe("registering secrets for redaction", () => {
   test("every value set, read after unlock, or returned by get is registered", async () => {
     const home = fresh();
-    const spy = spyOn(redactModule, "registerSecret");
+    const spy = spyOn(redactModule, "registerSecretFor");
     try {
       const vault = await unlockVault({ home, keystore, create: true });
       vault.set("a", "value-set");
-      expect(spy).toHaveBeenCalledWith("value-set");
+      expect(spy).toHaveBeenCalledWith(expect.any(String), "value-set");
       lockVault();
       spy.mockClear();
       const again = await unlockVault({ home, keystore });
-      expect(spy).toHaveBeenCalledWith("value-set");
+      expect(spy).toHaveBeenCalledWith(expect.any(String), "value-set");
       spy.mockClear();
       again.get("a");
-      expect(spy).toHaveBeenCalledWith("value-set");
+      expect(spy).toHaveBeenCalledWith(expect.any(String), "value-set");
     } finally {
       spy.mockRestore();
     }

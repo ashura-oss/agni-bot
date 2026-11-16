@@ -13,9 +13,10 @@
  */
 import type { Database } from "bun:sqlite";
 import type { PluginAccount } from "@agni/protocol";
-import { entryName, rememberSecretsAt, vaultForReads, vaultForWrites } from "../credentials/vault-mode";
+import { entryName, vaultForReads, vaultForWrites } from "../credentials/vault-mode";
 import { VaultError } from "../secrets/types";
 import { newID, nowISO } from "../util/ids";
+import { rememberSecretsAt } from "../util/redact";
 
 export interface PluginConnectionRow {
   id: string;

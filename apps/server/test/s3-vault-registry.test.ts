@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createMemoryKeyStore, lockVault, unlockVault } from "../src/secrets";
-import { MAX_SECRETS, redact, registerSecret, secretCount, unregisterSecret } from "../src/util/redact";
+import { MAX_SECRETS, redact, registerSecret, registerSecretFor, secretCount, unregisterSecret } from "../src/util/redact";
 
 let roots: string[] = [];
 const extra: string[] = [];
@@ -82,8 +82,9 @@ describe("the registry follows the vault", () => {
     lockVault();
     const there = await unlockVault({ home, keystore });
     there.set("env/X_API_KEY", "key-after-other-process-22");
-    // In its own process this daemon still has the old value registered.
-    registerSecret("key-before-other-process-1");
+    // In its own process this daemon still has the old value registered, under its vault entry's hold
+    // (both vaults here are one process, so the second one's write let go of that hold: put it back).
+    registerSecretFor(`vault:${here.path}:env/X_API_KEY`, "key-before-other-process-1");
     here.refresh({ force: true });
     expect(here.get("env/X_API_KEY")).toBe("key-after-other-process-22");
     expect(redact("x key-before-other-process-1 y")).toBe("x key-before-other-process-1 y");

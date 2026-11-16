@@ -6,8 +6,7 @@
  * The two tests run in this order; the second only passes because of the preload.
  */
 import { describe, expect, test } from "bun:test";
-import { holdbackLength, redact, registerSecret, secretCount } from "../src/util/redact";
-import { rememberSecretsAt } from "../src/credentials/vault-mode";
+import { holdbackLength, redact, registerSecret, rememberSecretsAt, secretCount } from "../src/util/redact";
 
 describe("the redaction registry between tests", () => {
   test("one test registers secrets, directly and by slot, and leaves them", () => {

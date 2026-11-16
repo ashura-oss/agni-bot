@@ -1,5 +1,4 @@
 import { afterEach } from "bun:test";
-import { resetSecretSlots } from "../src/credentials/vault-mode";
 import { clearSecretsForTests } from "../src/util/redact.ts";
 import { Router } from "../src/models/router.ts";
 import { createMemoryKeyStore, setKeyStoreOverride } from "../src/secrets";
@@ -14,8 +13,7 @@ setKeyStoreOverride(createMemoryKeyStore());
 
 // The redaction registry is process-wide. What one test registers must not change what the next one
 // sees (a secret count, a stream tail held back because it starts like a leftover secret), so every test
-// ends with an empty registry. Slots (`rememberSecretsAt`) forget their values with it.
+// ends with an empty registry, slots included.
 afterEach(() => {
   clearSecretsForTests();
-  resetSecretSlots();
 });

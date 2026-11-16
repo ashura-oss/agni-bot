@@ -16,6 +16,12 @@
  *     byte alignments (the part of the encoding the neighbouring bytes cannot
  *     change), in the standard and URL-safe alphabets.
  *
+ * Who holds a value: a value is masked while anything holds it. Every registration names a
+ * holder (a vault entry, an environment variable, a store's slot; `registerSecret` is the
+ * holder "anonymous"), and a holder lets go of its own hold only. So a store that stops using a
+ * value cannot unmask one a vault entry, an environment variable or a provider key still has.
+ * Nothing outside this file removes a value from the registry.
+ *
  * A value shorter than `MIN_SECRET_LENGTH` is not registered: masking a
  * four-letter word everywhere would wreck ordinary text and protect nothing.
  *
@@ -44,6 +50,12 @@ export const MAX_SECRETS = 10_000;
 
 /** variants of each registered secret, by secret. */
 const registry = new Map<string, readonly string[]>();
+
+/** Who holds each registered value. A value is in `registry` exactly while this set is not empty. */
+const holders = new Map<string, Set<string>>();
+
+/** The holder of `registerSecret`: values registered with no holder named, and let go of only by `unregisterSecret`. */
+const ANONYMOUS = "anonymous";
 
 /** All variants, longest first, so a secret that contains another is masked as a whole. Null = rebuild. */
 let needles: readonly string[] | null = [];
@@ -109,31 +121,120 @@ export function redact(text: string): string {
   return out;
 }
 
-/** Remember a secret value so `redact` masks it. Values shorter than `MIN_SECRET_LENGTH` are ignored. */
-export function registerSecret(value: string): void {
+/**
+ * Hold `value` for `holder`: it is masked until every holder has let go. Values shorter than
+ * `MIN_SECRET_LENGTH` are ignored. Throws, holding nothing, when the registry is full.
+ */
+export function registerSecretFor(holder: string, value: string): void {
   if (typeof value !== "string" || value.trim().length < MIN_SECRET_LENGTH) return;
-  if (registry.has(value)) return;
-  if (registry.size >= MAX_SECRETS) {
-    throw new Error(`secret registry is full (${MAX_SECRETS}): refusing to leave a secret unmasked`);
+  let held = holders.get(value);
+  if (!held) {
+    if (registry.size >= MAX_SECRETS) {
+      throw new Error(`secret registry is full (${MAX_SECRETS}): refusing to leave a secret unmasked`);
+    }
+    registry.set(value, variantsOf(value));
+    held = new Set();
+    holders.set(value, held);
+    needles = null;
   }
-  registry.set(value, variantsOf(value));
+  held.add(holder);
+}
+
+/** `holder` stops holding `value`. It stays masked while another holder holds it. */
+export function releaseSecretFor(holder: string, value: string): void {
+  const held = holders.get(value);
+  if (!held?.delete(holder) || held.size > 0) return;
+  holders.delete(value);
+  registry.delete(value);
   needles = null;
 }
 
-/** Stop masking a value (a deleted credential, or a test cleaning up after itself). */
-export function unregisterSecret(value: string): void {
-  if (registry.delete(value)) needles = null;
+/** Remember a secret value so `redact` masks it. Values shorter than `MIN_SECRET_LENGTH` are ignored. */
+export function registerSecret(value: string): void {
+  registerSecretFor(ANONYMOUS, value);
 }
 
-/** Forget every registered secret. For the test preload only: a test starts with an empty registry. */
+/**
+ * Let go of what `registerSecret` registered (a test cleaning up after itself). Only that hold:
+ * a value a vault entry, an environment variable or a slot holds stays masked.
+ */
+export function unregisterSecret(value: string): void {
+  releaseSecretFor(ANONYMOUS, value);
+}
+
+/** Forget every registered secret and every slot. For the test preload only: a test starts with an empty registry. */
 export function clearSecretsForTests(): void {
   registry.clear();
+  holders.clear();
+  slots.clear();
   needles = null;
 }
 
 /** How many secrets are registered. */
 export function secretCount(): number {
   return registry.size;
+}
+
+// --- secrets a store replaces ----------------------------------------------------------
+//
+// A token that is refreshed replaces an earlier one. A store registers a refreshable secret
+// under a named slot; setting the slot again lets the slot go of the values it no longer
+// holds. The slot is one holder: a value another holder also holds stays masked.
+
+/** What each slot holds. */
+const slots = new Map<string, readonly string[]>();
+
+const slotHolder = (slot: string): string => `slot:${slot}`;
+
+type SlotValue = string | undefined | null;
+
+/** Hold each of `values` for the slot, all or none: a registry that refuses leaves the slot as it was. */
+function holdAll(slot: string, values: readonly string[]): void {
+  const holder = slotHolder(slot);
+  const added: string[] = [];
+  try {
+    for (const value of values) {
+      const fresh = !holders.get(value)?.has(holder);
+      registerSecretFor(holder, value);
+      if (fresh) added.push(value);
+    }
+  } catch (error) {
+    for (const value of added) releaseSecretFor(holder, value);
+    throw error;
+  }
+}
+
+const distinct = (values: readonly SlotValue[]): string[] =>
+  [...new Set(values.filter((value): value is string => typeof value === "string" && value !== ""))];
+
+/**
+ * Mask `values` before they are saved, holding them for `slot` without letting go of what the slot
+ * already holds. A save that fails then leaves both the old values (still in the file) and the new
+ * ones masked. `rememberSecretsAt` settles the slot once the save has succeeded.
+ */
+export function stageSecretsAt(slot: string, ...values: SlotValue[]): void {
+  const next = distinct(values);
+  holdAll(slot, next);
+  const held = slots.get(slot) ?? [];
+  const fresh = next.filter((value) => !held.includes(value));
+  if (fresh.length > 0) slots.set(slot, [...held, ...fresh]);
+}
+
+/**
+ * Set `slot` to `values`: what it held before and does not hold now is let go of (by this slot
+ * only). Call it after the save succeeded, never before. With no values, the slot is emptied.
+ */
+export function rememberSecretsAt(slot: string, ...values: SlotValue[]): void {
+  const next = distinct(values);
+  holdAll(slot, next);
+  for (const value of slots.get(slot) ?? []) if (!next.includes(value)) releaseSecretFor(slotHolder(slot), value);
+  if (next.length > 0) slots.set(slot, next);
+  else slots.delete(slot);
+}
+
+/** Empty every slot whose name starts with `prefix` and is not in `keep` (an account or plugin that is gone). */
+export function forgetSecretSlots(prefix: string, keep: ReadonlySet<string> = new Set()): void {
+  for (const slot of [...slots.keys()]) if (slot.startsWith(prefix) && !keep.has(slot)) rememberSecretsAt(slot);
 }
 
 /**
@@ -145,7 +246,7 @@ export function secretCount(): number {
 export function registerSecretsFromEnv(names: Iterable<string>, env: Record<string, string | undefined> = process.env): void {
   for (const name of names) {
     const value = env[name];
-    if (typeof value === "string") registerSecret(value);
+    if (typeof value === "string") registerSecretFor(`env:${name}`, value);
   }
 }
 

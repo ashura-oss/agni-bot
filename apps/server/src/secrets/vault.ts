@@ -6,7 +6,7 @@
  */
 import { readFileSync, statSync } from "node:fs";
 import { writePrivateFileSync, PrivateFileError } from "../util/private-file";
-import { registerSecret as register, unregisterSecret } from "../util/redact";
+import { registerSecretFor, releaseSecretFor } from "../util/redact";
 import { decodeVault, encodeVault, parseHeader, type StoredEntry, type VaultHeader } from "./format";
 import { withFileLock } from "./lock";
 import { VAULT_MAX_VALUE_BYTES, VAULT_NAME_PATTERN, VaultError, type Vault, type VaultEntryInfo } from "./types";
@@ -14,8 +14,6 @@ import { VAULT_MAX_VALUE_BYTES, VAULT_NAME_PATTERN, VaultError, type Vault, type
 /** How often `get` looks at the file to see whether another process changed it. */
 const REFRESH_EVERY_MS = 1000;
 
-/** An empty value is not a secret and would mask every empty string. */
-const registerSecret = (value: string): void => { if (value !== "") register(value); };
 
 export function lockPathOf(vaultPath: string): string {
   return `${vaultPath}.lock`;
@@ -36,6 +34,14 @@ function checkValue(value: string): void {
 
 export class FileVault implements Vault {
   private entries = new Map<string, StoredEntry>();
+  /** Registers every value of an entry under the holder `vault:<file>:<name>`, so only this entry's own hold is let go of. */
+  private holderOf(name: string): string {
+    return `vault:${this.path}:${name}`;
+  }
+  /** An empty value is not a secret and would mask every empty string. */
+  private register(name: string, value: string): void {
+    if (value !== "") registerSecretFor(this.holderOf(name), value);
+  }
   private stamp = "";
   private checkedAt = 0;
 
@@ -60,23 +66,23 @@ export class FileVault implements Vault {
     this.entries = decodeVault(bytes, this.key, parsed);
     this.stamp = this.stampOfFile();
     this.checkedAt = Date.now();
-    for (const entry of this.entries.values()) registerSecret(entry.value);
+    for (const [name, entry] of this.entries) this.register(name, entry.value);
     // Another process changed or removed a value: this one stops masking the old text too.
     this.forgetDropped(previous);
   }
 
-  private heldValues(): Set<string> {
-    return new Set([...this.entries.values()].map((entry) => entry.value));
+  private heldValues(): Map<string, string> {
+    return new Map([...this.entries].map(([name, entry]) => [name, entry.value]));
   }
 
   /**
-   * Stop masking values that were in `previous` and no entry holds now. Without
-   * this, a token refreshed every hour adds a registered secret (and its dozens
-   * of masked forms) every hour for as long as the server runs.
+   * Let go of values an entry held in `previous` and does not hold now (overwritten or deleted).
+   * Without this, a token refreshed every hour adds a registered secret (and its dozens of
+   * masked forms) every hour for as long as the server runs. Only this entry's hold is let
+   * go of: a value something else also holds stays masked.
    */
-  private forgetDropped(previous: Set<string>): void {
-    const now = this.heldValues();
-    for (const value of previous) if (value !== "" && !now.has(value)) unregisterSecret(value);
+  private forgetDropped(previous: Map<string, string>): void {
+    for (const [name, value] of previous) if (this.entries.get(name)?.value !== value) releaseSecretFor(this.holderOf(name), value);
   }
 
   private stampOfFile(): string {
@@ -102,7 +108,7 @@ export class FileVault implements Vault {
   get(name: string): string | undefined {
     this.maybeRefresh();
     const value = this.entries.get(name)?.value;
-    if (value !== undefined) registerSecret(value);
+    if (value !== undefined) this.register(name, value);
     return value;
   }
 
@@ -122,7 +128,7 @@ export class FileVault implements Vault {
   set(name: string, value: string): void {
     checkName(name);
     checkValue(value);
-    registerSecret(value);
+    this.register(name, value);
     this.mutate((entries) => {
       entries.set(name, { value, updatedAt: new Date().toISOString() });
       return true;

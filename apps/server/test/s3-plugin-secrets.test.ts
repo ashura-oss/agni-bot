@@ -5,22 +5,11 @@
  * back and take them out, so the service and the tools do not change.
  * Throwaway home, in-memory keystore.
  */
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import * as redactModule from "../src/util/redact";
-
-// Record what is registered for redaction, and still call the real function.
-const registered: string[] = [];
-const realRegister = redactModule.registerSecret;
-mock.module("../src/util/redact", () => ({
-  ...redactModule,
-  registerSecret: (value: string) => {
-    registered.push(value);
-    realRegister(value);
-  },
-}));
+import { clearSecretsForTests, redact } from "../src/util/redact";
 
 import {
   emptyPluginsFile,
@@ -49,7 +38,6 @@ beforeEach(() => {
   savedMode = process.env.AGNI_SECRETS_MODE;
   delete process.env.AGNI_SECRETS_MODE;
   lockVault();
-  registered.length = 0;
   home = mkdtempSync(join(tmpdir(), "agni-pluginsecrets-"));
   path = join(home, "plugins.json");
 });
@@ -223,11 +211,11 @@ describe("vault mode: changes", () => {
 describe("redaction", () => {
   test("every secret saved is registered, in file mode and in vault mode", async () => {
     savePluginsFile(path, fullConfig());
-    for (const secret of Object.values(SECRETS)) expect(registered).toContain(secret);
-    registered.length = 0;
+    for (const secret of Object.values(SECRETS)) expect(redact(secret)).toBe("[redacted]");
+    clearSecretsForTests();
     await vaultMode();
     savePluginsFile(path, fullConfig());
-    for (const secret of Object.values(SECRETS)) expect(registered).toContain(secret);
+    for (const secret of Object.values(SECRETS)) expect(redact(secret)).toBe("[redacted]");
   });
 });
 
