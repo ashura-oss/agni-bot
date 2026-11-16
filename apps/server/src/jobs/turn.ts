@@ -14,7 +14,7 @@
 import type { Database } from "bun:sqlite";
 import type { ServerFrameBody } from "@agni/protocol";
 import { runTaskTurn, isThreadActive, type TaskTurnSettings } from "../agent/task-loop";
-import { canonicalAgentID, defaultResolvedPersona, getPersona, resolvePersona, type ResolvedPersona } from "../agent/personas";
+import { canonicalAgentID, getPersona, resolvePersona, type ResolvedPersona } from "../agent/personas";
 import { DEFAULT_VISIBILITY, MISSING_AGENT_VISIBILITY, RESULT_MAX_CHARS, redactResultForCaller } from "../agent/visibility";
 import { rootGuardrail } from "../agent/guardrails";
 import { asksWhenClean } from "../policy/metadata";
@@ -42,7 +42,7 @@ import { scheduleTagger } from "./tagger";
 import { nextDailyRun, nextIntervalRun } from "./schedule";
 import { peerEnvelope } from "../agent/peer-message";
 import type { PeerIntent } from "@agni/protocol";
-import { JobGiveUp, type JobRunner } from "./runner";
+import { JobGiveUp, type JobContext, type JobRunner } from "./runner";
 import { nowISO } from "../util/ids";
 
 /** How long a wake first waits when the parent's thread is busy; doubles per deferral. */
@@ -122,7 +122,7 @@ export interface TurnJobDeps {
 }
 
 export function registerTurnJob(runner: JobRunner, deps: TurnJobDeps): void {
-  runner.register("turn", async (job: JobRow) => {
+  runner.register("turn", async (job: JobRow, ctx: JobContext) => {
     const payload = parseJobPayload<TurnJobPayload>(job);
 
     // DEL-006: a wake turn tells the parent agent that a delegated task
@@ -163,7 +163,10 @@ export function registerTurnJob(runner: JobRunner, deps: TurnJobDeps): void {
       announceTask(deps, delegationTaskID);
     }
 
-    const persona = (payload.agentID ? resolvePersona(deps.db, payload.agentID) : undefined) ?? defaultResolvedPersona(deps.db);
+    // The bot the runner resolved and checked against the pause switch: what was checked is what runs. The payload
+    // is not read for it again, so a spelling the first lookup tolerated cannot land on a different bot the second time.
+    const persona = ctx.agentID === null ? undefined : resolvePersona(deps.db, ctx.agentID);
+    if (!persona) throw new Error("turn job has no bot to run as");
     const capped = payload.wakeKey ? null : dailyCapReached(deps, persona);
     if (capped) {
       if (delegationTaskID) setDelegationState(deps.db, delegationTaskID, "failed", capped);

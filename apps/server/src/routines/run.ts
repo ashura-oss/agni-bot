@@ -67,7 +67,7 @@ function maybePause(deps: RoutineRunDeps, routine: Routine, failureStreak: numbe
 }
 
 /** Execute one scheduled routine, keeping its report in the bot's conversation. */
-export async function executeRoutine(deps: RoutineRunDeps, routine: Routine): Promise<RoutineRun> {
+export async function executeRoutine(deps: RoutineRunDeps, routine: Routine, agentID: string = routine.agentID): Promise<RoutineRun> {
   const run = startRun(routine.id);
   let preflight: { changed: boolean; hash: string };
   try {
@@ -83,9 +83,9 @@ export async function executeRoutine(deps: RoutineRunDeps, routine: Routine): Pr
     return record(deps, run);
   }
 
-  const persona = resolvePersona(deps.db, routine.agentID);
+  const persona = resolvePersona(deps.db, agentID);
   if (!persona) {
-    run.error = `routine agent not found: ${routine.agentID}`;
+    run.error = `routine agent not found: ${agentID}`;
     maybePause(deps, routine, updateStreak(deps, routine, false));
     return record(deps, run);
   }
