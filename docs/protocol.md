@@ -139,6 +139,11 @@ client can show it and keep the draft.
 | `job.delete` | `{jobID}` | Deletes a task unless it is running; replies with a refreshed `job.list.ok`. |
 | `approval.rules.list` | `{}` | The standing "Always allow" rules, newest first. Answered by `approval.rules.list.ok`. Additive in v2. |
 | `approval.rule.revoke` | `{id}` | Revokes one rule; it never matches again. Answered by `approval.rule.revoke.ok`, or by an `error` with code `not_found` when the id is unknown or already revoked. Additive in v2. |
+| `approval.full` | `{requestID}` | The whole text behind an approval card whose preview was cut (`approval.request.truncated` is true). Answered by `approval.full.ok`, or by an `error` with code `not_found` when the card is gone. Additive in v2. |
+| `policy.pause` | `{paused?, agentID?}` | Pause or resume every bot: `paused: true` stops running work and starts nothing new, `false` resumes (a bot that was turned off stays off). Omit `paused` to only read the state. With `agentID` it means that one bot, the same as `agent.enabled.set` with `enabled: !paused`. Answered by a broadcast `policy.pause.ok`. Additive in v2. |
+| `agent.enabled.set` | `{agentID, enabled}` | Turn one bot off or on. Off stops that bot's running turns, skips its scheduled jobs, and refuses new messages to it (`agent_off`). Answered by a broadcast `policy.pause.ok` and a fresh `agents.update`. An unknown bot answers `unknown_agent`. Additive in v2. |
+| `spend.status` | `{}` | Today's spend against the caps. Answered by `spend.status.ok`. Additive in v2. |
+| `spend.caps.set` | `{dayUsd?, perBotDayUsd?, perJobUsd?}` | Change the spend caps: a number of dollars above zero, or `null` for no cap; a field left out keeps its value. Answered by a broadcast `spend.status.ok`, or by an `error` with code `bad_cap` (a bot's cap above the daily cap, or an unusable number). Additive in v2. |
 | `task.list` | `{status?, limit?}` | Lists durable tasks and task lists; status is `open \| done \| snoozed \| all`. |
 | `task.create` | `{title, description?, dueAt?, deadlineAt?, reminderAt?, labels?, repeatRule?, priority?, listID?, parentTaskID?, attachmentIDs?}` | Creates a task or subtask, optionally with a schedule, deadline, labels, repeat cadence and uploaded files. |
 | `task.list.create` | `{name}` | Creates a task list and returns the current list navigation data. |
@@ -197,7 +202,7 @@ accountLabel?, error?, connectedAt?}`.
 | `tool.start` | `{callID, name, preview?}` | Tool activity strip. |
 | `tool.update` | `{callID, preview?}` | |
 | `tool.end` | `{callID, ok, preview?}` | |
-| `approval.request` | `{requestID, action, preview, buttons}` | `buttons`: subset of `once \| always \| reject`. `always` is offered only when the call can be remembered (one bot, one tool, one target); it is never offered for a shell command (`bash`), for `run_privileged`, or for a write outside scratch. A card replayed to a reconnecting client carries the same `buttons` it was first sent with. |
+| `approval.request` | `{requestID, action, preview, buttons, source?, tier?, expiresAt?, truncated?}` | `buttons`: subset of `once \| always \| reject`. `always` is offered only when the call can be remembered (one bot, one tool, one target); it is never offered for a shell command (`bash`), for `run_privileged`, or for a write outside scratch. A card replayed to a reconnecting client carries the same `buttons` it was first sent with. Optional, all additive: `source` is a list of `{kind, label?}` (newest first; `kind`: `web \| email \| agent \| attachment \| connector \| scheduled \| unknown`) naming the untrusted input the run read before this call, with `label` already one clean line; `tier` is 1 (an undoable change), 2 (sends data out or cannot be undone) or 3 (runs a command); `expiresAt` is an ISO time, 10 minutes after the card for a chat turn and 30 for a background job, and past it the answer is no (an expired card is a denial, and the bot is told so); `truncated` is true when the preview hides part of the call, and the client asks `approval.full` and shows it before Allow once. A card replayed on reconnect keeps the same values. |
 | `approval.closed` | `{requestID, kind, reason}` | The card for an `approval.request` or `form.request` is no longer actionable; clients remove it. `requestID` is the `apr_...` id of the approval, or the id of the form. `kind`: `approval \| form`. `reason`: `decided` (an answer was recorded, here or on another device) `\| expired` (it timed out) `\| cancelled` (its turn ended or was stopped). Additive in v2 (no version bump); clients that predate it ignore it as an unknown frame. |
 | `secret.request` | `{requestID, purpose, command, kind, expiresAt, threadID?, conversationID?}` | A command needs the owner's password. The frame carries no secret; the owner types it into a secure field. Replayable on reconnect; expires after two minutes. |
 | `secret.cancel` | `{requestID, reason}` | The prompt was resolved, expired, cancelled, or its turn stopped. Replayable. |
@@ -211,8 +216,11 @@ accountLabel?, error?, connectedAt?}`.
 | `conversation.history.ok` | `{conversationID, messages: [{id, role, text, createdAt, turnID?, sessionID?, stopReason?}], runningTurn?: {turnID, threadID, agentID}}` | Answer to `conversation.history`; addressed to the requester. Clients render a session divider wherever consecutive `sessionID`s differ. Rows the server fed a turn (a scheduled job's instructions, a delegated task's wake text) are stored with role `system` and are left out; system notices the app posted to the channel (an interrupted reply, a handoff) are kept. `stopReason` is as on `thread.history.ok`. `runningTurn` (additive in v2) names the turn running in this conversation when there is one, so a client that reloads mid-turn can show Writing and Stop at once; `msg.cancel` with its `turnID` stops it. |
 | `thread.export.ok` | `{conversationID, url, token, records, createdAt}` | Answer to `thread.export`; addressed to the requester, not replayed. `url` is absolute and served by this daemon at `GET /share/<token>`; the token is the only access control on the file, so it is never logged or replayed. |
 | `job.list.ok` | `{jobs: [...]}` | Answer to `job.list`, `job.set`, or `job.delete`; addressed to the requester. Each job also carries, additively: `dailyAt` (`"HH:MM"` in the server's time zone, for a wall-clock recurrence), `days` (with `dailyAt`: the weekdays it fires on as `sun`..`sat`; absent means every day), and `internal` (`true` for the daemon's own housekeeping: `tagger`, `memory.embed`, `memory.consolidate`, `summary.rollup`, `rollover.summarize`, `db.backup`, `harness.review`; the server always sends it, and a job without it is the owner's). A job with `everyMs` recurs on an interval instead. |
-| `approval.rules.list.ok` | `{rules: [{id, agentID, agentName, toolName, target, createdAt}]}` | Answer to `approval.rules.list`; addressed to the requester, not replayed. A rule is scoped to one bot, one tool and one target (the exact command, the resolved path, or the recipient list). `agentName` is `null` when the bot no longer exists. |
+| `approval.rules.list.ok` | `{rules: [{id, agentID, agentName, toolName, target, createdAt, resourcePattern?}]}` | Answer to `approval.rules.list`; addressed to the requester, not replayed. A rule is scoped to one bot, one tool and one target (the exact command, the resolved path, or the recipient list). `agentName` is `null` when the bot no longer exists. |
 | `approval.rule.revoke.ok` | `{id}` | Answer to `approval.rule.revoke`; addressed to the requester, not replayed. |
+| `approval.full.ok` | `{requestID, text, cut?}` | Answer to `approval.full`; addressed to the requester, not replayed. `text` is the whole call, every invisible character escaped as on the card; `cut` is true when even this text hit the size limit (1 MB). Additive in v2. |
+| `policy.pause.ok` | `{paused, changedAt?, stopped, bots: [{agentID, name, enabled, runningTurns, scheduledJobs}]}` | The pause state: all bots paused or not, and every bot's on/off state with what turning it off would stop (`runningTurns`, `scheduledJobs`: the counts for the "Turn off Ava?" dialog). Broadcast and replayable when it changes, and sent to a client after `hello`; `stopped` is how many running turns the change that caused the frame stopped (0 for a read or a hello). Additive in v2. |
+| `spend.status.ok` | `{day, resetsAt, timeZone, caps: {dayUsd, perBotDayUsd, perJobUsd}, daySpentUsd, bots: [{agentID, spentUsd, capUsd}], unpricedCalls}` | Today's spend (the server's local day) against the caps; a cap of `null` is no cap. Spend counts priced calls only; `unpricedCalls` says how many calls had no price. Answers `spend.status`, and is broadcast after `spend.caps.set`. An `error` with code `spend_unavailable` answers when the build has no spend ledger. Additive in v2. |
 | `task.list.ok` | `{tasks: [...], lists: [...]}` | Task snapshots include due date, deadline, priority, workflow status (`not_started`, `in_progress`, `ai_review`), current progress note, list/collection, labels, optional parent, notes, reminder time, repeat cadence and attachment IDs. Lists include open task counts. A delegation task also carries `ownerAgentId`, `origin`, `intent`, `delegateState`, `jobId`, `result` and `resultRedacted`. `intent` is what the delegation is for (`request`, `result`, `question`, `status`, `fyi`) and reads as `request` when absent. The owner sees every result; `resultRedacted` is true when a result exists that this viewer may not see. |
 | `task.create.ok` | `{task: {...}}` | Newly persisted task. |
 | `task.list.create.ok` | `{lists: [...]}` | Updated task list navigation. |
@@ -258,14 +266,18 @@ bubble. A client that ignores `reset` still shows the right answer: the sealing
 `unknown_provider`, `invalid_key`, `provider_exists`, `provider_storage`, `provider_auth`,
 `unknown_plugin`, `unknown_connection`, `plugin_not_configured`, `plugin_unavailable`,
 `plugin_connect_failed`, `unknown_background`, `unknown_channel`, `invalid_attachment`,
-`invalid_domains`, `resync_gap`, `not_found`, `not_running`, `internal`.
+`invalid_domains`, `resync_gap`, `not_found`, `not_running`, `agent_off`, `paused`, `bad_cap`, `spend_unavailable`, `internal`.
 
 The four codes that answer one client frame (checked in `apps/server/src/ws/dispatch.ts`):
 
 - `not_running`: `msg.cancel` names a turn that is not running. It finished, never existed, or the server restarted.
 - `unknown_request`: `approve.reply` or `form.answer` names a request that is not pending any more (decided, expired, or its turn has ended). `secret.reply` or `secret.cancel` names a secret prompt that is not pending.
 - `already_running`: `job.set` with `action: "run"` on a job that is running now. Nothing is queued.
-- `not_found`: `approval.rule.revoke` names an unknown or already revoked rule.
+- `not_found`: `approval.rule.revoke` names an unknown or already revoked rule, or `approval.full` names a card that is gone.
+- `agent_off`: `msg.send` addresses a bot the owner turned off. The message is not stored; the text says to turn the bot on.
+- `paused`: `session.new` or `bind.direct` (which summarise with the model) while all bots are paused, or while the pause state cannot be read (which counts as paused).
+- `bad_cap`: `spend.caps.set` has a cap the server cannot use (a bot's daily cap above the daily cap). Nothing changed.
+- `spend_unavailable`: `spend.status` or `spend.caps.set` on a build with no spend ledger.
 
 ## Versioning
 
@@ -286,6 +298,38 @@ connection, not the shared stream: they consume a `seq` like every frame but
 are skipped on replay. A client never "missed" a reply addressed to someone
 else. Everything else — turns, tokens, tool strips, approvals, notifications —
 is replayable.
+
+### Pause, per-bot off and approval expiry (additive v2 extension, Sprint 2)
+
+One switch pauses everything and any bot can be turned off. Both are stored in the
+database, so `agni pause` / `agni resume` from a terminal works on a running server
+(the server notices within a second). While paused:
+
+- running turns are stopped (their `turn.end` has `stopReason: "cancelled"`), and each gets
+  a `status.update` `Stopped: you paused all bots. Work done so far is kept.` in its channel
+  (`Stopped: you turned <bot> off.` for one bot);
+- a `msg.send` is accepted and kept, a `status.update` says `Waiting: bots are paused.`, and
+  the messages are answered in order after `policy.pause` with `paused: false`;
+- a scheduled job of a paused or switched-off bot that comes due is skipped and recorded as
+  `skipped (paused)` or `skipped (bot off)`; it does not run late on resume (a recurring job
+  waits for its next slot). Housekeeping, task reminders and the morning brief start no bot
+  and go on;
+- an approval card that belongs to a stopped turn is closed (`approval.closed`, `cancelled`); a late
+  answer to it is an `unknown_request` error, as for any card whose turn ended.
+
+A pause made with `agni pause` on the command line stops running turns within a second and starts
+held messages within a second of `agni resume`, but sends no per-turn `Stopped:` notice (the turn's
+`turn.end` still says `cancelled`).
+
+A pause check that cannot read its state fails closed: it counts as paused. `agni`, the old id of the main assistant, and `ea` are one bot, so turning one off turns off the other. Housekeeping that calls the model (tagging, summaries, embedding) also waits while everything is paused.
+
+Pause-all and per-bot off are independent: resuming all does not turn on a bot that was off.
+A client learns the state from `policy.pause.ok` after `hello` and whenever it changes;
+`agents.update` carries `enabled: false` on a bot that is off.
+
+Approval cards expire: 10 minutes for a chat turn, 30 for a background job (`expiresAt` on
+`approval.request`). Expiry is a denial, not a pass: the call does not run and the bot is told
+no. The audit log (`agni audit verify`) records approvals, config changes, pause and resume.
 
 ### Attachments (additive v2 extension)
 
