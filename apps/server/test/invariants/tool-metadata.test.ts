@@ -8,14 +8,15 @@
  *   - Tools that read the outside world, read private data, or change something
  *     outside the app are classed as such, and effectors can name what they touch.
  *
- * Waits for S2-01: tool metadata is expected as `meta` on the tool definition
- * (the frozen `ToolMeta` type in `policy/tool-meta.ts`) or from
- * `policy/metadata.ts`. `metaOf` below is the single place that reads it.
+ * The metadata is the row `policy/metadata.ts` keeps per tool (or a `meta` the tool
+ * definition carries), read the way the engine reads it: `policyFor(name, tool.meta)`.
+ * `metaOf` below is the single place that does it.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { DEFAULT_AGENT_TOOLS, IMPLICIT_AGENT_TOOLS, PERSONAS } from "../../src/agent/personas";
 import { openDatabase } from "../../src/db";
+import { assessCall, policyFor, toolsMissingMetadata } from "../../src/policy/metadata";
 import type { ToolClass, ToolMeta } from "../../src/policy/tool-meta";
 import { registerAskTool, registerDraftEmailTool } from "../../src/tools/ask-tool";
 import { registerArtifactTool } from "../../src/tools/artifact-tool";
@@ -31,7 +32,6 @@ import { registerScratchTools } from "../../src/tools/scratch-tool";
 import { registerSecureExecTool } from "../../src/tools/secure-exec-tool";
 import { buildTaskToolRegistry, registerLoadTools } from "../../src/tools/task-registry";
 import { createUpdateAgentTool } from "../../src/tools/update-agent-tool";
-import { loadPolicyModule } from "./support";
 
 let db: Database | undefined;
 afterEach(() => { db?.close(); db = undefined; });
@@ -68,31 +68,18 @@ function everyTool(): ToolDefinition<never, unknown>[] {
   return registry.list();
 }
 
-/** The metadata of a tool, wherever Sprint 2 puts it: on the definition, or from `policy/metadata.ts`. */
-async function metaOf(definition: ToolDefinition<never, unknown>): Promise<ToolMeta | undefined> {
-  const own = (definition as { meta?: ToolMeta }).meta;
-  if (own) return own;
-  const resolve = await metadataResolver();
-  return resolve?.(definition.name);
+/**
+ * The row the engine uses for a tool: `policyFor(name, tool.meta)`, the same call
+ * `policy/engine.ts` and `agent/task-loop.ts` make. Null means the engine finds no
+ * row and treats the tool as unknown (tier 3).
+ */
+function metaOf(definition: ToolDefinition<never, unknown>): ToolMeta | null {
+  return policyFor(definition.name, definition.meta);
 }
 
-type Resolver = (name: string) => ToolMeta | undefined;
-
-async function metadataResolver(): Promise<Resolver | undefined> {
-  let module: Record<string, unknown>;
-  try {
-    module = await loadPolicyModule("metadata");
-  } catch {
-    return undefined;
-  }
-  for (const key of ["metaFor", "toolMeta", "getToolMeta", "metadataFor", "resolveToolMeta", "metaOf", "toolMetaFor"]) {
-    const candidate = module[key];
-    if (typeof candidate === "function") return candidate as Resolver;
-  }
-  const table = module.TOOL_META ?? module.toolMeta ?? module.META;
-  if (table instanceof Map) return (name) => table.get(name) as ToolMeta | undefined;
-  if (table && typeof table === "object") return (name) => (table as Record<string, ToolMeta>)[name];
-  return undefined;
+/** The tier a call to `name` is judged at when nothing is known about its arguments, as the engine works it out. */
+function effectiveTier(name: string, args: Record<string, unknown> = {}): number {
+  return assessCall(policyFor(name), args).tier;
 }
 
 const CLASSES: ToolClass[] = ["untrusted-reader", "private-reader", "effector", "inert"];
@@ -108,12 +95,11 @@ describe("INV-03 the collector sees every tool a bot can be given", () => {
   });
 });
 
-// waits for S2-1a (S2-01: `meta` on every tool, `policy/metadata.ts`)
 describe("INV-03 every registered tool has a class and a tier", () => {
   test("none is missing metadata, and each has a known class and a tier from 0 to 3", async () => {
     const problems: string[] = [];
     for (const tool of everyTool()) {
-      const meta = await metaOf(tool);
+      const meta = metaOf(tool);
       if (!meta) { problems.push(`${tool.name}: no metadata`); continue; }
       if (!Array.isArray(meta.classes) || meta.classes.length === 0) problems.push(`${tool.name}: no classes`);
       else for (const entry of meta.classes) if (!CLASSES.includes(entry)) problems.push(`${tool.name}: unknown class "${entry}"`);
@@ -123,7 +109,6 @@ describe("INV-03 every registered tool has a class and a tier", () => {
   });
 });
 
-// waits for S2-1a (S2-01)
 describe("INV-03 the tools that matter are classed as what they are", () => {
   const expectations: Array<{ tools: string[]; cls: ToolClass; why: string }> = [
     { tools: ["web_search", "web_fetch", "deep_research", "mail_search", "mail_read"], cls: "untrusted-reader", why: "text an outsider can write" },
@@ -137,7 +122,7 @@ describe("INV-03 the tools that matter are classed as what they are", () => {
       const wrong: string[] = [];
       for (const name of tools) {
         const tool = byName.get(name);
-        const meta = tool ? await metaOf(tool) : undefined;
+        const meta = tool ? metaOf(tool) : undefined;
         if (!meta) wrong.push(`${name}: no metadata`);
         else if (!meta.classes.includes(cls)) wrong.push(`${name}: classes are [${meta.classes.join(", ")}]`);
       }
@@ -147,7 +132,7 @@ describe("INV-03 the tools that matter are classed as what they are", () => {
 
   test("shell is tier 3, a send from a mailbox is at least tier 2, the free helpers are tier 0", async () => {
     const byName = new Map(everyTool().map((tool) => [tool.name, tool]));
-    const tier = async (name: string): Promise<number | undefined> => (await metaOf(byName.get(name)!))?.tier;
+    const tier = async (name: string): Promise<number | undefined> => metaOf(byName.get(name)!)?.tier;
     expect(await tier("bash"), "bash").toBe(3);
     expect(await tier("run_privileged"), "run_privileged").toBe(3);
     expect((await tier("mail_send")) ?? -1, "mail_send").toBeGreaterThanOrEqual(2);
@@ -155,11 +140,10 @@ describe("INV-03 the tools that matter are classed as what they are", () => {
   });
 });
 
-// waits for S2-1a (S2-01: resource extractors)
 describe("INV-03 effectors say what they touch", () => {
   test("mail_send names its recipients, web_fetch its host, write_file its path", async () => {
     const byName = new Map(everyTool().map((tool) => [tool.name, tool]));
-    const resourcesOf = async (name: string, args: Record<string, unknown>) => (await metaOf(byName.get(name)!))?.resources?.(args) ?? [];
+    const resourcesOf = async (name: string, args: Record<string, unknown>) => metaOf(byName.get(name)!)?.resources?.(args) ?? [];
     const mail = await resourcesOf("mail_send", { to: ["a@example.org", "b@example.org"], subject: "s", body: "b" });
     expect(mail.map((entry) => entry.value).join(" "), "mail_send did not name its recipients").toContain("a@example.org");
     expect(mail.every((entry) => entry.kind === "recipient"), "mail_send resources are not recipients").toBe(true);
@@ -170,20 +154,22 @@ describe("INV-03 effectors say what they touch", () => {
   });
 });
 
-// waits for S2-1a (S2-01: unknown tool tier 3, `mcp_` prefix tier 2)
 describe("INV-03 a tool the policy does not know is tier 3; an MCP tool is tier 2", () => {
   test("an unknown name resolves to tier 3 (fail closed)", async () => {
-    const resolve = await metadataResolver();
-    if (!resolve) throw new Error("no metadata resolver in policy/metadata.ts yet (waits for S2-01)");
-    expect(resolve("a_tool_nobody_registered")?.tier, "an unknown tool did not gate at tier 3").toBe(3);
-    expect(resolve("")?.tier).toBe(3);
-    expect(resolve("MCP_lookalike")?.tier, "a name that only looks like an MCP tool got an MCP tier").toBe(3);
+    expect(toolsMissingMetadata(["a_tool_nobody_registered", "", "MCP_lookalike", "mcp_x"]), "an unknown name found a row, or an MCP name did not").toEqual(["a_tool_nobody_registered", "", "MCP_lookalike"]);
+    expect(effectiveTier("a_tool_nobody_registered"), "an unknown tool did not gate at tier 3").toBe(3);
+    expect(effectiveTier("")).toBe(3);
+    expect(effectiveTier("MCP_lookalike"), "a name that only looks like an MCP tool got an MCP tier").toBe(3);
+    expect(assessCall(policyFor("a_tool_nobody_registered"), {}).asks, "an unknown tool does not ask the owner").toBe(true);
   });
 
   test("an mcp_ tool gets tier 2 by its prefix, whatever it calls itself", async () => {
-    const resolve = await metadataResolver();
-    if (!resolve) throw new Error("no metadata resolver in policy/metadata.ts yet (waits for S2-01)");
-    for (const name of ["mcp_github_create_issue", "mcp_files_read", "mcp_x"]) expect(resolve(name)?.tier, name).toBe(2);
+    for (const name of ["mcp_github_create_issue", "mcp_files_read", "mcp_x"]) {
+      expect(effectiveTier(name), name).toBe(2);
+      expect(assessCall(policyFor(name), {}).asks, `${name} does not ask`).toBe(true);
+      // Whatever the owner trusts, what an MCP tool returns is outside text: it marks the run.
+      expect(policyFor(name)?.taintedBy, `${name} results do not taint the run`).toBeDefined();
+    }
   });
 
   test("an MCP tool registered with a read-only claim in its description is not lowered below tier 2", async () => {
@@ -197,7 +183,7 @@ describe("INV-03 a tool the policy does not know is tier 3; an MCP tool is tier 
       handler: async () => ({ ok: true }),
     });
     const tool = registry.get("mcp_notes_delete_all")!;
-    const meta = await metaOf(tool as ToolDefinition<never, unknown>);
-    expect(meta?.tier, "an MCP tool's own claim lowered its tier").toBeGreaterThanOrEqual(2);
+    expect(metaOf(tool as ToolDefinition<never, unknown>), "an MCP tool has no row").not.toBeNull();
+    expect(effectiveTier("mcp_notes_delete_all"), "an MCP tool's own claim lowered its tier").toBeGreaterThanOrEqual(2);
   });
 });

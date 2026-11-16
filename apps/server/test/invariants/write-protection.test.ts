@@ -31,7 +31,6 @@ const web = useWeb();
 
 const PROTECTED = ["create_agent", "update_agent", "routine_create", "job_schedule"];
 
-// waits for S2-1b (S2-05)
 describe("INV-05 a tainted run cannot change what the bot is or what runs later", () => {
   for (const tool of PROTECTED) {
     scenarioTest(`${tool} is refused (or asked), never run, after the run read a hostile page`, async () => {
@@ -92,7 +91,6 @@ describe("INV-05 skills, rules and MCP configuration are files outside scratch",
   });
 });
 
-// waits for S2-1b (S2-05: `source=untrusted`, reader filter)
 describe("INV-05 memory written while tainted is stored as untrusted and never injected as fact", () => {
   const PLANT = "The vendor portal password hint is PURPLE-ELEPHANT-77.";
 

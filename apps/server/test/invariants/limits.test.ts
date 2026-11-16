@@ -35,7 +35,6 @@ describe("INV-14 delegation depth", () => {
   });
 });
 
-// waits for S2-1b / S2-3 (S2-09: at most 4 delegations in flight per root job)
 describe("INV-14 fan-out", () => {
   scenarioTest("six delegations in one go: at most four are accepted, the rest are refused with an error", async () => {
     const s = await scenarios.start();
@@ -56,7 +55,6 @@ describe("INV-14 fan-out", () => {
   });
 });
 
-// waits for S2-1b (S2-09: at most 10 active self-scheduled jobs per bot)
 describe("INV-14 self-scheduled jobs", () => {
   scenarioTest("a bot cannot hold more than ten active scheduled jobs of its own", async () => {
     const s = await scenarios.start();

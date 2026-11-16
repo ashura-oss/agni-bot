@@ -103,24 +103,22 @@ describe("INV-13 a long command's card shows its tail, and says when it cut some
     expect(existsSync(s.outside("tail-marker")), "the command ran without approval").toBe(false);
   });
 
-  // waits for S2-2 (`truncated` on `approval.request`)
-  scenarioTest("the card is marked as cut when it is, and not when it is whole (waits for S2-2: `truncated`)", async () => {
+  // Two turns, not one: a refused command is a denial for the rest of its run (INV-07), and the second command would share it.
+  scenarioTest("the card is marked as cut when it is, and not when it is whole (`truncated`)", async () => {
     const s = await scenarios.start();
     const a = await s.connect({ label: "A" });
     const marker = shell(s.outside("cut-marker"));
-    s.model.queue(...scripted(true, [
-      call("bash", { command: `${LONG}${marker}` }, "call_cut"),
-      call("bash", { command: `touch ${shell(s.outside("whole-marker"))}` }, "call_whole"),
-      say("Done."),
-    ]));
-    const report = await playTurn(s, a, "run two commands");
-    expect(report.cards.length).toBe(2);
-    expect(report.cards[0]!.raw.truncated, "the cut card did not say it was cut").toBe(true);
-    expect(report.cards[1]!.raw.truncated ?? false, "a whole card claimed to be cut").toBe(false);
+    s.model.queue(...scripted(true, [call("bash", { command: `${LONG}${marker}` }, "call_cut"), say("Done.")]));
+    const cut = await playTurn(s, a, "run the long command");
+    s.model.queue(...scripted(true, [call("bash", { command: `touch ${shell(s.outside("whole-marker"))}` }, "call_whole"), say("Done.")]));
+    const whole = await playTurn(s, a, "run the short command");
+    expect(cut.cards.length).toBe(1);
+    expect(whole.cards.length).toBe(1);
+    expect(cut.cards[0]!.raw.truncated, "the cut card did not say it was cut").toBe(true);
+    expect(whole.cards[0]!.raw.truncated ?? false, "a whole card claimed to be cut").toBe(false);
   });
 
-  // waits for S2-2 (`tier`, `expiresAt` on `approval.request`)
-  scenarioTest("a tier and an expiry ride on every card (waits for S2-2: `tier`, `expiresAt`)", async () => {
+  scenarioTest("a tier and an expiry ride on every card (`tier`, `expiresAt`)", async () => {
     const s = await scenarios.start();
     const a = await s.connect({ label: "A" });
     s.model.queue(...scripted(true, [call("bash", { command: `touch ${shell(s.outside("meta-marker"))}` }, "call_meta"), say("Done.")]));

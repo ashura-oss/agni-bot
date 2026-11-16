@@ -400,7 +400,7 @@ describe("INV-09 isPrivateAddress", () => {
     expect(wrong.slice(0, 5), "non-addresses treated as safe to fetch").toEqual([]);
   });
 
-  // beyond bug.md H1: no Sprint 2 task owns it yet (fetch-url.ts)
+  // beyond bug.md H1 (fetch-url.ts). 64:ff9b:1::/48 is the local-use NAT64 prefix (RFC 8215): not globally reachable, so never public.
   test("IPv6 forms that embed a private IPv4 address are private (beyond bug.md H1: 6to4 and IPv4-translated)", () => {
     const embedded = [
       "2002:7f00:0001::", // 6to4 of 127.0.0.1

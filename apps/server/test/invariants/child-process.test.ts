@@ -42,7 +42,6 @@ async function withCanaries<T>(body: () => Promise<T>): Promise<T> {
   }
 }
 
-// waits for S2-4 (S2-14: environment allowlist)
 describe("INV-08 child processes see only allowlisted environment variables", () => {
   scenarioTest("`printenv` in an approved shell shows none of the planted secrets", async () => {
     await withCanaries(async () => {
@@ -72,7 +71,6 @@ describe("INV-08 child processes see only allowlisted environment variables", ()
   });
 });
 
-// waits for S2-4 (S2-14: server-chosen cwd)
 describe("INV-08 the working directory is the server's choice", () => {
   scenarioTest("a command given a `cwd` outside scratch does not run there", async () => {
     const s = await scenarios.start();

@@ -74,6 +74,12 @@ async function runProbes(
 /** The probes a bot holds, plus those it does not (to prove the capability check). */
 const held = (bot: string): Probe[] => PROBES.filter((probe) => probe.holders.includes(bot));
 
+/**
+ * A page a bot fetches is outside text: it marks the run that read it, so every call after it is judged as a
+ * tainted run's. In a table of untainted calls the reader goes last, or it would taint the rows below it.
+ */
+const readersLast = (probes: Probe[]): Probe[] => [...probes.filter((probe) => probe.tool !== "web_fetch"), ...probes.filter((probe) => probe.tool === "web_fetch")];
+
 function describeCell(cell: Cell, handling: Handling): string {
   return `${cell.probe.id}: ${handling}`;
 }
@@ -83,7 +89,7 @@ describe("INV-04 untainted runs follow their tier (the baseline Sprint 2 must no
     scenarioTest(`${bot}: free tools run free, gated tools ask, in an untainted run`, async () => {
       const s = await scenarios.start();
       const a = await s.connect({ label: "A" });
-      const { cells, report } = await runProbes(s, a, web, bot, false, held(bot));
+      const { cells, report } = await runProbes(s, a, web, bot, false, readersLast(held(bot)));
       const problems: string[] = [];
       for (const cell of cells) {
         const record = report.calls.find((entry) => entry.callID === cell.callID)!;
@@ -96,7 +102,6 @@ describe("INV-04 untainted runs follow their tier (the baseline Sprint 2 must no
   }
 });
 
-// waits for S2-1a and S2-1b (S2-02 engine, S2-03 taint, S2-04 Rule-of-Two gate)
 describe("INV-04 a tainted run that holds private data is gated on every effector", () => {
   for (const bot of BOTS_WITH_A_WEB_READER) {
     scenarioTest(`${bot}: after a hostile page and a private read, every effector is gated, never silent, and the card names the page`, async () => {
@@ -155,7 +160,6 @@ describe("INV-04 a bot only uses the tools it holds, tainted or not", () => {
   }
 });
 
-// waits for S2-1b (S2-04, decision D1)
 describe("INV-D1 a send from Agni's own mailbox is free only when the run is untainted", () => {
   const own = PROBES.find((entry) => entry.id === "mail_send from Agni's own mailbox")!;
 
@@ -194,7 +198,6 @@ describe("INV-D1 a send from Agni's own mailbox is free only when the run is unt
   });
 });
 
-// waits for S2-1b (S2-04 egress binding)
 describe("INV-04b egress binding: a tainted run reaches only places the owner named", () => {
   scenarioTest("web_fetch: a host in the owner's own words is not blocked; any other host is gated", async () => {
     const s = await scenarios.start();

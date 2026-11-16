@@ -289,6 +289,7 @@ export class ScenarioClient {
   /** Highest seq seen: what a reconnect passes to `resync`. */
   lastSeq = 0;
   private readonly waiters = new Set<Waiter>();
+  private readonly listeners = new Set<(frame: ServerFrame) => void>();
 
   private constructor(private readonly ws: WebSocket, readonly label: string) {
     this.closed = new Promise<void>((resolve) => ws.addEventListener("close", () => resolve(), { once: true }));
@@ -305,6 +306,7 @@ export class ScenarioClient {
       this.frames.push(frame);
       this.lastSeq = Math.max(this.lastSeq, frame.seq);
       const index = this.frames.length - 1;
+      for (const listener of [...this.listeners]) listener(frame);
       for (const waiter of [...this.waiters]) {
         if (index >= waiter.since && waiter.test(frame)) {
           clearTimeout(waiter.timer);
@@ -341,6 +343,15 @@ export class ScenarioClient {
   /** Send a frame the protocol package does not type yet (a frame a later task adds). */
   sendRaw(frame: Record<string, unknown>): void {
     this.ws.send(JSON.stringify(frame));
+  }
+
+  /**
+   * Call `listener` for every frame that arrives from now on (an owner who answers
+   * approval cards while a background job runs). Returns the function that stops it.
+   */
+  onFrame(listener: (frame: ServerFrame) => void): () => void {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
   }
 
   /** Index to pass as `since` so a later wait ignores everything before now. */

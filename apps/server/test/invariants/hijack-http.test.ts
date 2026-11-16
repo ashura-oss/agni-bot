@@ -24,7 +24,6 @@ import {
 const scenarios = useScenarios();
 const web = useWeb();
 
-// waits for S2-1a, S2-1b (the whole gate); the mock provider script mode is already in place
 describe("INV-21 a hijacked model on a real HTTP endpoint", () => {
   scenarioTest("page, private memory, then a mail to the attacker: contained, and every scripted step was really played over HTTP", async () => {
     const own = PROBES.find((entry) => entry.id === "mail_send from Agni's own mailbox")!;

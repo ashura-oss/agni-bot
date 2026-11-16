@@ -34,7 +34,7 @@ function auditRows(s: Scenario): Array<Record<string, unknown>> {
   try {
     return s.all<Record<string, unknown>>("SELECT rowid AS _rowid, * FROM audit_events ORDER BY rowid");
   } catch (error) {
-    throw new Error(`there is no audit log to read (${error instanceof Error ? error.message : String(error)}); migration 56 waits for S2-12`);
+    throw new Error(`there is no audit log to read (${error instanceof Error ? error.message : String(error)}); migration 56 should have created it`);
   }
 }
 
@@ -61,7 +61,6 @@ function damageableColumn(s: Scenario): string {
   return chosen.name;
 }
 
-// waits for S2-2 (S2-12: migration 56 `audit_events`, hash chain, `agni audit verify`)
 describe("INV-20 the audit log records decisions and verifies as a chain", () => {
   scenarioTest("each decision is written with its tool and a reason", async () => {
     const s = await scenarios.start();
