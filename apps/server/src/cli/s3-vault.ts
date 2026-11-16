@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { agniHome } from "../home";
 import { DatabaseBehindError, openDatabaseForCLI } from "../db";
 import { loadConfig } from "../config";
+import { isProcessAlive, pidFilePath, readPidFile } from "../daemon";
 import { setEnvFileValues } from "../secrets/env";
 import { runVaultExport, runVaultMigrations } from "../secrets/migrate";
 import { VaultError, lockVault, unlockVault, vaultExists, vaultStatus } from "../secrets";
@@ -72,7 +73,21 @@ export function optionalDatabase(path: string = loadConfig().dbPath) {
   }
 }
 
+/**
+ * `migrate` and `export` rewrite the database file and the credential files, and a
+ * running daemon holds both open (and would keep serving the old values from memory).
+ * A refusal, or undefined when no live daemon is recorded. Read-only: the pid file
+ * and a liveness probe; nothing is signalled.
+ */
+export function daemonRunningRefusal(pidPath: string = pidFilePath(loadConfig())): string | undefined {
+  const info = readPidFile(pidPath);
+  if (!info || !isProcessAlive(info.pid)) return undefined;
+  return `the Agni daemon is running (pid ${info.pid}), so stop the daemon first: run \`agni daemon stop\`, then run this command again.`;
+}
+
 async function migrate(): Promise<void> {
+  const running = daemonRunningRefusal();
+  if (running) return fail(`migration not started: ${running}`);
   // The database first: a refusal there must not leave a new, empty vault behind.
   let db: ReturnType<typeof optionalDatabase>;
   try {
@@ -132,6 +147,8 @@ async function exportSecrets(args: string[]): Promise<void> {
     );
     return;
   }
+  const running = daemonRunningRefusal();
+  if (running) return fail(`export not started: ${running}`);
   if (!vaultExists()) {
     fail("there is no vault to export.");
     return;
