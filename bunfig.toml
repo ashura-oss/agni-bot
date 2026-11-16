@@ -1,2 +1,26 @@
 [test]
 preload = ["./apps/server/test/preload.ts"]
+
+# Install policy (Sprint 3, S3-11). Keys per https://bun.sh/docs/runtime/bunfig
+# ([install] section), checked against Bun 1.4.3.
+[install]
+# A version published less than 14 days ago is not resolved (seconds: 14 * 24 * 3600).
+# Most hijacked-package releases are pulled within days, so waiting is the cheap
+# defence. A package the owner must have sooner is named in
+# minimumReleaseAgeExcludes (a bare name exempts every version; name@1.2.3 one).
+# Locked versions in bun.lock are not re-resolved, so this only gates new
+# versions and `bun update`.
+minimumReleaseAge = 1209600
+minimumReleaseAgeExcludes = []
+
+# No dependency runs install scripts. `ignoreScripts` is a documented [install]
+# key (bun.sh/docs/runtime/bunfig) and was checked on Bun 1.4.3: a dependency
+# listed in trustedDependencies ran its postinstall without the key and did not
+# with it (scripts/install-policy.test.ts repeats that check). It turns the whole
+# mechanism off, so a new dependency that wants a postinstall does nothing
+# instead of running code. The root package.json also sets
+# "trustedDependencies": [] so Bun's built-in list of default-trusted names does
+# not apply if this key is ever removed. bunfig.toml has no key for the
+# allowlist itself; if one dependency ever must run a script, name it in
+# package.json and set this key to false for that one install, on purpose.
+ignoreScripts = true

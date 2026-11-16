@@ -1,0 +1,62 @@
+rules:
+  - id: agni-env-spread-to-child
+    languages: [typescript]
+    severity: ERROR
+    message: >-
+      A child process inherits the whole of process.env: either it is passed on
+      (env: process.env, a spread of it) or the call sets no env option at all,
+      which inherits it just the same. The server's environment carries the
+      provider keys (and, in vault mode, the unlocked secrets), so any child,
+      and anything a model gets that child to run, can read them. Pass
+      env explicitly, built from an allowlist: use scrubbedShellEnv() from
+      util/scrubbed-env.ts, or list the few names the child needs. A child
+      that is another copy of Agni (the daemon) and truly needs the whole
+      environment may carry a nosemgrep comment with the reason.
+    metadata:
+      category: security
+      cwe: "CWE-526: Exposure of Sensitive Information Through Environmental Variables"
+      owasp: "A02:2021 - Cryptographic Failures"
+      sprint: S3-11
+    patterns:
+      - pattern-either:
+          # 1. The whole environment is passed on.
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      $F(..., {..., env: process.env, ...}, ...)
+                  - pattern: |
+                      $F(..., {..., env: Bun.env, ...}, ...)
+                  - pattern: |
+                      $F(..., {..., env: {..., ...process.env, ...}, ...}, ...)
+                  - pattern: |
+                      $F(..., {..., env: {..., ...Bun.env, ...}, ...}, ...)
+                  - pattern: |
+                      $F(..., {..., env: Object.assign({}, process.env, ...), ...}, ...)
+                  - pattern: |
+                      $ENV = {..., ...process.env, ...};
+                      ...
+                      $F(..., {..., env: $ENV, ...}, ...)
+                  - pattern: |
+                      $ENV = {..., ...Bun.env, ...};
+                      ...
+                      $F(..., {..., env: $ENV, ...}, ...)
+          # 2. No env option: the child inherits everything. Only calls whose
+          #    options are visible in the call are judged; options held in a
+          #    variable (spawn(cmd, args, opts)) cannot be seen and are not flagged.
+          - patterns:
+              - pattern-either:
+                  # an options object with no env key and no spread of unknown options
+                  - patterns:
+                      - pattern: $F(..., {...}, ...)
+                      - pattern-not: |
+                          $F(..., {..., env: $E, ...}, ...)
+                      - pattern-not: |
+                          $F(..., {..., ...$OPTS, ...}, ...)
+                  # no options object at all
+                  - pattern: $F($CMD)
+                  - pattern: $F($CMD, [...])
+                  - pattern: $F($CMD, [...], ($$$CB) => ...)
+                  - pattern: $F($CMD, ($$$CB) => ...)
+      - metavariable-regex:
+          metavariable: $F
+          regex: ^((child_process|cp|childProcess|Bun)\.)?(spawn|spawnSync|exec|execSync|execFile|execFileSync|fork)$
