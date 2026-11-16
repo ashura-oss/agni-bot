@@ -10,7 +10,9 @@ import { join } from "node:path";
 import { afterAll, describe, expect, test } from "bun:test";
 import { scenarioTest, useScenarios, say } from "../scenarios/harness";
 import { canonicalPathKey, foldKey } from "../../src/policy/path-key";
-import { pathResource } from "../../src/policy/resources";
+import { assessCall, policyFor } from "../../src/policy/metadata";
+import type { ToolResource } from "../../src/policy/tool-meta";
+import { pathResource, shellFacts } from "../../src/policy/resources";
 import { call, playTurn, resultJson, scripted } from "./support";
 
 const WINDOWS = process.platform === "win32";
@@ -69,13 +71,32 @@ describe("INV-07 the key is the real path of the longest part that exists", () =
 });
 
 describe("INV-07 a refusal made on one spelling covers every spelling of the file", () => {
-  test("the resource a refusal is recorded under is the same key a later call is matched by", () => {
+  test("every route a refusal is recorded or matched by keys the file as its real path, folded where the file system folds", () => {
     const root = tempRoot();
-    const file = join(root, "Denied.txt");
+    const scratch = join(root, "scratch");
+    mkdirSync(scratch);
+    const file = join(scratch, "Denied.txt");
     writeFileSync(file, "x");
-    // `pathResource` is the one place a path becomes a denial key (recording, matching, and the card all call it).
-    expect(pathResource(file).value).toBe(canonicalPathKey(file, root));
-    if (WINDOWS) expect(pathResource(file.toUpperCase()).value).toBe(pathResource(file.toLowerCase()).value);
+    const saved = process.env.AGNI_SCRATCH_DIR;
+    process.env.AGNI_SCRATCH_DIR = scratch;
+    try {
+      // The oracle is the file system's own answer, not the function under test: the native real path, folded on Windows.
+      const real = realpathSync.native(file);
+      const expected = WINDOWS ? real.toLowerCase() : real;
+      const keyOf = (resources: ToolResource[]): string[] => resources.map((resource) => resource.value);
+      const spellings = ["Denied.txt", file, ...(WINDOWS ? [file.toUpperCase(), file.toLowerCase(), file.replaceAll("\\", "/")] : [])];
+      for (const spelling of spellings) {
+        const routes = {
+          pathResource: keyOf([pathResource(spelling)]),
+          write_file: keyOf(assessCall(policyFor("write_file"), { path: spelling, content: "x" }).resources),
+          read_file: keyOf(assessCall(policyFor("read_file"), { path: spelling }).resources),
+          shell: keyOf(shellFacts(`rm ${shell(spelling)}`, scratch).resources),
+        };
+        expect({ spelling, routes }).toEqual({ spelling, routes: { pathResource: [expected], write_file: [expected], read_file: [expected], shell: [expected] } });
+      }
+    } finally {
+      if (saved === undefined) delete process.env.AGNI_SCRATCH_DIR; else process.env.AGNI_SCRATCH_DIR = saved;
+    }
   });
 
   if (WINDOWS) scenarioTest("after the owner refuses rm of q1, a write_file to Q1 (another case) is refused with no card", async () => {
