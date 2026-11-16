@@ -203,12 +203,12 @@ export function registerTurnJob(runner: JobRunner, deps: TurnJobDeps): void {
     // S1-13: a scheduled run whose gated action was denied or never approved did
     // not do that work. Never record it as done, whatever the model then said.
     const blocked = payload.wakeKey || delegationTaskID ? null : blockedByApproval(deps.db, threadID, startedAt);
-    // A run that ended normally after a real call succeeded did the work another
-    // way (awk denied, then read_file and write_file did it): done, with a note.
+    // A run that ended normally after a later gated call was allowed did the work another
+    // way (awk denied, then an approved write did it): done, with a note to check the result.
     let deniedNote = "";
     if (blocked && result.stopReason !== "needs_input") {
       if (!(blocked.workedAround && result.stopReason === "end")) throw new JobGiveUp(`not done: ${blocked.reason}`);
-      deniedNote = ` (one action was denied: ${blocked.tools.join(", ")}; finished another way)`;
+      deniedNote = ` (a denied step was skipped; check the result: ${blocked.tools.join(", ")})`;
     }
 
     if (result.stopReason === "needs_input") {
@@ -302,24 +302,31 @@ function giveUpIfSideEffects(db: Database, threadID: string, since: string, mess
 }
 
 /**
- * Did the parent thread already read this task's result? `delegate_wait` and
- * `task_status` both hand the terminal result back inside the parent's own turn.
- * The task comes from the call's own arguments; the state from its result,
- * which the loop may have wrapped as `{ truncated, result }` when it was long.
+ * Did the parent thread already read this task's result? `delegate_wait`,
+ * `task_status` and `delegate_task` in wait mode all hand the terminal result
+ * back inside the parent's own turn. The first two name the task in their
+ * arguments; `delegate_task` creates it, so its result names it. The state
+ * comes from the result, which the loop may have wrapped as
+ * `{ truncated, result }` when it was long.
  */
 export function parentAlreadyRead(db: Database, parentThreadID: string, taskID: string): boolean {
   const rows = db
-    .query<{ args: string; result: string | null }, [string]>(
-      `SELECT args, result FROM tool_calls
-       WHERE thread_id = ? AND tool_name IN ('delegate_wait', 'task_status') AND ok = 1
+    .query<{ tool_name: string; args: string; result: string | null }, [string]>(
+      `SELECT tool_name, args, result FROM tool_calls
+       WHERE thread_id = ? AND tool_name IN ('delegate_wait', 'task_status', 'delegate_task') AND ok = 1
        ORDER BY created_at DESC LIMIT 200`,
     )
     .all(parentThreadID);
   return rows.some((row) => {
     const asked = parseObject(row.args);
-    if (asked?.taskID !== taskID) return false;
     const parsed = parseObject(row.result);
     const view = parsed && typeof parsed.result === "object" && parsed.truncated === true ? parseObject(parsed.result) : parsed;
+    if (row.tool_name === "delegate_task") {
+      // Only waiting returns the result; a call that just queued the work read nothing.
+      if (asked?.mode !== "wait" || (view ? view.taskID : /"taskID":"([^"]+)"/.exec(row.result ?? "")?.[1]) !== taskID) return false;
+    } else if (asked?.taskID !== taskID) {
+      return false;
+    }
     // A result cut mid-text no longer parses; its state is still in the part that was kept.
     const state = view ? view.state : /"state":"(\w+)"/.exec(row.result ?? "")?.[1];
     return state === "done" || state === "failed";
@@ -337,15 +344,12 @@ function parseObject(raw: unknown): Record<string, unknown> | null {
   }
 }
 
-/** Tools whose success says nothing about the work being done: loading a schema, a progress line. */
-const NOT_WORK_TOOLS: ReadonlySet<string> = new Set(["load_tools", "say"]);
-
 interface ApprovalBlock {
   /** Why the run was blocked, in words for the job's result. */
   reason: string;
   /** The tools whose calls were refused. */
   tools: string[];
-  /** A real tool call succeeded after the last refusal: the work may have been done another way. */
+  /** A later call that itself needed approval succeeded: the work may have been done another way. */
   workedAround: boolean;
 }
 
@@ -371,14 +375,16 @@ function blockedByApproval(db: Database, threadID: string, since: string): Appro
     : `approval for ${row.tool_name} was not given before the run ended, so it did not run`;
   const last = rows[rows.length - 1]!;
   const after = db
-    .query<{ tool_name: string }, [string, string, number]>(
-      "SELECT tool_name FROM tool_calls WHERE thread_id = ? AND created_at >= ? AND rowid > ? AND ok = 1 AND error IS NULL AND result IS NOT NULL",
+    .query<{ tool_name: string; args: string }, [string, string, number]>(
+      "SELECT tool_name, args FROM tool_calls WHERE thread_id = ? AND created_at >= ? AND rowid > ? AND ok = 1 AND error IS NULL AND result IS NOT NULL",
     )
     .all(threadID, last.created_at, last.rowid);
   return {
     reason,
     tools: [...new Set(rows.map((denied) => denied.tool_name))],
-    workedAround: after.some((call) => !NOT_WORK_TOOLS.has(call.tool_name)),
+    // Only a later call that was itself gated and then allowed counts: reading, searching or
+    // loading a schema after a denial is not the denied work being done another way.
+    workedAround: after.some((call) => gatePolicy.requiresApproval(call.tool_name, parseObject(call.args) ?? {})),
   };
 }
 
@@ -429,14 +435,32 @@ function firstLine(text: string): string {
  * lives in an artifact (DEL-004); the summary is what wakes the parent.
  */
 export function summarizeResult(text: string, artifactID?: string, maxChars = RESULT_MAX_CHARS): string {
-  const cleaned = text.replace(/\s+/g, " ").trim();
+  const cleaned = tidyText(text);
   if (!cleaned) return "(no output)";
   if (cleaned.length <= maxChars) return cleaned;
   // A cut result says where the whole of it is, inside the same limit.
-  // `truncate` adds the ellipsis after the cut, so the cut leaves room for it.
-  if (!artifactID) return truncate(cleaned, maxChars - 1);
+  // The cut leaves room for the ellipsis and, when there is one, the pointer.
+  if (!artifactID) return cutAt(cleaned, maxChars - 1);
   const pointer = `full result: read_artifact ${artifactID}`;
-  return `${truncate(cleaned, maxChars - pointer.length - 2)} ${pointer}`;
+  return `${cutAt(cleaned, maxChars - pointer.length - 2)} ${pointer}`;
+}
+
+/** Trim the text and tidy its spacing, keeping line breaks: lists, code and tables stay readable. */
+function tidyText(text: string): string {
+  return text
+    .replace(/\r\n?/g, "\n")
+    .replace(/[^\S\n]+$/gm, "")
+    .replace(/([^\s])[^\S\n]{2,}/g, "$1 ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/** Cut to at most `max` characters before the ellipsis, at a space or line break when one is near. */
+function cutAt(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const head = text.slice(0, max);
+  const at = Math.max(head.lastIndexOf(" "), head.lastIndexOf("\n"));
+  return `${at > max * 0.8 ? head.slice(0, at) : head}…`;
 }
 
 /** The note the parent agent reads when a delegated task finishes. */
