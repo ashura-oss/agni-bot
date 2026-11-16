@@ -10,6 +10,8 @@
 interface RunningTurn {
   controller: AbortController;
   threadID: string;
+  /** The paired device that started the turn; revoking it stops the turn. */
+  deviceID: string | undefined;
 }
 
 const running = new Map<string, RunningTurn>();
@@ -21,8 +23,8 @@ function notifyIfIdle(): void {
 }
 
 /** Remember a turn's controller until the turn ends. */
-export function registerTurn(turnID: string, threadID: string, controller: AbortController): void {
-  running.set(turnID, { controller, threadID });
+export function registerTurn(turnID: string, threadID: string, controller: AbortController, deviceID?: string): void {
+  running.set(turnID, { controller, threadID, deviceID });
 }
 
 /** Forget a finished turn. A no-op when the entry already belongs to someone else. */
@@ -38,6 +40,32 @@ export function cancelTurn(turnID: string): boolean {
   turn.controller.abort();
   return true;
 }
+
+/** Abort every turn a device started (it was revoked or logged out); returns how many. */
+export function cancelTurnsForDevice(deviceID: string): number {
+  let cancelled = 0;
+  for (const turn of running.values()) {
+    if (turn.deviceID !== deviceID) continue;
+    turn.controller.abort();
+    cancelled += 1;
+  }
+  return cancelled;
+}
+
+/** The devices that have a turn running, so a sweep can check them against revocations. */
+export function runningTurnDeviceIDs(): string[] {
+  return [...new Set([...running.values()].flatMap((turn) => (turn.deviceID ? [turn.deviceID] : [])))];
+}
+
+/**
+ * Databases whose server is stopping. A turn that finishes during shutdown must
+ * not start the message queued behind it: that message stays on disk for the
+ * next boot.
+ */
+const stopping = new WeakSet<object>();
+export function markServerStopping(db: object): void { stopping.add(db); }
+export function clearServerStopping(db: object): void { stopping.delete(db); }
+export function isServerStopping(db: object): boolean { return stopping.has(db); }
 
 /**
  * Abort every running turn. A server calls this when it stops: turns outlive

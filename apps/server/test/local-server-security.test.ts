@@ -87,19 +87,21 @@ describe("Host header check (S1: DNS rebinding)", () => {
 });
 
 describe("Origin allowlist on the socket and pairing", () => {
-  test("another loopback port is refused until it is configured", async () => {
+  test("another loopback port is refused until it is configured; the Vite dev port is allowed by default", async () => {
     harness = await startHarness();
-    expect((await upgrade(harness.base, { origin: "http://127.0.0.1:5173" })).status).toBe(403);
+    expect((await upgrade(harness.base, { origin: "http://127.0.0.1:5174" })).status).toBe(403);
     expect(await opens(harness.base, { origin: `http://127.0.0.1:${harness.server.port}` })).toBe(true);
     expect((await upgrade(harness.base, { origin: "https://evil.example" })).status).toBe(403);
+    // The Vite dev proxy sends Origin and Host 127.0.0.1:5173.
+    expect(await opens(harness.base, { origin: "http://127.0.0.1:5173", host: "127.0.0.1:5173" })).toBe(true);
   });
 
   test("AGNI_ALLOWED_ORIGINS adds exactly the origins it names", async () => {
-    process.env.AGNI_ALLOWED_ORIGINS = "http://127.0.0.1:5173,http://localhost:5173";
+    process.env.AGNI_ALLOWED_ORIGINS = "http://127.0.0.1:5199,http://localhost:5199";
     harness = await startHarness();
-    expect(await opens(harness.base, { origin: "http://127.0.0.1:5173" })).toBe(true);
-    expect(await opens(harness.base, { origin: "http://localhost:5173" })).toBe(true);
-    expect((await upgrade(harness.base, { origin: "http://127.0.0.1:5174" })).status).toBe(403);
+    expect(await opens(harness.base, { origin: "http://127.0.0.1:5199" })).toBe(true);
+    expect(await opens(harness.base, { origin: "http://localhost:5199" })).toBe(true);
+    expect((await upgrade(harness.base, { origin: "http://127.0.0.1:5198" })).status).toBe(403);
   });
 
   test("pairing needs an allowed origin", async () => {
@@ -109,7 +111,7 @@ describe("Origin allowlist on the socket and pairing", () => {
       headers: { "content-type": "application/json", origin },
       body: JSON.stringify({ code: "AAAA-AAAA", name: "x" }),
     });
-    expect((await pair("http://127.0.0.1:5173")).status).toBe(403);
+    expect((await pair("http://127.0.0.1:5174")).status).toBe(403);
     expect((await pair(`http://127.0.0.1:${harness.server.port}`)).status).toBe(401); // allowed; the code is just wrong
   });
 });
@@ -197,6 +199,18 @@ describe("share links expire and can be revoked", () => {
     age(stale.path, 7 * DAY + 60_000);
     expect(readShareFile(stale.token)).toBeNull();
     expect(existsSync(stale.path)).toBe(false);
+  });
+
+  test("a file dated in the future never outlives its 7 days: it is treated as expired", () => {
+    process.env.AGNI_SHARE_DIR = tempDir("agni-share-");
+    const odd = publishShare(sampleDoc(), { baseURL: "http://127.0.0.1:8787" });
+    age(odd.path, -30 * DAY);
+    expect(readShareFile(odd.token)).toBeNull();
+    expect(existsSync(odd.path)).toBe(false);
+    // A clock a few seconds fast is not a reason to refuse a fresh link.
+    const fresh = publishShare(sampleDoc(), { baseURL: "http://127.0.0.1:8787" });
+    age(fresh.path, -5_000);
+    expect(readShareFile(fresh.token)).not.toBeNull();
   });
 
   test("an expired link is a 404 over HTTP", async () => {

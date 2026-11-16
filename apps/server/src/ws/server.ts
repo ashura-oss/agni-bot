@@ -22,12 +22,12 @@ import { shareRequest } from "../share/http";
 import { dispatch, errorFrame, newSession, resumeQueuedMessages, type DispatchDeps, type Session } from "./dispatch";
 import { isDeviceRevoked, requestToken, verifyToken } from "../auth/tokens";
 import { authRequest } from "../auth/web";
-import { createOriginPolicy, parseOriginList } from "../auth/origin";
+import { createOriginPolicy, originConfigProblem, parseOriginList } from "../auth/origin";
 import { staticPageHeaders } from "./csp";
 import { webAppRequest } from "./web-app";
 import { FrameLog } from "./frame-log";
 import { recoverInterruptedTurns } from "./boot-recovery";
-import { cancelAllTurns, whenNoTurnsRunning } from "./turn-registry";
+import { cancelAllTurns, cancelTurnsForDevice, clearServerStopping, markServerStopping, runningTurnDeviceIDs, whenNoTurnsRunning } from "./turn-registry";
 import { dirname, resolve } from "node:path";
 import { ChatGPTAuth } from "../models/chatgpt-auth";
 import { PushService } from "../push/web-push";
@@ -97,11 +97,21 @@ export function healthReport(db: Database, router: Router, seq: number, startedA
 
 export function startServer(config: Config, db: Database, router: Router, startedAt = Date.now()): RunningServer {
   const frameLog = new FrameLog(config.frameLogCapacity, (seq) => writeMeta(db, "seq", String(seq)));
-  // A fresh database has no persisted counter and starts at 1; an existing one resumes above it (S1-31).
+  // A fresh database has no persisted counter and starts at 1. After a clean stop the
+  // counter is exact (the stop left a marker equal to it), so resume from it and
+  // let caught-up clients carry on; after a crash it can trail frames already
+  // sent, so resume one interval above it (S1-31).
   const persistedSeq = readMeta(db, "seq");
-  if (persistedSeq !== null) frameLog.adoptPersistedSeq(Number.parseInt(persistedSeq, 10) || 0);
+  if (persistedSeq !== null) {
+    const exact = readMeta(db, SEQ_CLEAN_KEY) === persistedSeq;
+    if (exact) frameLog.adoptSeq(Number.parseInt(persistedSeq, 10) || 0);
+    else frameLog.adoptPersistedSeq(Number.parseInt(persistedSeq, 10) || 0);
+  }
+  // The marker describes the last stop only: a crash from here on must not look clean.
+  db.run("DELETE FROM meta WHERE key = ?", [SEQ_CLEAN_KEY]);
 
   const sessions = new Map<Bun.ServerWebSocket<Session>, Session>();
+  clearServerStopping(db);
 
   /** A live frame for one connection: held while it waits for its resync replay (H32). */
   const deliver = (socket: Bun.ServerWebSocket<Session>, frame: ServerFrame): void => {
@@ -135,6 +145,10 @@ export function startServer(config: Config, db: Database, router: Router, starte
       session.authed = false;
       socket.close(4003, "revoked");
     }
+    // A turn outlives its socket, so revocation has to find it by device, not by connection.
+    for (const deviceID of runningTurnDeviceIDs()) {
+      if (isDeviceRevoked(db, deviceID)) cancelTurnsForDevice(deviceID);
+    }
   }, REVOCATION_SWEEP_MS);
 
   const plugins = new PluginService({ config, db, emit, pluginsPath: config.pluginsPath });
@@ -153,12 +167,15 @@ export function startServer(config: Config, db: Database, router: Router, starte
   // names, not "any loopback". The port is only known after bind (tests bind
   // port 0), so it is read through a variable set once the socket is open.
   let boundPort = config.port;
+  const extraOrigins = parseOriginList(Bun.env.AGNI_ALLOWED_ORIGINS);
   const policy = createOriginPolicy({
     host: config.host,
     port: () => boundPort,
     publicOrigin: config.publicOrigin,
-    extraOrigins: parseOriginList(Bun.env.AGNI_ALLOWED_ORIGINS),
+    extraOrigins,
   });
+  const originProblem = originConfigProblem({ host: config.host, port: config.port, publicOrigin: config.publicOrigin, extraOrigins });
+  if (originProblem) log[originProblem.level](originProblem.message);
   // Expired exports are deleted at boot (an in-memory test database has no real share directory).
   if (config.dbPath !== ":memory:") purgeExpiredShares();
 
@@ -305,6 +322,7 @@ export function startServer(config: Config, db: Database, router: Router, starte
       clearInterval(revocationSweep);
       // Turns outlive their sockets, but not the server: stop them, and forget the
       // sockets, so nothing writes to a connection of a server that is gone.
+      markServerStopping(db);
       cancelAllTurns();
       sessions.clear();
       chatgpt.stop();
@@ -312,6 +330,14 @@ export function startServer(config: Config, db: Database, router: Router, starte
       frameLog.flush();
       // The cancelled turns write their last rows and frames before the caller closes the database.
       await whenNoTurnsRunning();
+      // Every frame is out and the counter is final: mark it exact. A caller that closed the
+      // database already gets no marker, which only costs the next boot a reload.
+      try {
+        frameLog.flush();
+        writeMeta(db, SEQ_CLEAN_KEY, String(frameLog.seq));
+      } catch {
+        // database closed under us
+      }
     },
   };
 }
@@ -327,6 +353,9 @@ function sendIfOpen(socket: Bun.ServerWebSocket<Session>, frame: ServerFrame): v
 }
 
 const REVOCATION_SWEEP_MS = 2_000;
+
+/** Meta key a clean stop writes: the final seq, so the next boot knows the persisted one is exact. */
+const SEQ_CLEAN_KEY = "seq_clean";
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 const LOOPBACK_IPS = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);

@@ -82,7 +82,7 @@ import type { PluginService } from "../plugins/service";
 import { pluginMailResolver } from "../plugins/credentials";
 import type { FrameLog } from "./frame-log";
 import { buildConversationHistory } from "./history";
-import { cancelTurn, registerTurn, unregisterTurn } from "./turn-registry";
+import { cancelTurn, cancelTurnsForDevice, isServerStopping, registerTurn, unregisterTurn } from "./turn-registry";
 import { activateAppearanceProfile, deleteAppearanceProfile, listAppearanceProfiles, saveAppearanceProfile } from "../stores/appearance";
 import { getRoutineByJobID, listRuns, updateRoutineState } from "../stores/routines";
 import { normalizeAllowedDomains } from "../routines/egress";
@@ -162,6 +162,7 @@ export async function dispatch(deps: DispatchDeps, session: Session, raw: string
   if (session.held && frame.type !== "resync" && frame.type !== "hello") releaseHeld(deps, session);
   // M1: a revoked device loses its open sessions too, not just new handshakes.
   if (session.device && isDeviceRevoked(deps.db, session.device.id)) {
+    cancelTurnsForDevice(session.device.id);
     session.authed = false;
     sendError(deps, session, "unauthorized", "this device was revoked");
     deps.close(4003, "revoked");
@@ -356,17 +357,17 @@ function handleHello(deps: DispatchDeps, session: Session, frame: Extract<Client
     }
     // H36: the same for approval and form cards a turn in this process is still waiting on.
     // Only a card whose turn is still running can be answered; a dead one stays quiet (S1-05).
-    for (const approval of deps.db.query<{ id: string; action: string; preview: string; thread_id: string | null }, [string]>(
-      "SELECT id, action, preview, thread_id FROM approvals WHERE status = 'pending' AND created_at >= ? ORDER BY created_at",
+    for (const approval of deps.db.query<{ id: string; action: string; preview: string; thread_id: string | null; turn_id: string | null }, [string]>(
+      "SELECT id, action, preview, thread_id, turn_id FROM approvals WHERE status = 'pending' AND created_at >= ? ORDER BY created_at",
     ).all(PROCESS_STARTED_AT)) {
-      if (!cardIsLive(approval.thread_id)) continue;
+      if (!cardIsLive(deps.db, approval.thread_id, approval.turn_id)) continue;
       deps.reply({ type: "approval.request", requestID: approval.id, action: approval.action, preview: approval.preview, buttons: ["once", "always", "reject"] });
     }
     for (const { id } of deps.db.query<{ id: string }, [string]>(
       "SELECT id FROM forms WHERE status = 'pending' AND created_at >= ? ORDER BY created_at",
     ).all(PROCESS_STARTED_AT)) {
       const form = getForm(deps.db, id);
-      if (!form || !cardIsLive(form.threadID)) continue;
+      if (!form || !cardIsLive(deps.db, form.threadID, form.turnID)) continue;
       deps.reply({
         type: "form.request",
         requestID: form.id,
@@ -387,9 +388,18 @@ function handleHello(deps: DispatchDeps, session: Session, frame: Extract<Client
  */
 const PROCESS_STARTED_AT = nowISO();
 
-/** A card can be answered only while the turn that asked is still running in this process. */
-function cardIsLive(threadID: string | null): boolean {
-  return threadID !== null && isThreadActive(threadID);
+/**
+ * A card can be answered only while the turn that asked is still running in
+ * this process. A running turn on the thread is not enough: a later turn B
+ * must not revive the card of a cancelled turn A, so the card's turn has to be
+ * the one the thread's session row says is current.
+ */
+function cardIsLive(db: Database, threadID: string | null, turnID: string | null): boolean {
+  if (threadID === null || turnID === null || !isThreadActive(threadID)) return false;
+  const session = db
+    .query<{ turn_id: string }, [string]>("SELECT turn_id FROM agent_sessions WHERE thread_id = ? AND state IN ('running', 'awaiting_approval')")
+    .get(threadID);
+  return session?.turn_id === turnID;
 }
 
 const CARD_EXPIRED = "That request expired or was already answered.";
@@ -545,6 +555,8 @@ function dispatchUserMessage(
 
 /** After a turn ends, start the next message waiting on that thread. */
 function drainThreadQueue(deps: DispatchDeps, threadID: string): void {
+  // Shutting down: what is queued stays on disk (queued_messages) for the next boot.
+  if (isServerStopping(deps.db)) return;
   const queues = threadQueues.get(deps.db);
   const queue = queues?.get(threadID);
   if (!queues || !queue || queue.length === 0) return;
@@ -772,7 +784,7 @@ async function runUserMessage(
   const controller = new AbortController();
   // Server-wide, not per connection: the turn outlives this socket and any
   // device may cancel it.
-  registerTurn(turnID, thread.id, controller);
+  registerTurn(turnID, thread.id, controller, session.device?.id);
   const turnSettings = {
     firstTokenTimeoutMs: deps.config.firstTokenTimeoutMs,
     turnTimeoutMs: deps.config.turnTimeoutMs,
@@ -801,6 +813,12 @@ async function runUserMessage(
       log.error("turn crashed", error);
       // An error answers the connection that asked, takes no seq, and is not replayed (S1-30).
       sendError(deps, session, "internal", error instanceof Error ? error.message : String(error));
+      // That connection may be gone, so close the turn for everyone: finish its row and say so.
+      const open = deps.db.query<{ state: string }, [string]>("SELECT state FROM turns WHERE id = ?").get(turnID);
+      if (open?.state === "running") {
+        finishTurn(deps.db, { id: turnID, stopReason: "error" });
+        deps.emit({ type: "turn.end", turnID, threadID: thread.id, stopReason: "error", ...(conversationID ? { conversationID } : {}) });
+      }
     })
     .finally(() => {
       unregisterTurn(turnID, controller);
@@ -1279,8 +1297,8 @@ function handleApproveReply(
   frame: Extract<ClientFrame, { type: "approve.reply" }>,
 ): void {
   if (!requireAuth(deps, session)) return;
-  const row = deps.db.query<{ status: string; thread_id: string | null }, [string]>(
-    "SELECT status, thread_id FROM approvals WHERE id = ?",
+  const row = deps.db.query<{ status: string; thread_id: string | null; turn_id: string | null }, [string]>(
+    "SELECT status, thread_id, turn_id FROM approvals WHERE id = ?",
   ).get(frame.requestID);
   if (!row) {
     sendError(deps, session, "unknown_request", `no pending approval ${frame.requestID}`);
@@ -1290,7 +1308,7 @@ function handleApproveReply(
     sendError(deps, session, "unknown_request", CARD_EXPIRED);
     return;
   }
-  if (!cardIsLive(row.thread_id)) {
+  if (!cardIsLive(deps.db, row.thread_id, row.turn_id)) {
     // Pending, but the turn that asked is gone: nothing would run on an "Allow".
     deps.db.run("UPDATE approvals SET status = 'expired', decided_at = ? WHERE id = ? AND status = 'pending'", [nowISO(), frame.requestID]);
     deps.emit({ type: "approval.closed", requestID: frame.requestID, kind: "approval", reason: "expired" });
@@ -1329,7 +1347,7 @@ function handleFormAnswer(
     sendError(deps, session, "unknown_request", CARD_EXPIRED);
     return;
   }
-  if (!cardIsLive(form.threadID)) {
+  if (!cardIsLive(deps.db, form.threadID, form.turnID)) {
     deps.db.run("UPDATE forms SET status = 'expired' WHERE id = ? AND status = 'pending'", [frame.requestID]);
     deps.emit({ type: "approval.closed", requestID: frame.requestID, kind: "form", reason: "expired" });
     sendError(deps, session, "unknown_request", CARD_EXPIRED);

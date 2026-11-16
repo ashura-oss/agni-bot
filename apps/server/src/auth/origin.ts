@@ -45,6 +45,9 @@ const LOOPBACK_BINDS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 const WILDCARD_BINDS = new Set(["0.0.0.0", "::", "[::]", "*"]);
 const LOOPBACK_NAMES = ["127.0.0.1", "localhost", "[::1]"];
 
+/** The Vite dev server (`bun run web`); its proxy forwards this Origin and Host unchanged. */
+const VITE_DEV_ORIGINS = ["http://127.0.0.1:5173", "http://localhost:5173"];
+
 const isLoopbackBind = (host: string): boolean => LOOPBACK_BINDS.has(host.toLowerCase()) || host.startsWith("127.");
 
 /** `AGNI_ALLOWED_ORIGINS`: comma-separated; keeps http(s) origins only, drops paths and junk. */
@@ -93,6 +96,8 @@ export function createOriginPolicy(options: OriginPolicyOptions): OriginPolicy {
     const bind = options.host.toLowerCase();
     const names = new Set<string>();
     if (isLoopbackBind(bind) || WILDCARD_BINDS.has(bind)) for (const name of LOOPBACK_NAMES) names.add(name);
+    // Only a loopback bind is a developer's machine: it also answers its Vite dev server.
+    if (isLoopbackBind(bind)) for (const origin of VITE_DEV_ORIGINS) add(origin);
     if (!WILDCARD_BINDS.has(bind)) names.add(bind.includes(":") && !bind.startsWith("[") ? `[${bind}]` : bind);
     for (const name of names) add(`http://${name}:${port}`);
     add(options.publicOrigin);
@@ -126,6 +131,35 @@ export function createOriginPolicy(options: OriginPolicyOptions): OriginPolicy {
       if (origin === null || originAllowed(origin)) return null;
       return Response.json({ error: "forbidden origin" }, { status: 403, headers: { "cache-control": "no-store" } });
     },
+  };
+}
+
+/**
+ * A bind address that leaves browsers locked out is a configuration mistake the
+ * owner should hear about at boot, not discover as a wall of 403s. Returns what
+ * to log, or null when browsers can reach the server.
+ */
+export function originConfigProblem(options: {
+  host: string;
+  port: number;
+  publicOrigin?: string | undefined;
+  extraOrigins?: readonly string[] | undefined;
+}): { level: "error" | "warn"; message: string } | null {
+  const bind = options.host.toLowerCase();
+  if (isLoopbackBind(bind) || options.publicOrigin || (options.extraOrigins?.length ?? 0) > 0) return null;
+  if (WILDCARD_BINDS.has(bind)) {
+    return {
+      level: "error",
+      message:
+        `bound to ${options.host}:${options.port}, but only loopback names are accepted in the Host header, so every other client gets 403. ` +
+        "Set AGNI_PUBLIC_ORIGIN (the https name a proxy serves) or AGNI_ALLOWED_ORIGINS (comma-separated origins such as http://192.168.1.9:8787) to the address clients use.",
+    };
+  }
+  return {
+    level: "warn",
+    message:
+      `bound to ${options.host}:${options.port}: only ${options.host}:${options.port} is accepted in the Host header. ` +
+      "If clients reach this server by another name (MagicDNS, a proxy), set AGNI_PUBLIC_ORIGIN or AGNI_ALLOWED_ORIGINS.",
   };
 }
 

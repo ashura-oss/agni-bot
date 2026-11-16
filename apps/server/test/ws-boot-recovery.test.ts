@@ -143,4 +143,37 @@ describe("server boot", () => {
     const client = await harness.connect();
     expect(client.maxSeq).toBeGreaterThan(95);
   });
+
+  test("S1-31: a clean restart keeps the counter, so a caught-up client does not reload", async () => {
+    const first = await startHarness();
+    const before = await first.connect();
+    before.send({ type: "agent.rename", agentId: "ea", name: "Agni" });
+    await before.next("agent.updated");
+    await Bun.sleep(100); // the follow-up onboarding message too: the client is fully caught up
+    const caughtUp = before.maxSeq;
+    before.close();
+    await first.server.stop(); // a clean shutdown: the database stays, the process ends
+
+    harness = await startHarness({ db: first.db });
+    const after = await harness.connect({ resyncFrom: caughtUp });
+    expect(after.maxSeq).toBeGreaterThan(caughtUp);
+    expect(after.maxSeq).toBeLessThan(caughtUp + 16); // no +32 jump
+    expect(after.seen().filter((frame) => frame.type === "error")).toEqual([]);
+  });
+
+  test("S1-31: a restart after a crash (no clean-shutdown marker) still skips ahead", async () => {
+    const first = await startHarness();
+    const before = await first.connect();
+    before.send({ type: "agent.rename", agentId: "ea", name: "Agni" });
+    await before.next("agent.updated");
+    const caughtUp = before.maxSeq;
+    before.close();
+    await first.server.stop();
+    // Simulate the crash: the marker a clean stop leaves is not there.
+    first.db.run("DELETE FROM meta WHERE key = 'seq_clean'");
+
+    harness = await startHarness({ db: first.db });
+    const after = await harness.connect({ resyncFrom: caughtUp });
+    expect(after.maxSeq).toBeGreaterThanOrEqual(caughtUp + 32);
+  });
 });

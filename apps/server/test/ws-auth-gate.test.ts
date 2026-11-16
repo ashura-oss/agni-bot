@@ -113,7 +113,7 @@ describe("websocket auth gate", () => {
     const upgrade = (origin: string) => fetch(`http://127.0.0.1:${running.port}/ws`, {
       headers: { origin, upgrade: "websocket", connection: "Upgrade", "sec-websocket-version": "13", "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==" },
     });
-    for (const origin of ["http://127.0.0.1:5173", "http://localhost.evil.example", "null"]) {
+    for (const origin of ["http://127.0.0.1:5174", "http://localhost.evil.example", "null"]) {
       expect((await upgrade(origin)).status).toBe(403);
     }
   });

@@ -22,7 +22,7 @@ async function skipOnboarding(client: TestClient): Promise<void> {
 }
 
 /** A turn that stops at an approval card: a shell command the gate will not run unasked. */
-async function turnWaitingOnApproval(): Promise<{ first: TestClient; second: TestClient; requestID: string; turnID: string }> {
+async function turnWaitingOnApproval(): Promise<{ first: TestClient; second: TestClient; requestID: string; turnID: string; threadID: string }> {
   harness = await startHarness({ fetch: toolThenText(() => sseToolCall("bash", { command: "rm -rf /tmp/agni-test-nothing" }), "stopped") });
   const first = await harness.connect({ device: "phone" });
   const second = await harness.connect({ device: "laptop" });
@@ -31,7 +31,7 @@ async function turnWaitingOnApproval(): Promise<{ first: TestClient; second: Tes
   const started = await first.next("turn.start");
   const approval = await first.next("approval.request", { timeoutMs: 5000 });
   await second.next("approval.request");
-  return { first, second, requestID: approval.requestID, turnID: started.turnID };
+  return { first, second, requestID: approval.requestID, turnID: started.turnID, threadID: started.threadID };
 }
 
 function insertDeadApproval(): void {
@@ -129,5 +129,43 @@ describe("answering a question", () => {
     expect(await first.next("approval.closed", { match: (frame) => frame.requestID === dead.id })).toMatchObject({ kind: "form", reason: "expired" });
     await waitFor(() => harness!.db.query<{ status: string }, [string]>("SELECT status FROM forms WHERE id = ?").get(dead.id)?.status === "expired", 1000, "form expiry");
     expect(harness!.db.query("SELECT answer FROM forms WHERE id = ?").get(dead.id)).toEqual({ answer: null });
+  });
+});
+
+describe("a dead card is not revived by a newer turn on the same thread", () => {
+  test("an approval from an earlier turn is refused while a later turn runs in its thread", async () => {
+    const { first, second, threadID, requestID } = await turnWaitingOnApproval();
+    // Turn A's card, left pending when A was cancelled; turn B (the live one) now owns the thread.
+    harness!.db.run(
+      "INSERT INTO approvals (id, thread_id, turn_id, action, preview, status, created_at) VALUES ('apr_old', ?, 'trn_cancelled', 'bash', 'echo', 'pending', ?)",
+      [threadID, new Date().toISOString()],
+    );
+    const third = await harness!.connect({ device: "tablet" });
+    await third.next("approval.request", { match: (frame) => frame.requestID === requestID });
+    await Bun.sleep(150);
+    expect(third.seen().filter((frame) => frame.type === "approval.request" && frame.requestID === "apr_old")).toEqual([]);
+
+    second.send({ type: "approve.reply", requestID: "apr_old", decision: "once" });
+    expect((await second.next("error")).message.toLowerCase()).toContain("expired");
+    expect(await first.next("approval.closed", { match: (frame) => frame.requestID === "apr_old" })).toMatchObject({ reason: "expired" });
+    expect(harness!.db.query("SELECT status, decision FROM approvals WHERE id = 'apr_old'").get()).toEqual({ status: "expired", decision: null });
+    // The live card still works.
+    first.send({ type: "approve.reply", requestID, decision: "reject" });
+    expect(await first.next("approval.closed", { match: (frame) => frame.requestID === requestID })).toMatchObject({ reason: "decided" });
+  });
+
+  test("a question from an earlier turn is refused while a later turn runs in its thread", async () => {
+    harness = await startHarness({ fetch: toolThenText(() => sseToolCall("ask", { question: "Which one?", options: ["a", "b"] }), "ok") });
+    const first = await harness.connect({ device: "phone" });
+    await skipOnboarding(first);
+    first.send({ type: "msg.send", channelId: "main", text: "ask me something" });
+    const started = await first.next("turn.start");
+    const live = await first.next("form.request", { timeoutMs: 5000 });
+    const old = createForm(harness.db, { threadID: started.threadID, turnID: "trn_cancelled", kind: "choice", question: "Old?", options: ["a"] });
+    first.send({ type: "form.answer", requestID: old.id, answer: "a" });
+    expect((await first.next("error")).message.toLowerCase()).toContain("expired");
+    expect(harness.db.query("SELECT status, answer FROM forms WHERE id = ?").get(old.id)).toEqual({ status: "expired", answer: null });
+    first.send({ type: "form.answer", requestID: live.requestID, answer: "b" });
+    expect(await first.next("approval.closed", { match: (frame) => frame.requestID === live.requestID })).toMatchObject({ reason: "decided" });
   });
 });

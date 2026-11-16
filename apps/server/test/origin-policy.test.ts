@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createOriginPolicy, parseOriginList } from "../src/auth/origin";
+import { createOriginPolicy, originConfigProblem, parseOriginList } from "../src/auth/origin";
 
 /** Local-server security (a), (b), (f): exact Origin allowlist, Host check, CORS that echoes only allowed origins. */
 
@@ -17,7 +17,8 @@ describe("origin allowlist", () => {
   test("refuses other loopback ports, other hosts, and look-alikes", () => {
     const policy = local();
     for (const origin of [
-      "http://127.0.0.1:5173", // a dev server nobody configured
+      "http://127.0.0.1:5174", // some other local port nobody configured
+      "http://[::1]:5173", // Vite binds 127.0.0.1, not ::1
       "http://localhost:9999",
       "http://127.0.0.1", // default port is not 8787
       "https://127.0.0.1:8787", // wrong scheme
@@ -36,11 +37,11 @@ describe("origin allowlist", () => {
   test("allows exactly the configured web origins and the public origin", () => {
     const policy = local({
       publicOrigin: "https://box.tail1.ts.net",
-      extraOrigins: parseOriginList("http://127.0.0.1:5173, http://localhost:5173/some/path , ftp://x, nonsense"),
+      extraOrigins: parseOriginList("http://127.0.0.1:5199, http://localhost:5199/some/path , ftp://x, nonsense"),
     });
-    expect(policy.originAllowed("http://127.0.0.1:5173")).toBe(true);
-    expect(policy.originAllowed("http://localhost:5173")).toBe(true);
-    expect(policy.originAllowed("http://[::1]:5173")).toBe(false);
+    expect(policy.originAllowed("http://127.0.0.1:5199")).toBe(true);
+    expect(policy.originAllowed("http://localhost:5199")).toBe(true);
+    expect(policy.originAllowed("http://127.0.0.1:5198")).toBe(false);
     expect(policy.originAllowed("https://box.tail1.ts.net")).toBe(true);
     expect(policy.originAllowed("https://other.ts.net")).toBe(false);
     expect(policy.originAllowed("http://box.tail1.ts.net")).toBe(false);
@@ -62,6 +63,43 @@ describe("origin allowlist", () => {
   });
 });
 
+describe("Vite dev server defaults (loopback bind only)", () => {
+  test("a loopback bind accepts the Vite dev origins and hosts without configuration", () => {
+    const policy = local();
+    for (const origin of ["http://127.0.0.1:5173", "http://localhost:5173"]) expect(policy.originAllowed(origin)).toBe(true);
+    for (const host of ["127.0.0.1:5173", "localhost:5173"]) expect(policy.hostAllowed(host)).toBe(true);
+  });
+
+  test("a Tailscale or wildcard bind does not", () => {
+    for (const host of ["100.64.0.5", "0.0.0.0"]) {
+      const policy = createOriginPolicy({ host, port: () => 8787 });
+      expect(policy.originAllowed("http://127.0.0.1:5173")).toBe(false);
+      expect(policy.hostAllowed("127.0.0.1:5173")).toBe(false);
+    }
+  });
+});
+
+describe("boot warning for a bind that locks browsers out", () => {
+  test("a wildcard bind with nothing configured is an error that names the variables", () => {
+    const warning = originConfigProblem({ host: "0.0.0.0", port: 8787 });
+    expect(warning?.level).toBe("error");
+    expect(warning?.message).toContain("AGNI_ALLOWED_ORIGINS");
+    expect(warning?.message).toContain("AGNI_PUBLIC_ORIGIN");
+  });
+
+  test("a specific non-loopback bind with nothing configured warns that only that address works", () => {
+    const warning = originConfigProblem({ host: "100.64.0.5", port: 8787 });
+    expect(warning?.level).toBe("warn");
+    expect(warning?.message).toContain("100.64.0.5:8787");
+  });
+
+  test("nothing to say for loopback, or when an origin is configured", () => {
+    expect(originConfigProblem({ host: "127.0.0.1", port: 8787 })).toBeNull();
+    expect(originConfigProblem({ host: "0.0.0.0", port: 8787, publicOrigin: "https://box.ts.net" })).toBeNull();
+    expect(originConfigProblem({ host: "0.0.0.0", port: 8787, extraOrigins: ["http://192.168.1.9:8787"] })).toBeNull();
+  });
+});
+
 describe("parseOriginList", () => {
   test("keeps only http(s) origins, strips paths, ignores junk", () => {
     expect(parseOriginList("http://a.test:1, https://b.test/path?x=1,ws://c.test,,garbage")).toEqual(["http://a.test:1", "https://b.test"]);
@@ -79,16 +117,16 @@ describe("host header check (DNS rebinding)", () => {
 
   test("refuses an attacker's name, even one that resolves to this machine", () => {
     const policy = local();
-    for (const host of ["evil.example", "evil.example:8787", "127.0.0.1", "127.0.0.1:5173", "localhost.evil.example:8787", "", null]) {
+    for (const host of ["evil.example", "evil.example:8787", "127.0.0.1", "127.0.0.1:5174", "localhost.evil.example:8787", "", null]) {
       expect(policy.hostAllowed(host)).toBe(false);
     }
   });
 
   test("allows the public origin's host and the hosts of configured web origins", () => {
-    const policy = local({ publicOrigin: "https://box.tail1.ts.net", extraOrigins: ["http://127.0.0.1:5173"] });
+    const policy = local({ publicOrigin: "https://box.tail1.ts.net", extraOrigins: ["http://127.0.0.1:5199"] });
     expect(policy.hostAllowed("box.tail1.ts.net")).toBe(true);
     expect(policy.hostAllowed("box.tail1.ts.net:443")).toBe(true);
-    expect(policy.hostAllowed("127.0.0.1:5173")).toBe(true);
+    expect(policy.hostAllowed("127.0.0.1:5199")).toBe(true);
     expect(policy.hostAllowed("box.tail1.ts.net:8787")).toBe(false);
   });
 

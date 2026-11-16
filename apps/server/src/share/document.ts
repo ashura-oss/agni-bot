@@ -50,9 +50,14 @@ export function sharePath(token: string): string | null {
  */
 export const SHARE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+/** A clock this far ahead is skew; further ahead than this, the file's date cannot be trusted. */
+const CLOCK_SKEW_MS = 60_000;
+
 function isExpired(path: string, now: number): boolean {
   try {
-    return now - statSync(path).mtimeMs > SHARE_TTL_MS;
+    const age = now - statSync(path).mtimeMs;
+    // A date in the future would never run out: treat it as expired.
+    return age > SHARE_TTL_MS || age < -CLOCK_SKEW_MS;
   } catch {
     return true;
   }

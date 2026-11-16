@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { isTurnRunning } from "../src/ws/turn-registry";
+import { revokeDevice } from "../src/auth/tokens";
 import { gatedFetch, startHarness, waitFor, type Harness, type TestClient } from "./ws-harness";
 
 /**
@@ -118,5 +119,82 @@ describe("shutdown", () => {
       "turn to be stopped",
     );
     expect(harness.db.query("SELECT state, stop_reason FROM turns WHERE id = ?").get(started.turnID)).toEqual({ state: "done", stop_reason: "cancelled" });
+  });
+});
+
+describe("shutdown does not start queued work", () => {
+  test("a message queued behind a cancelled turn stays queued on disk instead of starting once stop() resolves", async () => {
+    harness = await startHarness({ fetch: gatedFetch(new Promise<void>(() => undefined)) });
+    const client = await harness.connect();
+    await skipOnboarding(client);
+    client.send({ type: "msg.send", channelId: "main", text: "first" });
+    await client.next("turn.start");
+    client.send({ type: "msg.send", channelId: "main", text: "second" });
+    await client.next("status.update", { match: (frame) => String(frame.text).startsWith("Queued") });
+
+    await harness.server.stop();
+    await Bun.sleep(200);
+    expect(harness.db.query("SELECT count(*) AS n FROM turns").get()).toEqual({ n: 1 });
+    // Still on disk, so the next boot picks it up.
+    expect(harness.db.query("SELECT text FROM queued_messages").all()).toEqual([{ text: "second" }]);
+  });
+});
+
+describe("a crashed turn is closed for everyone", () => {
+  test("an unexpected failure broadcasts turn.end with an error stop and finishes the turn row", async () => {
+    harness = await startHarness({ fetch: gatedFetch(Promise.resolve()) });
+    const asker = await harness.connect({ device: "phone" });
+    const watcher = await harness.connect({ device: "laptop" });
+    await skipOnboarding(asker);
+    harness.db.run("CREATE TRIGGER boom BEFORE INSERT ON agent_sessions BEGIN SELECT RAISE(ABORT, 'boom'); END");
+
+    // The asking connection may be gone by the time the turn fails, so the news must reach everyone else.
+    asker.send({ type: "msg.send", channelId: "main", text: "this will crash" });
+    asker.close();
+    const other = watcher;
+    const started = await other.next("turn.start", { timeoutMs: 3000 }).catch(() => null);
+    const ended = await other.next("turn.end", { timeoutMs: 3000 });
+    expect(ended.stopReason).toBe("error");
+    if (started) expect(ended.turnID).toBe(started.turnID);
+    const row = harness.db.query<{ state: string; stop_reason: string }, [string]>("SELECT state, stop_reason FROM turns WHERE id = ?").get(ended.turnID);
+    expect(row).toEqual({ state: "done", stop_reason: "error" });
+  });
+});
+
+describe("revoking a device stops the turns it started", () => {
+  const deviceID = (): string => harness!.db.query<{ id: string }, []>("SELECT id FROM devices LIMIT 1").get()!.id;
+
+  test("the revocation sweep cancels a turn whose socket is already gone", async () => {
+    // Longer first-token window than the 2 s sweep, so the sweep is what ends the turn.
+    harness = await startHarness({ fetch: gatedFetch(new Promise<void>(() => undefined)), config: { firstTokenTimeoutMs: 20_000, turnTimeoutMs: 20_000 } });
+    const client = await harness.connect();
+    await skipOnboarding(client);
+    client.send({ type: "msg.send", channelId: "main", text: "a long job" });
+    const started = await client.next("turn.start");
+    client.close();
+    await waitFor(() => client.closed, 2000, "socket close");
+
+    revokeDevice(harness.db, deviceID());
+    await waitFor(
+      () => harness!.db.query<{ stop_reason: string | null }, [string]>("SELECT stop_reason FROM turns WHERE id = ?").get(started.turnID)?.stop_reason === "cancelled",
+      4500,
+      "revoked device's turn to be cancelled",
+    );
+  }, 8000);
+
+  test("logging out cancels the turns that device started", async () => {
+    harness = await startHarness({ fetch: gatedFetch(new Promise<void>(() => undefined)) });
+    const client = await harness.connect();
+    await skipOnboarding(client);
+    client.send({ type: "msg.send", channelId: "main", text: "a long job" });
+    const started = await client.next("turn.start");
+
+    const response = await fetch(`${harness.base}/auth/logout`, { method: "POST", headers: { authorization: `Bearer ${harness.token}`, origin: harness.base } });
+    expect(response.status).toBe(200);
+    await waitFor(
+      () => harness!.db.query<{ stop_reason: string | null }, [string]>("SELECT stop_reason FROM turns WHERE id = ?").get(started.turnID)?.stop_reason === "cancelled",
+      2000,
+      "logged-out device's turn to be cancelled",
+    );
   });
 });
