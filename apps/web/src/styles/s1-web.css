@@ -190,3 +190,14 @@
 .rule-row .btn {
   flex: 0 0 auto;
 }
+
+/* The refused message, kept next to the box when newer typing is there. */
+.composer-refused {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 0 8px 8px;
+  color: var(--ink-secondary);
+  font-size: var(--text-meta);
+}

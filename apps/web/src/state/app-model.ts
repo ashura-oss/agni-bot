@@ -283,8 +283,11 @@ export class AppModel {
   private rejectedDraft: AppSnapshot["rejectedDraft"] = null;
   /** The local echo of the message just sent, so a refusal can take it back. */
   private lastSent: { localID: string; text: string } | null = null;
-  /** The card the owner answered last: an `unknown_request` error is about it. */
-  private lastAnswered: string | null = null;
+  /**
+   * Cards the owner has answered that the daemon has not yet closed. An `unknown_request`
+   * error names no card, so it is only pinned to one when exactly one answer is outstanding.
+   */
+  private answered = new Set<string>();
 
   private connection: AgniConnection | null = null;
   private pendingPairing: { settings: ServerSettings; token: string } | null = null;
@@ -1048,7 +1051,6 @@ export class AppModel {
    * (`keep`; secrets are never kept, their value must not outlive the form).
    */
   private reply(requestID: string, frame: ClientFrame, resolve: () => void, keep = true): void {
-    this.lastAnswered = requestID;
     const connection = this.connection;
     const failed = (): void => {
       if (keep) this.unsent.set(requestID, { frame, resolve });
@@ -1059,6 +1061,9 @@ export class AppModel {
     connection.send(frame).then(
       () => {
         this.unsent.delete(requestID);
+        this.answered.add(requestID);
+        // A stale entry is harmless but should not pile up: keep the latest few.
+        for (const old of [...this.answered].slice(0, Math.max(0, this.answered.size - 50))) this.answered.delete(old);
         resolve();
         this.publish();
       },
@@ -1076,7 +1081,12 @@ export class AppModel {
     this.reply(
       approval.id,
       { type: "approve.reply", requestID: approval.id, decision: decision as "once" | "always" | "reject" },
-      () => this.conversation.resolveApproval(approval.id, decision),
+      () => {
+        this.conversation.resolveApproval(approval.id, decision);
+        // "Always allow" makes a rule: the reply is already on the wire, so the list asked for
+        // next comes back with it.
+        if (decision === "always") this.refreshApprovalRules();
+      },
     );
   }
 
@@ -1966,14 +1976,21 @@ export class AppModel {
       }
       if (frame.code === "unknown_request") {
         // The card was answered elsewhere or timed out: it is gone, not an error to puzzle over.
-        const id = this.lastAnswered;
+        // The error may name the card; otherwise it is only safe to close one when it is the
+        // single answer still waiting. With two in flight, closing a guess could drop a live card.
+        const outstanding = [...this.answered];
+        const named = outstanding.filter((id) => frame.message.includes(id));
+        const id = named.length === 1 ? named[0] : outstanding.length === 1 ? outstanding[0] : undefined;
         if (id) {
+          this.answered.delete(id);
           this.unsent.delete(id);
           this.conversation.apply({ type: "approval.closed", seq: frame.seq, requestID: id, kind: "approval", reason: "expired" });
           this.conversation.apply({ type: "approval.closed", seq: frame.seq, requestID: id, kind: "form", reason: "expired" });
           this.conversation.resolveSecret(id);
+          this.showToast(notice("info", "Request expired", "That request expired or was already answered."));
+        } else {
+          this.showToast(notice("info", "Request expired", "A request had expired or was already answered."));
         }
-        this.showToast(notice("info", "Request expired", "That request expired or was already answered."));
         return;
       }
       if (frame.code === "bad_frame" && /too long/i.test(frame.message) && this.lastSent) {
@@ -2035,7 +2052,10 @@ export class AppModel {
 
     if (frame.type === "agents.update" && frame.mentions) this.mentionAgents = frame.mentions;
     // A card the daemon closed must not have a late answer re-sent for it on reconnect.
-    if (frame.type === "approval.closed") this.unsent.delete(frame.requestID);
+    if (frame.type === "approval.closed") {
+      this.unsent.delete(frame.requestID);
+      this.answered.delete(frame.requestID);
+    }
     if (frame.type === "turn.end" && frame.stopReason !== "end" && frame.stopReason !== "needs_input") {
       rememberStop(frame.turnID, frame.stopReason);
     }
