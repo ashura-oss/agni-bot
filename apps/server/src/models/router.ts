@@ -10,6 +10,7 @@ import type { HealthTracker } from "./health";
 import { log } from "../log";
 import { chatGPTEnabled, type ChatGPTAuth } from "./chatgpt-auth";
 import { streamChatGPT } from "./chatgpt-responses";
+import { recordModelUsage } from "./usage-hook";
 
 export class RouterError extends Error {
   readonly code: "no_provider" | "provider_failed";
@@ -64,6 +65,8 @@ export interface RouteOptions {
    * the normal list runs as if it were unset.
    */
   preferredModel?: string | null;
+  /** What the call is for ("chat", "summary", ...); passed through to the usage hook untouched. */
+  purpose?: string;
 }
 
 export interface RouteResult {
@@ -211,12 +214,21 @@ export class Router {
             });
           } finally { lease?.release(); }
           this.health.markSuccess(provider.id);
+          const latencyMs = Date.now() - beganAt;
+          recordModelUsage({
+            provider: provider.id,
+            model: provider.model,
+            inputTokens: result.inputTokens,
+            outputTokens: result.outputTokens,
+            latencyMs,
+            purpose: options.purpose,
+          });
           return {
             provider: provider.id,
             model: provider.model,
             text: result.text,
             firstTokenMs: result.firstTokenMs,
-            latencyMs: Date.now() - beganAt,
+            latencyMs,
             inputTokens: result.inputTokens,
             outputTokens: result.outputTokens,
             attempts,

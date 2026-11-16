@@ -8,13 +8,16 @@
  * path, no trigger magic. See docs/architecture.md (S2/S4).
  */
 
+import { S2_MIGRATIONS } from "./s2";
+import { S3_MIGRATIONS } from "./s3";
+
 export interface Migration {
   id: number;
   name: string;
   sql: string;
 }
 
-export const MIGRATIONS: Migration[] = [
+const BASE_MIGRATIONS: Migration[] = [
   {
     id: 1,
     name: "initial",
@@ -1149,3 +1152,21 @@ export const MIGRATIONS: Migration[] = [
     `,
   },
 ];
+
+/**
+ * Merge migration lists into one: nulls (reserved, unwritten slots) are dropped,
+ * the rest are sorted by id, and a repeated id throws so two sprints can never
+ * claim the same number.
+ */
+export function buildMigrations(...lists: Array<ReadonlyArray<Migration | null>>): Migration[] {
+  const merged = lists.flat().filter((entry): entry is Migration => entry !== null);
+  const seen = new Set<number>();
+  for (const entry of merged) {
+    if (seen.has(entry.id)) throw new Error(`duplicate migration id ${entry.id} (${entry.name})`);
+    seen.add(entry.id);
+  }
+  return merged.sort((a, b) => a.id - b.id);
+}
+
+/** Every migration this build knows, in id order: the base list plus the Sprint 2 and 3 lists. */
+export const MIGRATIONS: Migration[] = buildMigrations(BASE_MIGRATIONS, S2_MIGRATIONS, S3_MIGRATIONS);
