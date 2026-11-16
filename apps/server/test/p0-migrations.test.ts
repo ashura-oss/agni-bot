@@ -46,19 +46,17 @@ describe("P0 migration aggregation", () => {
 });
 
 describe("P0 CLI schema check", () => {
-  test("a database with 60 applied but 54 missing is refused, naming the missing id", () => {
+  test("a database with the Sprint 3 ids applied but a Sprint 2 id missing is refused, naming the missing id", () => {
     const path = tempDB();
-    openDatabase(path).close(); // applies the real list
-    const list = buildMigrations(MIGRATIONS, [fake(54)], [fake(60)]);
+    openDatabase(path).close(); // applies the real list, which includes ids 60 and up
+    // A Sprint 2 slot nobody has filled yet, so the test keeps working as those migrations land.
+    const missing = [54, 55, 56, 57, 58, 59].find((id) => !MIGRATIONS.some((entry) => entry.id === id))!;
+    const list = buildMigrations(MIGRATIONS, [fake(missing)]);
 
-    const seeded = new Database(path);
-    seeded.run("INSERT INTO schema_migrations (id, name, applied_at) VALUES (60, 'fake_60', 'test')");
-    seeded.close();
-
-    expect(() => openDatabaseForCLI(path, list)).toThrow(/missing migration.*\b54\b/);
+    expect(() => openDatabaseForCLI(path, list)).toThrow(`missing migration(s) ${missing}`);
 
     const fixed = new Database(path);
-    fixed.run("INSERT INTO schema_migrations (id, name, applied_at) VALUES (54, 'fake_54', 'test')");
+    fixed.run("INSERT INTO schema_migrations (id, name, applied_at) VALUES (?, 'fake', 'test')", [missing]);
     fixed.close();
     openDatabaseForCLI(path, list).close();
   });

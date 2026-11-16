@@ -391,7 +391,7 @@ describe("oauth URL surface", () => {
   });
 
   test("the authorize URL asks only for the requested scopes", () => {
-    const url = authorizeURL({ config: fakeConfig(), clientID: "test-id", clientSecret: "test-secret" }, fakeConfig(), ["https://www.googleapis.com/auth/gmail.modify"], "st_x");
+    const url = authorizeURL({ config: fakeConfig(), clientID: "test-id", clientSecret: "test-secret" }, fakeConfig(), ["https://www.googleapis.com/auth/gmail.modify"], "st_x", "challenge_x");
     const parsed = new URL(url);
     expect(parsed.searchParams.get("scope")).toBe("https://www.googleapis.com/auth/gmail.modify");
     expect(parsed.searchParams.get("prompt")).toBe("consent");

@@ -5,6 +5,7 @@
  * not .env. The daemon host is the trust boundary; tokens are stored
  * server-side only (plugins.json + the connection row's status).
  */
+import { createHash, randomBytes } from "node:crypto";
 import type { Config } from "../config";
 
 const AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -35,7 +36,16 @@ export function redirectURI(config: Config, port = config.port): string {
   return `http://127.0.0.1:${port}/oauth/callback`;
 }
 
-export function authorizeURL(deps: OAuthDeps, config: Config, scopes: string[], state: string): string {
+/**
+ * A PKCE pair (RFC 7636). The verifier is 43 URL-safe characters from 32 random
+ * bytes; the challenge is its S256 hash. Only the challenge goes to the browser.
+ */
+export function newPkce(): { verifier: string; challenge: string } {
+  const verifier = randomBytes(32).toString("base64url");
+  return { verifier, challenge: createHash("sha256").update(verifier).digest("base64url") };
+}
+
+export function authorizeURL(deps: OAuthDeps, config: Config, scopes: string[], state: string, codeChallenge: string): string {
   const url = new URL(AUTH_ENDPOINT);
   url.searchParams.set("client_id", deps.clientID);
   url.searchParams.set("redirect_uri", redirectURI(config));
@@ -45,10 +55,12 @@ export function authorizeURL(deps: OAuthDeps, config: Config, scopes: string[], 
   url.searchParams.set("prompt", "consent");
   url.searchParams.set("include_granted_scopes", "false");
   url.searchParams.set("state", state);
+  url.searchParams.set("code_challenge", codeChallenge);
+  url.searchParams.set("code_challenge_method", "S256");
   return url.toString();
 }
 
-export async function exchangeCode(deps: OAuthDeps, config: Config, code: string): Promise<TokenSet> {
+export async function exchangeCode(deps: OAuthDeps, config: Config, code: string, codeVerifier: string): Promise<TokenSet> {
   const response = await (deps.fetch ?? fetch)(TOKEN_ENDPOINT, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -57,6 +69,7 @@ export async function exchangeCode(deps: OAuthDeps, config: Config, code: string
       client_id: deps.clientID,
       client_secret: deps.clientSecret,
       redirect_uri: redirectURI(config),
+      code_verifier: codeVerifier,
       grant_type: "authorization_code",
     }),
   });

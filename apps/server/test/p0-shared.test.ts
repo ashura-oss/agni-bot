@@ -27,9 +27,12 @@ afterEach(() => {
 });
 
 describe("P0 extra CLI commands", () => {
-  test("both sprint tables ship empty", () => {
-    expect(s2Commands).toEqual({ commands: {}, help: [] });
-    expect(s3Commands).toEqual({ commands: {}, help: [] });
+  test("both sprint tables are well formed, whatever commands the sprints have filled in", () => {
+    for (const table of [s2Commands, s3Commands]) {
+      expect(Object.keys(table).sort()).toEqual(["commands", "help"]);
+      for (const run of Object.values(table.commands)) expect(typeof run).toBe("function");
+      for (const line of table.help) expect(typeof line).toBe("string");
+    }
   });
 
   test("runExtraCommand runs a command from an injected table and passes its args", async () => {
@@ -43,7 +46,7 @@ describe("P0 extra CLI commands", () => {
     const a: CommandTable = { commands: {}, help: ["  one   first"] };
     const b: CommandTable = { commands: {}, help: ["  two   second", "  three third"] };
     expect(extraHelpLines([a, b])).toEqual(["  one   first", "  two   second", "  three third"]);
-    expect(extraHelpLines()).toEqual([]);
+    expect(extraHelpLines()).toEqual([...s2Commands.help, ...s3Commands.help]);
   });
 
   test("mergeCommandTables spreads commands, concatenates help, and throws on a duplicate name", () => {

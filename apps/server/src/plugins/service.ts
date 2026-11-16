@@ -9,18 +9,19 @@ import type { PluginAccount, PluginInfo, PluginStatus, ServerFrameBody } from "@
 import type { Config } from "../config";
 import { CATALOG, manifestFor, type PluginManifest } from "./catalog";
 import * as oauth from "./oauth";
+import { consumeOAuthState, dropOAuthStates, issueOAuthState, newOAuthState } from "./oauth-state";
 import { mcpHub } from "./mcp";
+import { clearPlugin } from "./mcp-pins";
+import { mcpUrlShapeError, readLocalFlag, syncLocalFlags } from "./mcp-url";
 import {
   completeConnect,
   deleteConnection,
   getConnection,
-  getConnectionByState,
   getConnectionFor,
   getConnections,
   markError,
   startPending,
   type PluginConnectionRow,
-  type TokenBlob,
   updateTokens,
 } from "./store";
 import {
@@ -44,6 +45,8 @@ export interface PluginDeps {
   pluginsPath: string;
   /** Fan out to every authed session (the `plugin.state` snapshot). */
   emit: (body: ServerFrameBody) => void;
+  /** Clock in epoch ms for OAuth state expiry; tests move it. */
+  now?: () => number;
 }
 
 export class PluginService {
@@ -58,6 +61,10 @@ export class PluginService {
   constructor(deps: PluginDeps) {
     this.deps = deps;
     this.pluginsFile = loadPluginsFile(deps.pluginsPath);
+  }
+
+  private now(): number {
+    return this.deps.now?.() ?? Date.now();
   }
 
   private oauthDeps(): oauth.OAuthDeps {
@@ -97,6 +104,7 @@ export class PluginService {
   /** Persist the in-memory plugins.json to disk (mode-600). */
   private save(): void {
     syncTrustedTools(this.deps.pluginsPath, this.pluginsFile);
+    syncLocalFlags(this.deps.pluginsPath, this.pluginsFile);
     savePluginsFile(this.deps.pluginsPath, this.pluginsFile);
   }
 
@@ -198,16 +206,24 @@ export class PluginService {
     }
 
     if (manifest.authKind === "mcp") {
+      const newURL = credentials.url?.trim() || undefined;
+      // Refuse an unusable URL before anything is saved, so a bad one is never stored as the plugin's server.
+      const shape = newURL ? mcpUrlShapeError(newURL) : undefined;
+      if (shape) return { error: { code: "plugin_not_configured", message: shape } };
       syncTrustedTools(this.deps.pluginsPath, this.pluginsFile);
+      // A different server is a different thing to trust: forget the old server's tool pins.
+      const oldURL = this.pluginsFile.plugins[pluginID]?.auth.url || manifest.mcpUrl;
+      if (oldURL && oldURL !== (newURL || manifest.mcpUrl)) clearPlugin(this.deps.db, pluginID);
       // The bearer token (if the server needs one) goes to plugins.json only.
       upsertPlugin(this.pluginsFile, pluginID, {
         account,
         enabled: true,
-        auth: { kind: "mcp", key: credentials.key?.trim() || undefined, url: credentials.url?.trim() || undefined },
+        auth: { kind: "mcp", key: credentials.key?.trim() || undefined, url: newURL },
         connectedAt: Date.now(),
-        // Re-entering the URL or token must not forget which tools the owner trusts.
+        // Re-entering the URL or token must not forget which tools the owner trusts, or that they flagged it local.
         ...(this.pluginsFile.plugins[pluginID]?.trustedTools ? { trustedTools: this.pluginsFile.plugins[pluginID]!.trustedTools } : {}),
-      });
+        ...(readLocalFlag(this.deps.pluginsPath, pluginID) ? { local: true } : {}),
+      } as PluginEntry);
       this.save();
       return this.connect(pluginID, account);
     }
@@ -314,15 +330,19 @@ export class PluginService {
     }
 
     try {
+      const state = newOAuthState();
+      const pkce = oauth.newPkce();
       const pending = startPending(this.deps.db, {
         pluginID,
         account,
         scopes: role.scopes,
         capabilities: role.capabilities,
+        state,
       });
+      // The state and its PKCE verifier live in oauth_states; starting over replaces the old pair.
+      issueOAuthState(this.deps.db, { state, connectionID: pending.id, pluginID, account, codeVerifier: pkce.verifier }, this.now());
       this.emitState();
-      const tokens = readTokens(pending);
-      return { authorizeURL: oauth.authorizeURL(oauthClient, this.deps.config, role.scopes, tokens.state ?? "") };
+      return { authorizeURL: oauth.authorizeURL(oauthClient, this.deps.config, role.scopes, state, pkce.challenge) };
     } catch (error) {
       return { error: { code: "plugin_connect_failed", message: error instanceof Error ? error.message : String(error) } };
     }
@@ -341,6 +361,8 @@ export class PluginService {
     } catch {
       return { error: { code: "plugin_not_configured", message: "Enter the MCP server URL." } };
     }
+    const shape = mcpUrlShapeError(url);
+    if (shape) return { error: { code: "plugin_not_configured", message: shape } };
     const pending = startPending(this.deps.db, { pluginID: manifest.id, account, scopes: [], capabilities });
     completeConnect(this.deps.db, pending.id, {}, new URL(url).host);
     if (!entry) upsertPlugin(this.pluginsFile, manifest.id, { account, enabled: true, auth: { kind: "mcp" }, connectedAt: Date.now() });
@@ -354,7 +376,11 @@ export class PluginService {
   private async reachMcp(pluginID: string, connectionID: string, url: string, token?: string): Promise<void> {
     try {
       syncTrustedTools(this.deps.pluginsPath, this.pluginsFile);
-      await (this.mcpHubOverride ?? mcpHub).connect(pluginID, url, token, undefined, trustedMcpTools(this.pluginsFile, pluginID));
+      // `local` is read from the file now, not from memory: the owner's edit, or its removal, counts at once.
+      await (this.mcpHubOverride ?? mcpHub).connect(pluginID, url, token, undefined, trustedMcpTools(this.pluginsFile, pluginID), {
+        pins: this.deps.db,
+        local: readLocalFlag(this.deps.pluginsPath, pluginID),
+      });
     } catch (error) {
       markError(this.deps.db, connectionID, error instanceof Error ? error.message : String(error));
       this.emitState();
@@ -363,12 +389,14 @@ export class PluginService {
 
   /** The loopback route's landing: finish the grant for whichever state this is. */
   async completeSignIn(state: string, code: string): Promise<{ plugin?: string; error?: string }> {
-    const pending = getConnectionByState(this.deps.db, state);
-    if (!pending) {
-      return { error: "This sign-in is stale or was already completed. Connect again from the settings pane." };
+    // The state is used up here, whatever happens next: one callback, one try.
+    const issued = consumeOAuthState(this.deps.db, state, this.now());
+    const pending = issued ? getConnection(this.deps.db, issued.connectionID) : null;
+    if (!issued || !pending || pending.status !== "pending") {
+      return { error: "This sign-in is stale (it expired after 10 minutes, or was already used). Connect again from the settings pane." };
     }
     try {
-      const tokens = await oauth.exchangeCode(this.oauthDeps(), this.deps.config, code);
+      const tokens = await oauth.exchangeCode(this.oauthDeps(), this.deps.config, code, issued.codeVerifier);
       if (!tokens.access_token) throw new Error("Google returned no access token");
       const { email } = await oauth.whoami(this.oauthDeps(), tokens.access_token);
       completeConnect(this.deps.db, pending.id, tokens, email ?? "Google account");
@@ -412,7 +440,10 @@ export class PluginService {
       // A Google-side failure must not strand the credential locally.
     }
     deleteConnection(this.deps.db, row.id);
+    dropOAuthStates(this.deps.db, row.id);
     await (this.mcpHubOverride ?? mcpHub).disconnect(row.plugin_id);
+    // The owner disconnected it: a later connect is a fresh first trust of whatever the server offers then.
+    clearPlugin(this.deps.db, row.plugin_id);
     // Clear tokens from plugins.json.
     if (entry) {
       entry.auth = { kind: manifestFor(row.plugin_id)?.authKind === "mcp" ? "mcp" : "oauth" };
@@ -476,15 +507,6 @@ export class PluginService {
     this.deps.emit({ type: "plugin.state", plugins: this.list() });
   }
 
-}
-
-function readTokens(row: PluginConnectionRow): TokenBlob {
-  if (!row.tokens) return {};
-  try {
-    return JSON.parse(row.tokens) as TokenBlob;
-  } catch {
-    return {};
-  }
 }
 
 function toInfo(manifest: PluginManifest, account: PluginAccount, row?: PluginConnectionRow): PluginInfo {
