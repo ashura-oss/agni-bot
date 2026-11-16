@@ -609,38 +609,72 @@ describe("transcript", () => {
       info({ id: "msg_a2", role: "assistant", text: "56", createdAt: "2026-11-16T10:05:03.000Z", turnID: "trn_2", sessionID: "thr_1", stopReason: "end" }),
     ];
     const order = (chat: Conversation) => chat.messages.map((message) => message.id);
-
-    test("a pending send with the same text as older rows is not swallowed by them", () => {
+    const loaded = () => {
       const chat = new Conversation("agni");
       chat.bind("cnv_1", "agni", "thr_1");
-      const echoID = chat.appendLocalUserMessage(Q, new Date("2026-11-16T10:10:00.000Z"));
+      chat.loadConversationHistory("cnv_1", "agni", history());
+      return chat;
+    };
+    const newRow = (id: string, createdAt: string) =>
+      info({ id, role: "user", text: Q, createdAt, turnID: "trn_3", sessionID: "thr_1" });
+
+    test("a pending send is not answered by older rows that were already on screen", () => {
+      const chat = loaded();
+      const echoID = chat.appendLocalUserMessage(Q);
       chat.loadConversationHistory("cnv_1", "agni", history());
       expect(order(chat)).toEqual(["msg_q1", "msg_a1", "msg_n1", "msg_q2", "msg_a2", echoID]);
     });
 
-    test("a pending send is dropped only by a durable row made after it was sent, and each row answers one send", () => {
-      const chat = new Conversation("agni");
-      chat.bind("cnv_1", "agni", "thr_1");
-      const first = chat.appendLocalUserMessage(Q, new Date("2026-11-16T10:04:59.000Z"));
-      const second = chat.appendLocalUserMessage(Q, new Date("2026-11-16T10:10:00.000Z"));
-      chat.loadConversationHistory("cnv_1", "agni", history());
-      // The 10:05 row is the first send's; the second send is still waiting for its own.
-      expect(order(chat)).toEqual(["msg_q1", "msg_a1", "msg_n1", "msg_q2", "msg_a2", second]);
+    test("a row that is new since the send answers it, whatever either clock says", () => {
+      const chat = loaded();
+      // The daemon's clock is ten minutes behind the browser's.
+      chat.appendLocalUserMessage(Q, new Date("2026-11-16T10:20:00.000Z"));
+      chat.loadConversationHistory("cnv_1", "agni", [...history(), newRow("msg_q3", "2026-11-16T10:10:00.000Z")]);
+      expect(order(chat)).toEqual(["msg_q1", "msg_a1", "msg_n1", "msg_q2", "msg_a2", "msg_q3"]);
+      expect(chat.messages.some((message) => message.isLocalEcho)).toBe(false);
+    });
+
+    test("each new row answers one send, oldest pending first", () => {
+      const chat = loaded();
+      const first = chat.appendLocalUserMessage(Q);
+      const second = chat.appendLocalUserMessage(Q);
+      chat.loadConversationHistory("cnv_1", "agni", [...history(), newRow("msg_q3", "2026-11-16T10:10:00.000Z")]);
+      expect(order(chat)).toEqual(["msg_q1", "msg_a1", "msg_n1", "msg_q2", "msg_a2", "msg_q3", second]);
       expect(order(chat)).not.toContain(first);
     });
 
     test("a live echo keeps its place and the rows stay in DB order after a live msg.new", () => {
-      const chat = new Conversation("agni");
-      chat.bind("cnv_1", "agni", "thr_1");
-      chat.appendLocalUserMessage(Q, new Date("2026-11-16T10:10:00.000Z"));
-      chat.loadConversationHistory("cnv_1", "agni", history());
+      const chat = loaded();
+      chat.appendLocalUserMessage(Q);
       chat.apply(wire({ type: "msg.new", seq: 40, id: "chm_q3", channelId: "main", fromType: "user", fromId: "owner", senderName: "You", text: Q, createdAt: "2026-11-16T10:10:00.500Z" }));
       expect(order(chat)).toEqual(["msg_q1", "msg_a1", "msg_n1", "msg_q2", "msg_a2", "chm_q3"]);
       chat.apply(wire({ type: "msg.new", seq: 41, id: "chm_a3", channelId: "main", fromType: "agent", fromId: "agni", senderName: "Agni", text: "56", createdAt: "2026-11-16T10:10:04.000Z" }));
       expect(order(chat).slice(-2)).toEqual(["chm_q3", "chm_a3"]);
-      // Reloading the history again changes nothing about the rows already there.
       chat.loadConversationHistory("cnv_1", "agni", history());
       expect(order(chat).slice(0, 5)).toEqual(["msg_q1", "msg_a1", "msg_n1", "msg_q2", "msg_a2"]);
+    });
+
+    test("a streaming reply stays below its question when the browser clock is behind the daemon's", () => {
+      const chat = new Conversation("agni");
+      chat.bind("cnv_1", "agni", "thr_1");
+      // The daemon says 2031; this browser says now.
+      const rows = [info({ id: "msg_q", role: "user", text: "later question", createdAt: "2031-01-01T00:00:00.000Z", turnID: "trn_9", sessionID: "thr_1" })];
+      chat.loadConversationHistory("cnv_1", "agni", rows);
+      chat.apply(startFrame("trn_9", "thr_1", "agni", "cnv_1"));
+      chat.apply(tokenFrame("trn_9", "thr_1", "partial"));
+      chat.loadConversationHistory("cnv_1", "agni", rows);
+      expect(order(chat)).toEqual(["msg_q", Conversation.assistantID("trn_9")]);
+    });
+
+    test("a survivor follows the durable row it followed, not the clock", () => {
+      const chat = loaded();
+      const echoID = chat.appendLocalUserMessage(Q);
+      // A new system note arrives in the history after the send; the echo still follows what it followed.
+      chat.loadConversationHistory("cnv_1", "agni", [
+        ...history(),
+        info({ id: "msg_n2", role: "system", text: "A note.", createdAt: "2026-11-16T10:00:00.000Z", sessionID: "thr_1" }),
+      ]);
+      expect(order(chat)).toEqual(["msg_q1", "msg_a1", "msg_n1", "msg_q2", "msg_a2", echoID, "msg_n2"]);
     });
   });
 
