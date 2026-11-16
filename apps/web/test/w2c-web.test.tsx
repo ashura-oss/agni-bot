@@ -7,6 +7,7 @@ import { AppModelProvider } from "../src/state/use-app-model";
 import { RootView } from "../src/components/RootView";
 import { InspectorView } from "../src/components/InspectorView";
 import { SettingsView } from "../src/components/SettingsView";
+import { ApprovalRulesView } from "../src/components/ApprovalRulesView";
 
 const health: HealthReport = {
   ok: true,
@@ -198,14 +199,111 @@ describe("a message that is too long (W2-C)", () => {
 });
 
 describe("a card the daemon no longer knows (W2-C)", () => {
-  it("disappears when answering it is refused as unknown_request", () => {
+  it("disappears when answering it is refused as unknown_request", async () => {
     const { model } = rig();
     frame(model, { type: "approval.request", seq: 1, requestID: "apr_x", action: "shell: ls", preview: "", buttons: ["once", "reject"] });
     renderWith(model, <RootView />);
     fireEvent.click(screen.getByRole("button", { name: /allow once/i }));
+    await waitFor(() => expect((model as unknown as { answered: Set<string> }).answered.size).toBe(1));
     // Answered locally the moment the send succeeds; the daemon then says it never heard of it.
     frame(model, { type: "error", seq: 2, code: "unknown_request", message: "That request expired or was already answered." });
     expect(model.getSnapshot().conversation.approvals).toHaveLength(0);
     expect(model.getSnapshot().toast?.title).toBe("Request expired");
+  });
+});
+
+describe("review fixes (int4)", () => {
+  const request = (id: string) => ({ type: "approval.request", seq: 1, requestID: id, action: "shell: ls", preview: "", buttons: ["once", "always", "reject"] });
+
+  it("asks for the rules list whenever the section opens, and after an Always allow", async () => {
+    const { model, sent } = rig();
+    renderWith(model, <ApprovalRulesView />);
+    expect(sent.filter((item) => item.type === "approval.rules.list")).toHaveLength(1);
+
+    sent.length = 0;
+    frame(model, request("apr_1"));
+    act(() => model.answer(model.getSnapshot().conversation.approvals[0]!, "always"));
+    await waitFor(() => expect(sent.filter((item) => item.type === "approval.rules.list")).toHaveLength(1));
+    // The reply goes first, so the list that follows includes the new rule.
+    expect(sent.findIndex((item) => item.type === "approve.reply")).toBeLessThan(sent.findIndex((item) => item.type === "approval.rules.list"));
+
+    sent.length = 0;
+    act(() => model.answer(model.getSnapshot().conversation.approvals[0]!, "once"));
+    expect(sent.some((item) => item.type === "approval.rules.list")).toBe(false);
+  });
+
+  it("closes the one outstanding answer on unknown_request, and none when two are in flight", async () => {
+    const { model } = rig();
+    frame(model, request("apr_a"));
+    frame(model, request("apr_b"));
+    const [a, b] = model.getSnapshot().conversation.approvals;
+    act(() => model.answer(a!, "once"));
+    await waitFor(() => expect((model as unknown as { answered: Set<string> }).answered.size).toBe(1));
+    frame(model, { type: "error", seq: 2, code: "unknown_request", message: "That request expired or was already answered." });
+    expect(model.getSnapshot().conversation.approvals.map((card) => card.id)).toEqual(["apr_b"]);
+
+    // Two in flight: the error names no card, so no card is closed.
+    frame(model, request("apr_c"));
+    frame(model, request("apr_d"));
+    const cards = model.getSnapshot().conversation.approvals;
+    act(() => model.answer(cards.find((card) => card.id === "apr_c")!, "once"));
+    act(() => model.answer(cards.find((card) => card.id === "apr_d")!, "once"));
+    await waitFor(() => expect((model as unknown as { answered: Set<string> }).answered.size).toBe(2));
+    const before = model.getSnapshot().conversation.approvals.map((card) => card.id);
+    frame(model, { type: "error", seq: 3, code: "unknown_request", message: "That request expired or was already answered." });
+    expect(model.getSnapshot().conversation.approvals.map((card) => card.id)).toEqual(before);
+    expect(model.getSnapshot().toast?.body).toBe("A request had expired or was already answered.");
+    void b;
+  });
+
+  it("uses the card id the error names when two answers are in flight", async () => {
+    const { model } = rig();
+    frame(model, request("apr_c"));
+    frame(model, request("apr_d"));
+    const cards = model.getSnapshot().conversation.approvals;
+    act(() => model.answer(cards[0]!, "once"));
+    act(() => model.answer(cards[1]!, "once"));
+    await waitFor(() => expect((model as unknown as { answered: Set<string> }).answered.size).toBe(2));
+    frame(model, { type: "error", seq: 3, code: "unknown_request", message: "no pending approval apr_d" });
+    expect(model.getSnapshot().conversation.approvals.map((card) => card.id)).toEqual(["apr_c"]);
+  });
+
+  it("keeps a refused message retrievable when the owner has typed something newer", () => {
+    const { model } = rig();
+    renderWith(model, <RootView />);
+    act(() => void model.send("the long one"));
+    const box = () => screen.getByPlaceholderText(/^Message /) as HTMLTextAreaElement;
+    fireEvent.change(box(), { target: { value: "newer" } });
+    frame(model, { type: "error", seq: 2, code: "bad_frame", message: "That message is too long (100,001 characters). The limit is 100,000." });
+    expect(box().value).toBe("newer");
+
+    fireEvent.click(screen.getByRole("button", { name: "Restore refused message" }));
+    expect(box().value).toBe("the long one\n\nnewer");
+    expect(screen.queryByRole("button", { name: "Restore refused message" })).not.toBeInTheDocument();
+  });
+
+  it("moves focus to the next Revoke after one is removed, and to the heading after the last", async () => {
+    const { model } = rig();
+    act(() => model.openSettings());
+    renderWith(model, <SettingsView />);
+    fireEvent.click(screen.getByRole("button", { name: "Always allow" }));
+    frame(model, { type: "approval.rules.list.ok", seq: 1, rules });
+
+    const first = screen.getByRole("button", { name: "Revoke bash for Friday" });
+    first.focus();
+    fireEvent.click(first);
+    frame(model, { type: "approval.rule.revoke.ok", seq: 2, id: "rul_1" });
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Revoke write_file for gone (removed)" }));
+
+    fireEvent.click(document.activeElement as HTMLElement);
+    frame(model, { type: "approval.rule.revoke.ok", seq: 3, id: "rul_2" });
+    expect(document.activeElement?.tagName).toBe("H1");
+  });
+
+  it("announces loading politely", () => {
+    const { model } = rig();
+    act(() => (model as unknown as { publish: () => void }).publish());
+    renderWith(model, <ApprovalRulesView />);
+    expect(screen.getByRole("status")).toHaveTextContent("Loading the rules…");
   });
 });

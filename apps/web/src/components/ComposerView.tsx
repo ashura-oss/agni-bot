@@ -5,6 +5,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { ArrowUp, Plus, UserRound, Paperclip, X } from "lucide-react";
 import { useAppModel, useAppSnapshot } from "../state/use-app-model";
+import { copyText } from "./bits";
 
 import { MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, type AttachmentInfo } from "@agni/client";
 
@@ -40,11 +41,20 @@ export function ComposerView() {
   // reason is shown, unless the owner has already started something new.
   const rejected = snapshot.rejectedDraft;
   const handledRejection = useRef(snapshot.rejectedDraft?.token ?? 0);
+  // The refused text, kept retrievable when the owner has already typed something new.
+  const [refusedText, setRefusedText] = useState<string | null>(null);
   useEffect(() => {
     if (!rejected || rejected.token === handledRejection.current) return;
     handledRejection.current = rejected.token;
-    setDraft((current) => (current.length === 0 ? rejected.text : current));
     setError(rejected.message);
+    // This render's draft is what the owner has typed since sending; never overwrite it.
+    if (draft.length === 0) {
+      setRefusedText(null);
+      setDraft(rejected.text);
+    } else {
+      setRefusedText(rejected.text);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rejected]);
 
   const trimmed = draft.trim();
@@ -177,6 +187,25 @@ export function ComposerView() {
         <button type="button" disabled={sending} aria-label={`Remove ${item.file.name}`} onClick={() => removeAttachment(item)}><X size={14} /></button>
       </div>)}</div> : null}
       {error ? <div className="composer-error" role="alert">{error}</div> : null}
+      {refusedText !== null ? (
+        <div className="composer-refused">
+          <span>Your earlier message is still here.</span>
+          <button
+            type="button"
+            className="link"
+            onClick={() => {
+              setDraft((current) => (current.length === 0 ? refusedText : `${refusedText}\n\n${current}`));
+              setRefusedText(null);
+              setError(undefined);
+            }}
+          >
+            Restore refused message
+          </button>
+          <button type="button" className="link" onClick={() => void copyText(refusedText)}>
+            Copy it
+          </button>
+        </div>
+      ) : null}
       {sending ? <div className="composer-hint" role="status">{uploadStatus}</div> : null}
       {filtered.length > 0 ? (
         <div className="slash-menu" role="listbox">
