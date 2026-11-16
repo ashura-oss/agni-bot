@@ -95,5 +95,7 @@ export function shellFacts(command: string, cwd: string): ShellFacts {
 /** True when `candidate` is `denied`, lies inside it, or contains it (a command on the folder reaches the file). */
 export function pathsOverlap(denied: string, candidate: string): boolean {
   if (denied === candidate) return true;
-  return candidate.startsWith(denied + sep) || denied.startsWith(candidate + sep) || denied.startsWith(candidate + "/") || candidate.startsWith(denied + "/");
+  // A root key (`c:\`, `/`) already ends in its separator: it is a folder as it stands, not a name that needs one added.
+  const folder = (path: string, separator: string): string => (path.endsWith(separator) ? path : path + separator);
+  return candidate.startsWith(folder(denied, sep)) || denied.startsWith(folder(candidate, sep)) || denied.startsWith(folder(candidate, "/")) || candidate.startsWith(folder(denied, "/"));
 }

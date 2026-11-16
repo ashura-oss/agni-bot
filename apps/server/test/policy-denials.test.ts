@@ -9,6 +9,7 @@ import { join, resolve } from "node:path";
 import { ApprovalBroker, type Decision } from "../src/agent/approval-broker";
 import { gateToolCall, type GateResult } from "../src/agent/tool-gate";
 import { SHELL_REFUSAL, findDenial, recordDenial } from "../src/policy/denials";
+import { pathsOverlap } from "../src/policy/resources";
 import { decide } from "../src/policy/engine";
 import { MCP_FREE_TOOLS } from "../src/plugins/mcp";
 import { addApprovalRule, approvalTarget } from "../src/stores/approval-rules";
@@ -275,5 +276,46 @@ describe("a run that holds a refusal does not give a connector tool a free pass"
     expect(decideTool(run).action, "baseline: the stored rule approves it in a clean run").toBe("run");
     recordDenial(rig.db, run, fileRefusal);
     expect(decideTool(run).action).toBe("ask");
+  });
+});
+
+describe("a refusal and a drive or filesystem root", () => {
+  // A root key already ends in a separator: `c:\` and `/` are folders, and every path under them is inside.
+  test.each<[string, string]>([
+    ["c:\\users\\x\\report.txt", "c:\\"],
+    ["c:\\", "c:\\users\\x"],
+    ["/home/x/report.txt", "/"],
+    ["/", "/home/x"],
+    ["/c/users/x", "/c/"],
+  ])("%s and %s overlap", (a, b) => {
+    expect(pathsOverlap(a, b)).toBe(true);
+    expect(pathsOverlap(b, a)).toBe(true);
+  });
+
+  test.each<[string, string]>([
+    ["c:\\users", "c:\\usersx"],
+    ["c:\\", "d:\\"],
+    ["/a/b", "/a/bc"],
+  ])("%s and %s do not overlap", (a, b) => {
+    expect(pathsOverlap(a, b)).toBe(false);
+  });
+
+  const onWindows = process.platform === "win32";
+
+  test.skipIf(!onWindows)("after a no to deleting a file, `rm -rf /c/` (the whole drive) is refused outright", async () => {
+    writeFileSync(join(rig.scratch, "report.txt"), "the report");
+    answers.push("reject");
+    await ask(rig.run, "bash", { command: "rm report.txt" });
+    const before = cards;
+    const result = await ask(rig.run, "bash", { command: "rm -rf /c/" });
+    expect({ refused: refused(result), asked: cards - before }).toEqual({ refused: true, asked: 0 });
+  });
+
+  test.skipIf(!onWindows)("a no to deleting the drive root covers a Git Bash path under it", async () => {
+    answers.push("reject");
+    await ask(rig.run, "bash", { command: "rm -rf C:/" });
+    const before = cards;
+    const result = await ask(rig.run, "bash", { command: "rm /c/Users/someone/notes.txt" });
+    expect({ refused: refused(result), asked: cards - before }).toEqual({ refused: true, asked: 0 });
   });
 });
