@@ -153,7 +153,7 @@ export function ComposerView() {
         setUploadStatus("Sending…");
         await model.sendAttachments(draft, uploaded, snapshot.conversation.agentID);
       } else if (!model.send(draft)) {
-        throw new Error("Not connected. Your draft has been kept; try again after reconnecting.");
+        throw new Error(model.sendRefusal() ?? "Not connected. Your draft has been kept; try again after reconnecting.");
       }
       for (const item of attachments) if (item.preview) URL.revokeObjectURL(item.preview);
       setAttachments([]); setDraft(""); model.updateTypingState(false);

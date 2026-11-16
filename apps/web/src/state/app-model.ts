@@ -99,6 +99,7 @@ export class AppModel {
   private agents: AgentInfo[] = seedAgents();
   /** The daemon has sent the real roster; until then the seed row is only a stand-in. */
   private rosterKnown = false;
+  private refusal: string | null = null;
   /** Hidden specialists are absent from the sidebar but still addressable. */
   private mentionAgents: AgentInfo[] = seedAgents();
   /** The channel this client is bound to, when it bound itself to an agent. */
@@ -802,10 +803,17 @@ export class AppModel {
     void connection.send({ type: "task.update", taskID: task.id, action: "edit", ...rest, ...(dueAt !== undefined ? { dueAt: dueAt?.toISOString() ?? null } : {}), ...(reminderAt !== undefined ? { reminderAt: reminderAt?.toISOString() ?? null } : {}), ...(deadlineAt !== undefined ? { deadlineAt: deadlineAt?.toISOString() ?? null } : {}) }).catch(() => undefined);
   }
 
-  handoffTask(task: TaskInfo, agent: AgentInfo): void {
-    this.editTask(task, { workflowStatus: "in_progress", progressNote: `Handed off to ${agent.name}` });
+  handoffTask(task: TaskInfo, agent: AgentInfo): boolean {
     this.selectAgent(agent);
-    this.send(`Please work on this task for me. Task ID: ${task.id}\nTitle: ${task.title}${task.description ? `\nDetails: ${task.description}` : ""}${task.dueAt ? `\nDue: ${task.dueAt}` : ""}${task.deadlineAt ? `\nDeadline: ${task.deadlineAt}` : ""}${task.labels?.length ? `\nLabels: ${task.labels.join(", ")}` : ""}\nUpdate the task's progressNote as you work so I can see what you are doing, add relevant labels if needed, and move its workflow status to AI review when your work is ready. Tell me what you did and what still needs my review.`);
+    const sent = this.send(`Please work on this task for me. Task ID: ${task.id}\nTitle: ${task.title}${task.description ? `\nDetails: ${task.description}` : ""}${task.dueAt ? `\nDue: ${task.dueAt}` : ""}${task.deadlineAt ? `\nDeadline: ${task.deadlineAt}` : ""}${task.labels?.length ? `\nLabels: ${task.labels.join(", ")}` : ""}\nUpdate the task's progressNote as you work so I can see what you are doing, add relevant labels if needed, and move its workflow status to AI review when your work is ready. Tell me what you did and what still needs my review.`);
+    if (!sent) {
+      // `send` told the owner when it was offline; a chat that is still loading is told here.
+      if (this.refusal) this.showToast(notice("failure", "Not sent", this.refusal));
+      return false;
+    }
+    // Only a message that went makes the task "handed off".
+    this.editTask(task, { workflowStatus: "in_progress", progressNote: `Handed off to ${agent.name}` });
+    return true;
   }
 
   /**
@@ -858,9 +866,19 @@ export class AppModel {
     return null;
   }
 
+  /**
+   * Why the last `send` answered false, when the model raised no notice of its own (a chat that is still
+   * loading). `null`: it already told the owner (not connected) or there was nothing to send.
+   */
+  sendRefusal(): string | null {
+    return this.refusal;
+  }
+
   send(text: string, attachments: AttachmentInfo[] = []): boolean {
+    this.refusal = null;
     if (!this.conversationMatchesAddress()) {
-      this.showToast(notice("failure", "Not sent", "This chat is still loading. Your message was kept; send it again in a moment."));
+      // No toast: whoever called `send` shows this once, where the owner is looking (see `sendRefusal`).
+      this.refusal = "This chat is still loading. Your draft was kept; send it again in a moment.";
       return false;
     }
     const content = text.trim() ? text : (attachments.length ? "Please review the attached files." : "");
@@ -968,7 +986,7 @@ export class AppModel {
       body: JSON.stringify({ ids: attachments.map((file) => file.id) }),
     });
     if (expectedAgentID && this.conversation.agentID !== expectedAgentID) throw new Error("The selected agent changed. Review your draft and send it again.");
-    if (!this.send(text, attachments)) throw new Error("Not connected. Your draft has been kept; try again after reconnecting.");
+    if (!this.send(text, attachments)) throw new Error(this.refusal ?? "Not connected. Your draft has been kept; try again after reconnecting.");
   }
 
   renameAgent(name: string, agentID = "ea"): void {
