@@ -70,8 +70,9 @@ describe("S1-25: the web_fetch tool takes maxChars from 1 to 20,000", () => {
     const schema = registry.get("web_fetch")!.schema as { properties: { maxChars: { minimum: number; maximum: number } } };
     expect(schema.properties.maxChars).toMatchObject({ type: "integer", minimum: 1, maximum: 20_000 });
     expect(registry.validateArgs("web_fetch", { url: "https://example.com", maxChars: 20_000 })).toBeNull();
-    expect(registry.validateArgs("web_fetch", { url: "https://example.com", maxChars: 20_001 })).toMatch(/"maxChars" must be at most 20000/);
-    expect(registry.validateArgs("web_fetch", { url: "https://example.com", maxChars: 0 })).toMatch(/"maxChars" must be at least 1/);
+    // Past the bounds the call is clamped to them (tool-args-validation.test.ts), not refused.
+    expect(registry.validateArgs("web_fetch", { url: "https://example.com", maxChars: 20_001 })).toBeNull();
+    expect(registry.validateArgs("web_fetch", { url: "https://example.com", maxChars: "lots" })).toMatch(/"maxChars" must be an integer/);
   });
 
   test("the handler passes a value above 20 through instead of dropping it", async () => {
@@ -85,7 +86,8 @@ describe("S1-25: the web_fetch tool takes maxChars from 1 to 20,000", () => {
   test("other tools keep their limit of 20", () => {
     db = openDatabase(":memory:");
     const registry = buildTaskToolRegistry(db);
-    expect(registry.validateArgs("web_search", { query: "x", count: 21 })).toMatch(/"count" must be at most 20/);
+    const schema = registry.get("web_search")!.schema as { properties: { count: { maximum: number } } };
+    expect(schema.properties.count.maximum).toBe(20);
   });
 });
 

@@ -68,11 +68,14 @@ describe("approvalTarget: what a rule is scoped to", () => {
     expect(approvalTarget("mail_send", { account: "agent", to: ["Bob@x.com", "amy@x.com"], subject: "one", body: "b1" })).not.toBe(a);
   });
 
-  test("calendar_update is the account and event id; calendar_create is its exact arguments", () => {
+  test("calendar_update and calendar_create are their exact arguments, key order aside", () => {
     const u = approvalTarget("calendar_update", { account: "owner", eventId: "ev1", summary: "x" });
-    expect(approvalTarget("calendar_update", { account: "owner", eventId: "ev1", summary: "different", location: "y" })).toBe(u);
-    expect(approvalTarget("calendar_update", { account: "owner", eventId: "ev2" })).not.toBe(u);
-    expect(approvalTarget("calendar_update", { account: "agent", eventId: "ev1" })).not.toBe(u);
+    expect(approvalTarget("calendar_update", { summary: "x", eventId: "ev1", account: "owner" })).toBe(u);
+    // A different edit to the same event is a different thing to allow.
+    expect(approvalTarget("calendar_update", { account: "owner", eventId: "ev1", summary: "different", location: "y" })).not.toBe(u);
+    expect(approvalTarget("calendar_update", { account: "owner", eventId: "ev1", summary: "x", attendees: ["evil@x.com"] })).not.toBe(u);
+    expect(approvalTarget("calendar_update", { account: "owner", eventId: "ev2", summary: "x" })).not.toBe(u);
+    expect(approvalTarget("calendar_update", { account: "agent", eventId: "ev1", summary: "x" })).not.toBe(u);
     const c = approvalTarget("calendar_create", { account: "owner", summary: "x", start: "s", end: "e" });
     expect(approvalTarget("calendar_create", { account: "owner", summary: "x", start: "s", end: "e2" })).not.toBe(c);
   });
@@ -82,6 +85,27 @@ describe("approvalTarget: what a rule is scoped to", () => {
     expect(approvalTarget("mcp_files_delete", { opts: { a: [2, 1], b: 1 }, path: "/x" })).toBe(a);
     expect(approvalTarget("mcp_files_delete", { opts: { a: [1, 2], b: 1 }, path: "/x" })).not.toBe(a);
     expect(approvalTarget("mcp_files_delete", { path: "/y", opts: { b: 1, a: [2, 1] } })).not.toBe(a);
+  });
+
+  test("bash commands that run code are never remembered", () => {
+    // An interpreter, shell, script or build/test tool runs whatever the files
+    // it names say today; a file the bot can append to would turn a rule into
+    // a shell without asking. Checked per command segment, not just the first.
+    const runsCode = [
+      "python3 run.py", "python run.py", "node x.js", "bun test", "deno run x.ts", "sh x.sh", "bash -c 'rm -rf x'", "zsh x", "pwsh -File a.ps1",
+      "powershell -c ls", "cmd /c dir", "make test", "npm test", "npx tsc", "pnpm i", "yarn build", "pytest", "cargo run", "go run .", "java Main",
+      "ruby a.rb", "perl a.pl", "php a.php", "python3.11 run.py", "Python.exe run.py", "./run.sh", "../tools/x", "/usr/bin/thing", "C:\\tools\\x.exe a",
+      "scripts\\run.cmd", "~/bin/thing", "cd build && python run.py", "ls; sh x", "echo hi | sh", "FOO=1 python x.py", "sudo rm x", "env python x.py",
+      "xargs rm", "nohup ./x", "time python x", "echo $(python x.py)", "echo `node x.js`", "(python x.py)", "ls\npython x.py", "eval ls", "source x.sh", ". ./x.sh",
+      "find . -exec rm {} ;", "timeout 5 ls",
+    ];
+    for (const command of runsCode) expect({ command, target: approvalTarget("bash", { command }) }).toEqual({ command, target: null });
+  });
+
+  test("plain commands that do not run code are remembered", () => {
+    for (const command of ["rm -rf build", "git push origin main", "mkdir -p out/x", "cp a b", "echo python", "ls -la | wc -l", "mv old new && ls"]) {
+      expect({ command, remembered: approvalTarget("bash", { command }) !== null }).toEqual({ command, remembered: true });
+    }
   });
 
   test("run_privileged is never remembered: the owner reviews each command", () => {
@@ -155,13 +179,14 @@ describe("the rule store", () => {
 });
 
 describe("the broker uses rules", () => {
-  function harness(answers: Decision[], agentID = "ea") {
+  function harness(answers: Decision[], agentID = "ea", approvalNote?: (toolName: string) => string | undefined) {
     const thread = createThread(db, agentID);
-    const frames: Array<{ type: string; requestID: string; preview: string }> = [];
+    const frames: Array<{ type: string; requestID: string; preview: string; buttons: Decision[] }> = [];
     let asked = 0;
     const broker = new ApprovalBroker({
       db,
       emit: (frame) => frames.push(frame),
+      approvalNote,
       waitForDecision: async (requestID) => {
         asked += 1;
         const decision = answers.shift() ?? null;
@@ -283,6 +308,44 @@ describe("the broker uses rules", () => {
     createTurn(db, { id: "trn_child", threadID: h.thread.id, agentID: "researcher" });
     const decision = await h.broker.request(h.thread.id, "trn_child", "bash", "call_child", { command: "rm -rf build" }, new AbortController().signal);
     expect(decision).toBe("reject");
+  });
+
+  test("a card offers 'always' only when a rule could be stored", async () => {
+    const h = harness(["once", "once", "once", "once", "once"]);
+    await h.ask("bash", { command: "rm -rf build" });
+    await h.ask("bash", { command: "python3 run.py" });
+    await h.ask("bash", { command: "./run.sh" });
+    await h.ask("run_privileged", { command: "sudo ls", purpose: "list" });
+    await h.ask("write_file", { path: join(root, "outside", "x.md"), content: "x" });
+    expect(h.frames.map((f) => f.buttons)).toEqual([
+      ["once", "always", "reject"],
+      ["once", "reject"],
+      ["once", "reject"],
+      ["once", "reject"],
+      ["once", "always", "reject"],
+    ]);
+  });
+
+  test("'always' on a command that runs code stores nothing, so the next call asks again", async () => {
+    const h = harness(["always", "once"]);
+    await h.ask("bash", { command: "python3 run.py" });
+    expect(listApprovalRules(db)).toHaveLength(0);
+    expect(await h.ask("bash", { command: "python3 run.py" })).toBe("once");
+    expect(h.frames).toHaveLength(2);
+  });
+
+  test("an approval note from the integration appears in the preview, and only when there is one", async () => {
+    const h = harness(["once", "once", "always", "once"], "ea", (tool) => (tool === "mcp_gh_delete" ? "Runs on the GitHub connector: deletes a repo." : undefined));
+    await h.ask("mcp_gh_delete", { repo: "x" });
+    await h.ask("bash", { command: "rm -rf build" });
+    expect(h.frames[0]!.preview).toContain("Runs on the GitHub connector: deletes a repo.");
+    expect(h.frames[1]!.preview).not.toContain("GitHub");
+    // The auto-approved audit row keeps the note too.
+    await h.ask("mcp_gh_delete", { repo: "y" });
+    await h.ask("mcp_gh_delete", { repo: "y" });
+    const last = rows().at(-1)!;
+    expect(String(last.preview)).toContain("Runs on the GitHub connector");
+    expect(String(last.preview)).toContain("Auto-approved");
   });
 
   test("the rule table exists after migration with the documented columns", () => {

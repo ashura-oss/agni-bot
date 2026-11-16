@@ -50,18 +50,18 @@ describe("validateArgs: the JSON-schema subset the tools use", () => {
   test("wrong types name the field and the type wanted", () => {
     expect(validateArgs(schema, { name: 5 })).toBe('invalid arguments: "name" must be a string');
     expect(validateArgs(schema, { name: "abc", count: 1.5 })).toBe('invalid arguments: "count" must be an integer');
-    expect(validateArgs(schema, { name: "abc", count: "2" })).toBe('invalid arguments: "count" must be an integer');
+    expect(validateArgs(schema, { name: "abc", count: "abc" })).toBe('invalid arguments: "count" must be an integer');
+    expect(validateArgs(schema, { name: "abc", count: "" })).toBe('invalid arguments: "count" must be an integer');
+    expect(validateArgs(schema, { name: "abc", count: "2.5" })).toBe('invalid arguments: "count" must be an integer');
     expect(validateArgs(schema, { name: "abc", ratio: Number.NaN })).toBe('invalid arguments: "ratio" must be a number');
     expect(validateArgs(schema, { name: "abc", on: "yes" })).toBe('invalid arguments: "on" must be a boolean');
-    expect(validateArgs(schema, { name: "abc", tags: "x" })).toBe('invalid arguments: "tags" must be an array');
+    expect(validateArgs(schema, { name: "abc", tags: 5 })).toBe('invalid arguments: "tags" must be an array');
     expect(validateArgs(schema, { name: "abc", either: 4 })).toBe('invalid arguments: "either" must be a string or null');
   });
 
-  test("minimum, maximum, minLength, maxLength, maxItems and minItems", () => {
+  test("minLength, maxLength, maxItems and minItems", () => {
     expect(validateArgs(schema, { name: "a" })).toBe('invalid arguments: "name" must be at least 2 characters (got 1)');
     expect(validateArgs(schema, { name: "abcdef" })).toBe('invalid arguments: "name" must be at most 5 characters (got 6)');
-    expect(validateArgs(schema, { name: "abc", count: 0 })).toBe('invalid arguments: "count" must be at least 1 (got 0)');
-    expect(validateArgs(schema, { name: "abc", count: 99 })).toBe('invalid arguments: "count" must be at most 3 (got 99)');
     expect(validateArgs(schema, { name: "abc", tags: ["a", "b", "c"] })).toBe('invalid arguments: "tags" must have at most 2 items (got 3)');
     expect(validateArgs(schema, { name: "abc", tags: [] })).toBe('invalid arguments: "tags" must have at least 1 items (got 0)');
   });
@@ -114,8 +114,9 @@ describe("the registry validates before the handler", () => {
       schema: { type: "object", properties: { n: { type: "integer", maximum: 2 } }, required: ["n"] },
       handler: async () => null,
     });
-    expect(registry.validateArgs("demo", { n: 3 })).toBe('invalid arguments: "n" must be at most 2 (got 3)');
-    expect(registry.validateArgs("demo", { n: 2 })).toBeNull();
+    expect(registry.validateArgs("demo", { n: "many" })).toBe('invalid arguments: "n" must be an integer');
+    expect(registry.validateArgs("demo", {})).toBe('invalid arguments: "n" is required');
+    expect(registry.validateArgs("demo", { n: 3 })).toBeNull(); // out of range is clamped, not refused
     expect(registry.validateArgs("nope", {})).toBeNull();
   });
 });

@@ -80,6 +80,11 @@ export interface ApprovalBrokerDeps {
    * an action that cannot run.
    */
   validate?: (toolName: string, args: Record<string, unknown>) => string | null;
+  /**
+   * A line the integration wants the owner to read with the card for this tool
+   * (an MCP connector's own warning, say). Appended to the preview.
+   */
+  approvalNote?: (toolName: string) => string | undefined;
 }
 
 /** Tools that cannot destroy state or reach outside scratch. Everything else asks. */
@@ -111,7 +116,8 @@ export class ApprovalBroker {
     signal: AbortSignal,
   ): Promise<Decision | null> {
     const action = describeAction(toolName, args);
-    const preview = previewAction(toolName, args);
+    const note = this.deps.approvalNote?.(toolName);
+    const preview = note ? `${previewAction(toolName, args)}\n\n${note}` : previewAction(toolName, args);
     const { db } = this.deps;
     const requestID = newID("apr");
     // The rule's scope: this turn's bot, this tool, this exact target. Without
@@ -144,7 +150,7 @@ Auto-approved by standing rule ${rule.id}: "Always allow" for ${rule.agentID} / 
       [requestID, threadID, turnID, action, preview, callID, toolName, nowISO()],
     );
 
-    this.deps.emit({ type: "approval.request", requestID, action, preview, buttons: ["once", "always", "reject"] });
+    this.deps.emit({ type: "approval.request", requestID, action, preview, buttons: scope ? ["once", "always", "reject"] : ["once", "reject"] });
 
     const decision = await this.deps.waitForDecision(requestID, signal);
     if (decision === "always" && scope) addApprovalRule(db, { ...scope, toolName, approvalID: requestID });
@@ -168,13 +174,12 @@ Auto-approved by standing rule ${rule.id}: "Always allow" for ${rule.agentID} / 
         return !isReadOnlyCommand(String(args.command ?? ""), typeof args.cwd === "string" ? args.cwd : undefined);
       case "write_file": {
         // Writes outside the owner-declared scratch tree gate. Inside scratch,
-        // creating a new file is free; replacing one that exists destroys what
-        // was there (a denied delete must not be doable as an overwrite), so it
-        // asks. Appending keeps what was there and stays free. A relative path
-        // means a path under scratch, as it does for the tool itself.
+        // creating a new file is free; changing one that exists asks, whether
+        // it is replaced (a denied delete must not be doable as an overwrite)
+        // or appended to (an appended script is a changed script). A relative
+        // path means a path under scratch, as it does for the tool itself.
         const path = typeof args.path === "string" ? args.path : "";
         if (isOutsideScratch(path, scratchDir())) return true;
-        if (args.append === true) return false;
         return writeTargetExists(path);
       }
       case "mail_send":

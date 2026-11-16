@@ -11,7 +11,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApprovalBroker } from "../src/agent/approval-broker";
-import { confineToScratch, isInsidePath, isOutsideScratch, resolveWritePath, writeFile } from "../src/tools/write-file";
+import { confineToScratch, createExclusive, isInsidePath, isOutsideScratch, resolveWritePath, writeFile } from "../src/tools/write-file";
 import { glob, grep } from "../src/tools/search";
 
 const broker = new ApprovalBroker({
@@ -117,15 +117,51 @@ describe("S1-06: inside scratch only overwriting asks", () => {
     }
   });
 
-  test("appending to an existing file inside scratch stays free (it destroys nothing)", () => {
+  test("appending to an existing file inside scratch asks like an overwrite; a new file by append is free", () => {
+    // An appended script is a changed script: "ask when changing an existing file".
     writeFileSync(join(scratch, "log.md"), "one\n");
-    expect(broker.requiresApproval("write_file", { path: "log.md", content: "two\n", append: true })).toBe(false);
+    expect(broker.requiresApproval("write_file", { path: "log.md", content: "two\n", append: true })).toBe(true);
     expect(broker.requiresApproval("write_file", { path: "log.md", content: "two\n", append: false })).toBe(true);
+    expect(broker.requiresApproval("write_file", { path: "fresh.md", content: "two\n", append: true })).toBe(false);
   });
 
   test("outside scratch always asks, new file or not", () => {
     expect(broker.requiresApproval("write_file", { path: join(root, "elsewhere", "brand-new.txt"), content: "x" })).toBe(true);
     expect(broker.requiresApproval("write_file", { path: "../elsewhere/brand-new.txt", content: "x" })).toBe(true);
     expect(broker.requiresApproval("write_file", { path: "", content: "x" })).toBe(true);
+  });
+});
+
+describe("how writeFile writes", () => {
+  test("append adds to the end and leaves existing bytes untouched (a binary file survives)", () => {
+    const bytes = Buffer.from([0xff, 0xfe, 0x00, 0x80, 0x0d, 0x0a, 0xc3]);
+    writeFileSync(join(scratch, "blob.bin"), bytes);
+    const result = writeFile({ path: "blob.bin", content: "tail", append: true });
+    expect(result.created).toBe(false);
+    expect(readFileSync(join(scratch, "blob.bin")).equals(Buffer.concat([bytes, Buffer.from("tail")]))).toBe(true);
+  });
+
+  test("append to a file that does not exist creates it", () => {
+    const result = writeFile({ path: "new-log.md", content: "first", append: true });
+    expect(result.created).toBe(true);
+    expect(readFileSync(join(scratch, "new-log.md"), "utf8")).toBe("first");
+  });
+
+  test("a new file is created exclusively: one that appeared since the check is never overwritten", () => {
+    const target = join(scratch, "raced.txt");
+    writeFileSync(target, "someone else's");
+    expect(() => createExclusive(target, "mine", false)).toThrow("already exists");
+    expect(readFileSync(target, "utf8")).toBe("someone else's");
+    expect(() => createExclusive(target, "mine", true)).not.toThrow(); // append never overwrites
+    expect(readFileSync(target, "utf8")).toBe("someone else'smine");
+    createExclusive(join(scratch, "brand-new.txt"), "ok", false);
+    expect(readFileSync(join(scratch, "brand-new.txt"), "utf8")).toBe("ok");
+  });
+
+  test("overwriting an existing file (the gated case) still replaces it", () => {
+    writeFileSync(join(scratch, "old.txt"), "old content");
+    const result = writeFile({ path: "old.txt", content: "new" });
+    expect(result.created).toBe(false);
+    expect(readFileSync(join(scratch, "old.txt"), "utf8")).toBe("new");
   });
 });

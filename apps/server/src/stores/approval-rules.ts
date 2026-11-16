@@ -21,14 +21,18 @@
  *                   `{"account","to"}`, recipients sorted and de-duplicated,
  *                   the domain lower-cased and the local part left exact.
  *                   Never the subject or body.
- *   calendar_update the account plus the event id: JSON `{"account","eventId"}`.
  *   anything else   the canonical JSON of the arguments (keys sorted at every
- *                   level, array order kept). That covers calendar_create and
- *                   every plugin tool: only the very same call is remembered.
+ *                   level, array order kept). That covers the calendar tools
+ *                   and every plugin tool: only the very same call is
+ *                   remembered, so an event id alone never allows a new edit.
  *
- * Some tools are never remembered (`NEVER_REMEMBER`): their approval is the
- * point of the tool. `approvalTarget` returns null for those, and for a call
- * whose target cannot be worked out; null means "ask every time".
+ * Some calls are never remembered: `run_privileged` (its approval is the point
+ * of the tool) and a bash command that runs code (`runsCode`: an interpreter,
+ * shell, script, or build/test tool, which runs files whose content may have
+ * changed since the owner looked, so "always" would be a shell without
+ * asking). `approvalTarget` returns null for those, and for a call whose
+ * target cannot be worked out; null means "ask every time", and the card does
+ * not offer "always".
  */
 import type { Database } from "bun:sqlite";
 import { resolve } from "node:path";
@@ -76,7 +80,7 @@ export function approvalTarget(toolName: string, args: Record<string, unknown>):
   switch (toolName) {
     case "bash": {
       const command = typeof args.command === "string" ? args.command.replace(/\r\n/g, "\n").trim() : "";
-      if (!command) return null;
+      if (!command || runsCode(command)) return null;
       if (typeof args.cwd === "string" && args.cwd.trim()) return `cd ${shellQuote(resolve(args.cwd))} && ${command}`;
       return command;
     }
@@ -92,13 +96,6 @@ export function approvalTarget(toolName: string, args: Record<string, unknown>):
       const to = [...new Set(raw.filter((entry): entry is string => typeof entry === "string").map(normaliseRecipient).filter(Boolean))].sort();
       if (to.length === 0) return null;
       return canonicalJSON({ account, to });
-    }
-    case "calendar_update": {
-      if (typeof args.eventId === "string" && args.eventId.trim()) {
-        const account = typeof args.account === "string" && args.account.trim() ? args.account.trim().toLowerCase() : "agent";
-        return canonicalJSON({ account, eventId: args.eventId.trim() });
-      }
-      return canonicalJSON(args);
     }
     default:
       return canonicalJSON(args);
@@ -148,6 +145,32 @@ export function listApprovalRules(db: Database, options: { includeRevoked?: bool
 export function revokeApprovalRule(db: Database, id: string): boolean {
   const result = db.run("UPDATE approval_rules SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL", [nowISO(), id]);
   return result.changes > 0;
+}
+
+/** Programs that run code from files or arguments: interpreters, shells, wrappers, and build/test tools. */
+const CODE_RUNNERS = new Set([
+  "node", "bun", "bunx", "deno", "tsx", "ts-node", "npm", "npx", "pnpm", "yarn", "pip", "pip3", "uv", "uvx", "pytest", "tox",
+  "sh", "bash", "zsh", "fish", "dash", "ksh", "csh", "tcsh", "pwsh", "powershell", "cmd", "wsl", "osascript",
+  "make", "cmake", "ninja", "gradle", "mvn", "ant", "cargo", "rustc", "go", "java", "javac", "dotnet", "ruby", "perl", "php", "lua", "rscript",
+  "awk", "gawk", "nawk", "find", "xargs", "env", "sudo", "doas", "nohup", "time", "timeout", "exec", "eval", "source", ".", "command", "builtin", "busybox", "start", "call",
+]);
+
+/**
+ * True when any simple command in `command` (split on `;`, `&`, `|`, newlines,
+ * parentheses, backticks and braces) starts with a code runner or with a path.
+ * Over-matching only means the owner is asked again, which is the safe error.
+ */
+function runsCode(command: string): boolean {
+  for (const segment of command.split(/[;&|\n\r()`{}]|\$\(/)) {
+    const words = segment.trim().split(/\s+/).filter(Boolean);
+    const first = words.find((word) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(word));
+    if (!first) continue;
+    const word = first.replace(/^['"]+|['"]+$/g, "");
+    if (/[\\/]/.test(word) || word.startsWith("~") || (word.startsWith(".") && word !== ".")) return true;
+    const name = word.toLowerCase().replace(/\.(exe|cmd|bat|com|ps1)$/, "");
+    if (CODE_RUNNERS.has(name) || /^(python|pypy)[\d.]*$/.test(name)) return true;
+  }
+  return false;
 }
 
 function normaliseRecipient(entry: string): string {

@@ -12,10 +12,76 @@
 
 type Schema = Record<string, unknown>;
 
-/** Null when `args` satisfy `schema`; otherwise one sentence naming the first problem. */
+export type NormalizedArgs =
+  | { ok: true; args: unknown; notes: string[] }
+  | { ok: false; error: string };
+
+/**
+ * Repair what the models routinely send, then check the result. The handlers
+ * always tolerated these, so refusing them would break calls that worked:
+ *   - null for an optional field means "not given" (the field is dropped);
+ *   - a numeric string where a number is wanted becomes the number;
+ *   - a number outside minimum/maximum is clamped to the bound (a note says so);
+ *   - one string where an array of strings is wanted becomes a one-item array.
+ * A missing or null required field, a value of the wrong type that cannot be
+ * repaired, an enum miss and a length breach are still refused.
+ */
+export function normalizeArgs(schema: unknown, args: unknown): NormalizedArgs {
+  const notes: string[] = [];
+  const root = isRecord(schema) ? schema : {};
+  const repaired = repair(root, args === undefined ? {} : args, "", notes);
+  const problem = check(root, repaired, "", true);
+  return problem ? { ok: false, error: `invalid arguments: ${problem}` } : { ok: true, args: repaired, notes };
+}
+
+/** Null when `args` are acceptable (after repair); otherwise one sentence naming the first problem. */
 export function validateArgs(schema: unknown, args: unknown): string | null {
-  const problem = check(isRecord(schema) ? schema : {}, args === undefined ? {} : args, "", true);
-  return problem ? `invalid arguments: ${problem}` : null;
+  const result = normalizeArgs(schema, args);
+  return result.ok ? null : result.error;
+}
+
+const NUMERIC = /^[-+]?\d+(\.\d+)?([eE][-+]?\d+)?$/;
+
+function repair(schema: Schema, value: unknown, path: string, notes: string[]): unknown {
+  const types = typeList(schema.type);
+  if (typeof value === "string" && types && !types.includes("string") && (types.includes("number") || types.includes("integer"))) {
+    const text = value.trim();
+    if (NUMERIC.test(text)) value = Number(text);
+  }
+  if (typeof value === "number" && Number.isFinite(value) && types && (types.includes("number") || (types.includes("integer") && Number.isInteger(value)))) {
+    if (typeof schema.minimum === "number" && value < schema.minimum) {
+      notes.push(`"${path}" was ${value}; used the minimum, ${schema.minimum}`);
+      return schema.minimum;
+    }
+    if (typeof schema.maximum === "number" && value > schema.maximum) {
+      notes.push(`"${path}" was ${value}; used the maximum, ${schema.maximum}`);
+      return schema.maximum;
+    }
+  }
+  if (typeof value === "string" && types?.includes("array") && !types.includes("string") && isRecord(schema.items) && schema.items.type === "string") {
+    return [value];
+  }
+  if (Array.isArray(value) && isRecord(schema.items)) {
+    return value.map((item, index) => repair(schema.items as Schema, item, `${path}[${index}]`, notes));
+  }
+  if (isRecord(value) && !Array.isArray(value) && isRecord(schema.properties)) {
+    const required = Array.isArray(schema.required) ? schema.required : [];
+    const copy: Record<string, unknown> = { ...value };
+    for (const [name, propertySchema] of Object.entries(schema.properties)) {
+      if (!(name in copy) || !isRecord(propertySchema)) continue;
+      if (copy[name] === null && !required.includes(name) && !allowsNull(propertySchema)) {
+        delete copy[name];
+        continue;
+      }
+      copy[name] = repair(propertySchema, copy[name], join(path, name), notes);
+    }
+    return copy;
+  }
+  return value;
+}
+
+function allowsNull(schema: Schema): boolean {
+  return typeList(schema.type)?.includes("null") ?? false;
 }
 
 function check(schema: Schema, value: unknown, path: string, root = false): string | null {
@@ -50,7 +116,10 @@ function check(schema: Schema, value: unknown, path: string, root = false): stri
     const properties = isRecord(schema.properties) ? schema.properties : {};
     if (Array.isArray(schema.required)) {
       for (const name of schema.required) {
-        if (typeof name === "string" && value[name] === undefined) return `"${join(path, name)}" is required`;
+        if (typeof name !== "string") continue;
+        const given = value[name];
+        const spec = properties[name];
+        if (given === undefined || (given === null && !(isRecord(spec) && allowsNull(spec)))) return `"${join(path, name)}" is required`;
       }
     }
     for (const [name, propertySchema] of Object.entries(properties)) {

@@ -8,13 +8,18 @@
  * `resolveWritePath` is the one answer to "which file does this path mean":
  * relative paths are relative to scratch, symlinks are followed.
  */
-import { lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { appendFileSync, lstatSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { homePath } from "../home";
 
 const MAX_BYTES = 1024 * 1024;
 
-/** Windows (and default macOS) file systems ignore case; paths compare folded. */
+/**
+ * Windows file systems ignore case, so paths compare folded there. macOS's
+ * default file system does too, but it is left case-sensitive here: a path
+ * that differs only in case then counts as outside scratch (it asks) and as
+ * a different rule target (it asks again), which is the safe direction.
+ */
 const CASE_INSENSITIVE = process.platform === "win32";
 
 /**
@@ -106,17 +111,29 @@ export interface WriteFileResult {
   created: boolean;
 }
 
+/**
+ * Write `content` to a file that did not exist a moment ago. The file is
+ * created exclusively, so one that appeared since the check (and so was never
+ * shown to the owner) is not silently replaced; appending never replaces.
+ */
+export function createExclusive(target: string, content: string, append: boolean): void {
+  try {
+    writeFileSync(target, content, { flag: append ? "a" : "wx" });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error(`${target} already exists; it was not overwritten`);
+    throw error;
+  }
+}
+
 export function writeFile(args: WriteFileArgs): WriteFileResult {
   if (args.content.length > MAX_BYTES) throw new Error("content exceeds 1 MB");
   const target = resolveWritePath(args.path);
   if (!target) throw new Error(`${args.path} is a dangling link and cannot be written`);
   const created = !writeTargetExists(args.path);
   mkdirSync(dirname(target), { recursive: true });
-  if (args.append) {
-    const existing = created ? "" : readFileSync(target, "utf8");
-    writeFileSync(target, existing + args.content, { flag: "w" });
-  } else {
-    writeFileSync(target, args.content, { flag: "w" });
-  }
+  if (created) createExclusive(target, args.content, args.append === true);
+  // The file exists: appending adds to the end and leaves what is there as it was.
+  else if (args.append) appendFileSync(target, args.content);
+  else writeFileSync(target, args.content, { flag: "w" });
   return { path: target, bytesWritten: args.content.length, created };
 }

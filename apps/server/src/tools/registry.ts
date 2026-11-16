@@ -6,7 +6,7 @@
  * model-invoked tools are not enabled until the separate task runner lands.
  * Shell/files/Gmail arrive later with their approval flows.
  */
-import { validateArgs } from "./validate-args";
+import { normalizeArgs, validateArgs } from "./validate-args";
 
 export interface ToolContext {
   threadID: string;
@@ -54,7 +54,8 @@ export class ToolRegistry {
 
   /**
    * The handler registered here is the tool's own, behind a check of the
-   * arguments against `schema`: a call that breaks the schema fails with an
+   * arguments against `schema` (after repairing what the models routinely
+   * send: see `normalizeArgs`): a call that breaks the schema fails with an
    * error naming the field, and the tool's code never runs.
    */
   register<Args, Result>(definition: ToolDefinition<Args, Result>): void {
@@ -64,9 +65,14 @@ export class ToolRegistry {
     const guarded: ToolDefinition<Args, Result> = {
       ...definition,
       handler: async (args, ctx) => {
-        const problem = validateArgs(definition.schema, args);
-        if (problem) throw new Error(problem);
-        return handle(args, ctx);
+        const checked = normalizeArgs(definition.schema, args);
+        if (!checked.ok) throw new Error(checked.error);
+        const result = await handle(checked.args as Args, ctx);
+        // A value that was clamped is said so, so the model is not misled about what ran.
+        if (checked.notes.length && typeof result === "object" && result !== null && !Array.isArray(result)) {
+          return { ...result, argumentNotes: checked.notes } as Result;
+        }
+        return result;
       },
     };
     this.tools.set(definition.name, guarded as ToolDefinition<never, unknown>);
