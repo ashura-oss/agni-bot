@@ -19,6 +19,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PROTOCOL_VERSION, parseServerFrame, type ClientFrame, type ServerFrame } from "@agni/protocol";
 import { PERSONAS } from "../../src/agent/personas";
+import { setUsageRecorder } from "../../src/models/usage-hook";
+import { noopAuditSink, setAuditSink } from "../../src/policy/audit-sink";
+import { runStartupHooks } from "../../src/startup";
 import { mintToken } from "../../src/auth/tokens";
 import type { Config } from "../../src/config";
 import { openDatabase } from "../../src/db";
@@ -274,18 +277,27 @@ interface Waiter {
 export class ScenarioClient {
   /** Every valid server frame received, in order. */
   readonly frames: ServerFrame[] = [];
+  /**
+   * Every frame as the server sent it, before protocol validation strips fields
+   * the schema does not know yet (so a test sees `source`, `tier` or `expiresAt`
+   * on a card even while the client schema lags the server).
+   */
+  readonly rawFrames: Array<Record<string, unknown>> = [];
   /** Frames that failed protocol validation (a protocol bug if not empty). */
   readonly invalid: string[] = [];
   readonly closed: Promise<void>;
   /** Highest seq seen: what a reconnect passes to `resync`. */
   lastSeq = 0;
   private readonly waiters = new Set<Waiter>();
+  private readonly listeners = new Set<(frame: ServerFrame) => void>();
 
   private constructor(private readonly ws: WebSocket, readonly label: string) {
     this.closed = new Promise<void>((resolve) => ws.addEventListener("close", () => resolve(), { once: true }));
     ws.addEventListener("message", (event) => {
       if (typeof event.data !== "string") return;
-      const parsed = parseServerFrame(JSON.parse(event.data));
+      const json = JSON.parse(event.data) as Record<string, unknown>;
+      this.rawFrames.push(json);
+      const parsed = parseServerFrame(json);
       if (!parsed.ok) {
         this.invalid.push(parsed.error);
         return;
@@ -294,6 +306,7 @@ export class ScenarioClient {
       this.frames.push(frame);
       this.lastSeq = Math.max(this.lastSeq, frame.seq);
       const index = this.frames.length - 1;
+      for (const listener of [...this.listeners]) listener(frame);
       for (const waiter of [...this.waiters]) {
         if (index >= waiter.since && waiter.test(frame)) {
           clearTimeout(waiter.timer);
@@ -325,6 +338,20 @@ export class ScenarioClient {
 
   send(frame: ClientFrame): void {
     this.ws.send(JSON.stringify(frame));
+  }
+
+  /** Send a frame the protocol package does not type yet (a frame a later task adds). */
+  sendRaw(frame: Record<string, unknown>): void {
+    this.ws.send(JSON.stringify(frame));
+  }
+
+  /**
+   * Call `listener` for every frame that arrives from now on (an owner who answers
+   * approval cards while a background job runs). Returns the function that stops it.
+   */
+  onFrame(listener: (frame: ServerFrame) => void): () => void {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
   }
 
   /** Index to pass as `since` so a later wait ignores everything before now. */
@@ -425,6 +452,18 @@ const provider: ProviderConfig = {
 
 export interface ScenarioOptions {
   turnTimeoutMs?: number;
+  /**
+   * How long a background job waits on an approval card before the card
+   * expires (an expiry is a denial). Chat turns use the server's own ceiling.
+   */
+  ownerWaitMs?: number;
+  /** The model id the scripted provider reports. A task that prices calls needs a priced one. */
+  model?: string;
+  /**
+   * Serve the model from a real HTTP endpoint (the mock provider) instead of
+   * the in-process script: the base URL, such as `http://127.0.0.1:9911/v1`.
+   */
+  modelBaseUrl?: string;
 }
 
 export class Scenario {
@@ -482,6 +521,8 @@ export class Scenario {
     // Skip first-run onboarding: the scenarios are about work, not the name prompt.
     this.db.run("UPDATE agents SET onboarded = 1 WHERE id = 'ea'");
     this.token = (await mintToken(this.db, "scenario-owner")).token;
+    // The sprint startup hooks `serve()` runs (audit sink, usage recorder), so scenarios see the wiring the daemon has.
+    await runStartupHooks({ db: this.db, config: this.config() });
     this.listen();
   }
 
@@ -492,7 +533,7 @@ export class Scenario {
       dbPath: this.dbPath,
       pidPath: "",
       logPath: "",
-      providers: [provider],
+      providers: [this.activeProvider()],
       firstTokenTimeoutMs: 10_000,
       turnTimeoutMs: this.options.turnTimeoutMs ?? 30_000,
       helloTimeoutMs: 2_000,
@@ -503,8 +544,17 @@ export class Scenario {
     };
   }
 
+  private activeProvider(): ProviderConfig {
+    return {
+      ...provider,
+      ...(this.options.model ? { model: this.options.model } : {}),
+      ...(this.options.modelBaseUrl ? { baseUrl: this.options.modelBaseUrl } : {}),
+    };
+  }
+
   private listen(): void {
-    this.router = new Router([provider], new HealthTracker(), this.model.fetch);
+    // The router calls whatever fetch it is given: the script, or the real one for a mock provider on loopback.
+    this.router = new Router([this.activeProvider()], new HealthTracker(), this.options.modelBaseUrl ? fetch : this.model.fetch);
     this.server = startServer(this.config(), this.db, this.router);
     this.jobRunner = undefined;
   }
@@ -544,6 +594,7 @@ export class Scenario {
     this.server.stop();
     this.db.close();
     this.db = openDatabase(this.dbPath);
+    await runStartupHooks({ db: this.db, config: this.config() });
     this.listen();
   }
 
@@ -554,7 +605,11 @@ export class Scenario {
       registerTurnJob(this.jobRunner, {
         db: this.db,
         router: this.router,
-        settings: { firstTokenTimeoutMs: 10_000, turnTimeoutMs: this.options.turnTimeoutMs ?? 30_000 },
+        settings: {
+          firstTokenTimeoutMs: 10_000,
+          turnTimeoutMs: this.options.turnTimeoutMs ?? 30_000,
+          ...(this.options.ownerWaitMs ? { ownerWaitMs: this.options.ownerWaitMs } : {}),
+        },
         emit: this.server.emit,
       });
     }
@@ -615,6 +670,9 @@ export class Scenario {
     }
     for (const client of this.clients) client.close();
     try { this.server?.stop(); } catch { /* already stopped */ }
+    // Process-wide hooks a startup hook may have set point at this database: drop them before it closes.
+    setAuditSink(noopAuditSink);
+    setUsageRecorder(() => {});
     try { this.db?.close(); } catch { /* already closed */ }
     for (const [key, value] of Object.entries(this.savedEnv)) {
       if (value === undefined) delete process.env[key];
