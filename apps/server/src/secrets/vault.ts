@@ -6,13 +6,16 @@
  */
 import { readFileSync, statSync } from "node:fs";
 import { writePrivateFileSync, PrivateFileError } from "../util/private-file";
-import { registerSecret } from "../util/redact";
+import { registerSecret as register } from "../util/redact";
 import { decodeVault, encodeVault, parseHeader, type StoredEntry, type VaultHeader } from "./format";
 import { withFileLock } from "./lock";
 import { VAULT_MAX_VALUE_BYTES, VAULT_NAME_PATTERN, VaultError, type Vault, type VaultEntryInfo } from "./types";
 
 /** How often `get` looks at the file to see whether another process changed it. */
 const REFRESH_EVERY_MS = 1000;
+
+/** An empty value is not a secret and would mask every empty string. */
+const registerSecret = (value: string): void => { if (value !== "") register(value); };
 
 export function lockPathOf(vaultPath: string): string {
   return `${vaultPath}.lock`;

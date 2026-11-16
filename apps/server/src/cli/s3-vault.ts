@@ -1,4 +1,122 @@
+import { join } from "node:path";
+import { agniHome } from "../home";
+import { openDatabaseForCLI } from "../db";
+import { loadConfig } from "../config";
+import { setEnvFileValues } from "../secrets/env";
+import { runVaultExport, runVaultMigrations } from "../secrets/migrate";
+import { VaultError, unlockVault, vaultExists, vaultStatus } from "../secrets";
+import { vaultRefusalMessage } from "../startup/s3-vault";
 import type { CommandTable } from "./command-table";
 
-/** CLI commands for s3-vault. Add entries to `commands` and one line each to `help`. */
-export const s3VaultCommands: CommandTable = { commands: {}, help: [] };
+const USAGE = `usage:
+  agni vault status                 where the vault is, which keystore holds its key, whether it opens
+  agni vault list                   entry names (never values)
+  agni vault migrate                move plaintext credentials into the vault (backup first), then switch to vault mode
+  agni vault export --yes           ROLLBACK: write every secret back to the old plaintext files`;
+
+function fail(message: string): void {
+  console.error(message);
+  process.exitCode = 1;
+}
+
+async function open(create: boolean) {
+  try {
+    return await unlockVault({ create });
+  } catch (error) {
+    fail(error instanceof VaultError ? vaultRefusalMessage(error) : String(error));
+    return undefined;
+  }
+}
+
+async function status(): Promise<void> {
+  const info = vaultStatus();
+  console.log(`vault:     ${info.path}`);
+  console.log(`exists:    ${info.exists ? "yes" : "no"}`);
+  console.log(`mode:      ${info.mode}${info.mode === "file" ? " (credentials still load from config.env; run `agni vault migrate`)" : ""}`);
+  if (!info.exists) return;
+  console.log(`format:    version ${info.version ?? "unreadable"}, keystore ${info.keystoreKind ?? "unreadable"}`);
+  const vault = await open(false);
+  if (!vault) return;
+  console.log(`unlocks:   yes (${vault.list().length} entries)`);
+}
+
+async function list(): Promise<void> {
+  const vault = await open(false);
+  if (!vault) return;
+  for (const entry of vault.list()) console.log(`${entry.name}  (updated ${entry.updatedAt || "unknown"})`);
+  if (vault.list().length === 0) console.log("the vault is empty");
+}
+
+/** The database, when there is one: some migrators (OAuth tokens) need it. A bare vault CLI works without it. */
+function optionalDatabase() {
+  try {
+    const config = loadConfig();
+    return openDatabaseForCLI(config.dbPath);
+  } catch {
+    return undefined;
+  }
+}
+
+async function migrate(): Promise<void> {
+  const vault = await open(true);
+  if (!vault) return;
+  const home = agniHome();
+  const db = optionalDatabase();
+  try {
+    const results = await runVaultMigrations(vault, { home, db });
+    for (const { name, count } of results) console.log(`${name}: ${count} moved`);
+    // Only after every migrator finished: from now on credentials come from the vault.
+    setEnvFileValues(join(home, "config.env"), { AGNI_SECRETS_MODE: "vault" });
+    console.log(`done. Backups of the old plaintext files are in ${join(home, "data", "vault-backups")}; delete them once you have checked Agni works.`);
+    console.log("restart the daemon to apply: agni daemon restart");
+  } catch (error) {
+    fail(`migration stopped: ${error instanceof Error ? error.message : String(error)}\nThe old files were left in place. Run it again after fixing the cause.`);
+  } finally {
+    db?.close();
+  }
+}
+
+async function exportSecrets(args: string[]): Promise<void> {
+  if (!args.includes("--yes")) {
+    fail(
+      "agni vault export writes every secret in the vault back to plaintext files (config.env and the other old stores).\n" +
+        "That undoes the encryption. Run `agni vault export --yes` if you mean it.",
+    );
+    return;
+  }
+  if (!vaultExists()) {
+    fail("there is no vault to export.");
+    return;
+  }
+  const vault = await open(false);
+  if (!vault) return;
+  const home = agniHome();
+  const db = optionalDatabase();
+  try {
+    for (const { name, count } of await runVaultExport(vault, { home, db })) console.log(`${name}: ${count} written`);
+    setEnvFileValues(join(home, "config.env"), { AGNI_SECRETS_MODE: "file" });
+    console.log("exported. Credentials are plaintext again and Agni is back in file mode; restart the daemon to apply.");
+    console.log("vault.bin was left in place; delete it yourself when you no longer want it.");
+  } catch (error) {
+    fail(`export stopped: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    db?.close();
+  }
+}
+
+async function vault(args: string[]): Promise<void> {
+  const [sub, ...rest] = args;
+  if (sub === "status") return status();
+  if (sub === "list") return list();
+  if (sub === "migrate") return migrate();
+  if (sub === "export") return exportSecrets(rest);
+  fail(USAGE);
+}
+
+/** CLI commands for s3-vault. */
+export const s3VaultCommands: CommandTable = {
+  commands: { vault },
+  help: [
+    "  vault status|list|migrate|export   the encrypted secrets vault (export --yes = rollback to plaintext)",
+  ],
+};

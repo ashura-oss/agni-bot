@@ -23,3 +23,6 @@ export { createBunSecretsKeyStore } from "./bun-secrets";
 export { createPassphraseKeyStore, passphraseFilePath } from "./passphrase";
 export { selectKeyStore } from "./select";
 export { secretsMode, unlockVault, vaultExists, vaultStatus } from "./unlock";
+export { applyVaultEnv, importEnvFileSecrets, exportEnvEntries, plaintextSecretNames, setEnvFileValues } from "./env";
+export { envEntryName, isSecretEnvName } from "./mode";
+export { runVaultExport, runVaultMigrations, type MigrationResult } from "./migrate";

@@ -8,17 +8,15 @@ import { withFileLock } from "./lock";
 import { selectKeyStore } from "./select";
 import { setActiveVault, tryGetVault } from "./state";
 import { FileVault, lockPathOf } from "./vault";
-import { VaultError, type KeyStore, type SecretsMode, type Vault, type VaultOptions, type VaultStatus } from "./types";
+import { secretsMode } from "./mode";
+import { VaultError, type KeyStore, type Vault, type VaultOptions, type VaultStatus } from "./types";
+
+export { secretsMode };
 
 const VAULT_FILE = "vault.bin";
 
 const homeOf = (options: Pick<VaultOptions, "home" | "env">): string => options.home ?? agniHome(options.env ?? process.env);
 const pathOf = (options: Pick<VaultOptions, "home" | "env">): string => join(homeOf(options), VAULT_FILE);
-
-/** `AGNI_SECRETS_MODE`: `vault` or `file`. `file` (the old plaintext `config.env`) stays the default until S3-3 flips it. */
-export function secretsMode(env: Record<string, string | undefined> = process.env): SecretsMode {
-  return env.AGNI_SECRETS_MODE?.trim().toLowerCase() === "vault" ? "vault" : "file";
-}
 
 /** True when `AGNI_HOME/vault.bin` exists. */
 export function vaultExists(options: Pick<VaultOptions, "home" | "env"> = {}): boolean {
