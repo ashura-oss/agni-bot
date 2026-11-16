@@ -141,6 +141,9 @@ export type ConversationEffect =
   | { kind: "taskChanged"; task: TaskInfo }
   | { kind: "bound"; agentID: string; conversationID: string; sessionID: string; channelID: string };
 
+/** How far a browser clock may trail the daemon's and still have a durable row count as the answer to a send. */
+const CLOCK_SKEW_MS = 120_000;
+
 function newMessage(partial: Partial<ChatMessage> & Pick<ChatMessage, "id" | "role">): ChatMessage {
   return {
     text: "",
@@ -512,11 +515,30 @@ export class Conversation {
     const echoes = this.messages.filter(
       (message) => message.isLocalEcho && !(message.state.kind === "failed" && message.state.reason === ""),
     );
-    rebuilt.push(...streaming);
+    // A pending send is answered by a durable row of the same text made after it was sent, and
+    // each durable row answers one send. Matching on the text alone would let an old row with
+    // the same words swallow a message still on its way.
+    const claimed = new Set<string>();
+    const keep: ChatMessage[] = [...streaming];
     for (const echo of echoes) {
-      if (!rebuilt.some((message) => message.role === "user" && message.text === echo.text)) {
-        rebuilt.push(echo);
-      }
+      const sentAt = echo.createdAt?.getTime() ?? 0;
+      const answer = rebuilt.find(
+        (message) =>
+          message.role === "user" &&
+          message.text === echo.text &&
+          !claimed.has(message.id) &&
+          (message.createdAt?.getTime() ?? 0) >= sentAt - CLOCK_SKEW_MS,
+      );
+      if (answer) claimed.add(answer.id);
+      else keep.push(echo);
+    }
+    // Survivors go where their time puts them, after every row that is not newer than they are:
+    // the server's order stands, and nothing is sorted by what it says.
+    for (const message of keep) {
+      const at = message.createdAt?.getTime() ?? Number.MAX_SAFE_INTEGER;
+      let place = rebuilt.length;
+      while (place > 0 && (rebuilt[place - 1]?.createdAt?.getTime() ?? 0) > at) place -= 1;
+      rebuilt.splice(place, 0, message);
     }
     // Survivors predate the blocks they stream into; stamp them with the
     // active block so a seam renders the instant history reloads.
