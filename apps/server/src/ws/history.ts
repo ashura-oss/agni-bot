@@ -117,10 +117,14 @@ export function buildConversationHistory(db: Database, conversationID: string, l
     sessionID: message.sessionID,
     ...(message.role === "assistant" && message.turnID && stopReasons.has(message.turnID) ? { stopReason: stopReasons.get(message.turnID)! } : {}),
   }));
-  // A message stored on both the thread and the channel is one message: index
-  // by what makes two copies the same, so each channel row is one lookup.
+  // A message stored on both the thread and the channel is one message. Two rows are the same message when
+  // they agree on role, attachments and text AND pair up one-to-one: a thread row is paired with at most one
+  // channel row, the one from the same turn when both name it, else the nearest in time. Text alone never
+  // decides, so a question asked twice stays two messages.
   const keyOf = (role: string, text: string, files: AttachmentInfo[]): string => `${role}\u0000${files.map((file) => file.id).join(",")}\u0000${text}`;
   const seen = new Map<string, number[]>();
+  const turnOfThreadRow = threadRows.map((row) => row.turnID ?? null);
+  const paired = new Set<number>();
   messages.forEach((message, index) => {
     const key = keyOf(message.role, message.text, message.attachments ?? []);
     seen.set(key, [...(seen.get(key) ?? []), index]);
@@ -151,15 +155,23 @@ export function buildConversationHistory(db: Database, conversationID: string, l
       ...(role === "assistant" && row.turn_id && stopReasons.has(row.turn_id) ? { stopReason: stopReasons.get(row.turn_id)! } : {}),
     };
     const key = keyOf(role, row.text, files);
-    const candidates = seen.get(key) ?? [];
-    const duplicateIndex = candidates.find((index) => Math.abs(Date.parse(messages[index]!.createdAt) - Date.parse(row.created_at)) < DUPLICATE_WINDOW_MS);
-    if (duplicateIndex !== undefined) {
-      messages[duplicateIndex] = { ...messages[duplicateIndex]!, ...messageData };
+    const candidates = (seen.get(key) ?? []).filter((index) => index < threadRows.length && !paired.has(index));
+    let best: { index: number; sameTurn: boolean; gap: number } | undefined;
+    for (const index of candidates) {
+      const gap = Math.abs(Date.parse(messages[index]!.createdAt) - Date.parse(row.created_at));
+      if (!(gap < DUPLICATE_WINDOW_MS)) continue;
+      const sameTurn = row.turn_id !== null && turnOfThreadRow[index] === row.turn_id;
+      if (!best || (sameTurn && !best.sameTurn) || (sameTurn === best.sameTurn && gap < best.gap)) best = { index, sameTurn, gap };
+    }
+    if (best) {
+      paired.add(best.index);
+      messages[best.index] = { ...messages[best.index]!, ...messageData };
     } else {
       messages.push(messageData);
-      seen.set(key, [...candidates, messages.length - 1]);
+      seen.set(key, [...(seen.get(key) ?? []), messages.length - 1]);
     }
   }
+  // Oldest first; rows with the same time keep the order they were read in.
   messages.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   // Both sources were limited; after merging, keep the newest `limit`.
   return messages.length > limit ? messages.slice(messages.length - limit) : messages;
