@@ -20,7 +20,8 @@
  * holder (a vault entry, an environment variable, a store's slot; `registerSecret` is the
  * holder "anonymous"), and a holder lets go of its own hold only. So a store that stops using a
  * value cannot unmask one a vault entry, an environment variable or a provider key still has.
- * Nothing outside this file removes a value from the registry.
+ * Nothing outside this file removes a value from the registry. A store that replaces or drops a
+ * token does not unmask it at once either (it may still be valid): see "secrets a store replaces".
  *
  * A value shorter than `MIN_SECRET_LENGTH` is not registered: masking a
  * four-letter word everywhere would wreck ordinary text and protect nothing.
@@ -44,7 +45,8 @@ export const MIN_SECRET_LENGTH = 8;
  * A defensive cap so a bug that registers per-request values cannot grow without bound.
  * Reaching it throws: a secret that cannot be registered is a secret that would go out unmasked.
  * Sized for a real home (provider keys, plugin credentials, OAuth tokens, a device token per
- * paired device); values that leave the vault are unregistered, so refreshing does not fill it.
+ * paired device); a refreshed token's old values leave the registry after a bounded wait
+ * (`RETIRED_PER_SLOT` per slot), so refreshing does not fill it.
  */
 export const MAX_SECRETS = 10_000;
 

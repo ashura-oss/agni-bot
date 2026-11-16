@@ -407,8 +407,8 @@ export class ChatGPTAuth {
   }
   private save(): Promise<void> {
     // Every token change comes through here, so this is where the tokens are registered: before anything
-    // is written, and whether or not (or where) they are persisted. Adding comes first and letting go
-    // of replaced tokens after the write, because a save that fails leaves the old tokens on disk.
+    // is written, and whether or not (or where) they are persisted. Staging comes first and settling the
+    // slots after the write, because a save that fails leaves the old tokens on disk.
     rememberTokens(this.store, false);
     if (!this.options.filePath) { rememberTokens(this.store); return Promise.resolve(); }
     if (this.unreadable) return Promise.reject(new ChatGPTAuthError(UNREADABLE));
@@ -449,8 +449,9 @@ class TerminalRefreshError extends ChatGPTAuthError {}
 
 /**
  * Make `redact()` mask every token this store holds, so none can reach a log line or a frame.
- * `settle` also lets go of tokens a refresh replaced and of removed accounts' tokens; without it
- * the tokens are only added.
+ * `settle` makes each account's slot hold exactly its tokens now: tokens a refresh replaced, or a
+ * disconnect or removed account dropped, are queued (still masked, until they expire or a revoke
+ * is confirmed). Without it the tokens are only staged.
  */
 function rememberTokens(store: Store, settle = true): void {
   const prefix = `chatgpt:${store.hostID}:`;
