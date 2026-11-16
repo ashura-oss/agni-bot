@@ -8,21 +8,16 @@
 import { resolve, sep } from "node:path";
 import type { Operation } from "./types";
 import type { ToolResource } from "./tool-meta";
-import { resolveWritePath, scratchDir } from "../tools/write-file";
+import { scratchDir } from "../tools/write-file";
+import { canonicalPathKey } from "./path-key";
 import { proveShell } from "./shell-proof";
 
-const CASE_INSENSITIVE = process.platform === "win32";
-
-/** A path as a comparison key: absolute, with `/` or `\` normalised and case folded where the file system folds it. */
-export function foldPath(path: string): string {
-  const normal = resolve(path);
-  return CASE_INSENSITIVE ? normal.toLowerCase() : normal;
-}
-
-/** The real path a file tool means by `raw` (relative paths are under scratch, links followed), as a comparison key. */
+/**
+ * A path as a refusal key: the real path (relative paths are under scratch, links followed), case folded where the
+ * file system folds it. The one place a refusal's path is keyed, for recording it and for matching it (policy/path-key.ts).
+ */
 export function pathKey(raw: string): string {
-  const real = resolveWritePath(raw);
-  return foldPath(real ?? resolve(scratchDir(), raw));
+  return canonicalPathKey(raw, scratchDir());
 }
 
 export function pathResource(raw: string): ToolResource {

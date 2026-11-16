@@ -10,7 +10,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { isReadOnlyCommand } from "../src/tools/bash";
-import { foldPath, shellFacts, shellWorkingDir } from "../src/policy/resources";
+import { pathKey, shellFacts, shellWorkingDir } from "../src/policy/resources";
 import type { Operation } from "../src/policy/types";
 
 let root: string;
@@ -27,7 +27,7 @@ afterEach(() => {
 });
 
 const HERE = (): string => shellWorkingDir(undefined);
-const keyOf = (name: string): string => foldPath(resolve(HERE(), name));
+const keyOf = (name: string): string => pathKey(resolve(HERE(), name));
 const keys = (command: string): string[] => shellFacts(command, HERE()).resources.map((resource) => resource.value);
 
 describe("a proven command names the files it was given", () => {
@@ -86,6 +86,6 @@ describe("the folder a command runs in", () => {
   });
 
   test("a relative path is read against that folder, not against scratch", () => {
-    expect(shellFacts("rm q1", shellWorkingDir("sub")).resources.map((resource) => resource.value)).toEqual([foldPath(resolve(shellWorkingDir("sub"), "q1"))]);
+    expect(shellFacts("rm q1", shellWorkingDir("sub")).resources.map((resource) => resource.value)).toEqual([pathKey(resolve(shellWorkingDir("sub"), "q1"))]);
   });
 });
