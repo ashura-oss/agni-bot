@@ -1092,4 +1092,28 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE agents ADD COLUMN critic_agent_id TEXT;
     `,
   },
+  {
+    id: 50,
+    name: "approval_rules",
+    sql: `
+      -- "Always allow": a standing rule scoped to exactly one bot, one tool and
+      -- one target (what the target is per tool: stores/approval-rules.ts),
+      -- kept until the owner revokes it. Matching is exact equality on all
+      -- three; a revoked rule (revoked_at set) never matches.
+      CREATE TABLE approval_rules (
+        id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        target TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        revoked_at TEXT,
+        approval_id TEXT                  -- the approval the owner answered "always" on
+      );
+      -- At most one live rule per (bot, tool, target); revoked rows pile up as history.
+      CREATE UNIQUE INDEX uq_approval_rules_active
+        ON approval_rules(agent_id, tool_name, target) WHERE revoked_at IS NULL;
+      -- An approval an active rule answered without asking records which rule.
+      ALTER TABLE approvals ADD COLUMN rule_id TEXT;
+    `,
+  },
 ];

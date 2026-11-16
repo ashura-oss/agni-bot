@@ -177,7 +177,7 @@ describe("async delegation", () => {
         { toAgentID: "researcher", goal: "Do it", intent: "shout" },
         { threadID: "thr_parent", turnID: "trn_parent", signal: new AbortController().signal },
       ),
-    ).rejects.toThrow("intent must be one of");
+    ).rejects.toThrow('"intent" must be one of');
   });
 
   test("cancel closes the task and removes the queued job", async () => {

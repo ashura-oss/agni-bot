@@ -13,6 +13,8 @@ const MAX_REDIRECT_HOPS = 2;
 const MAX_BYTES = 3_000_000;
 /** Extra bytes read past the <title> so the summary has something useful. */
 const SUMMARY_TAIL_BYTES = 200_000;
+/** Summary length when the caller does not ask for one (link saves, link previews). */
+const DEFAULT_SUMMARY_CHARS = 600;
 
 /**
  * Fetch a public web page without accepting private hosts. Redirects are
@@ -20,12 +22,12 @@ const SUMMARY_TAIL_BYTES = 200_000;
  * re-runs the same safety checks on its new host, within a hop cap. When
  * `allowedHost` is given, a hop to a host it rejects fails before any request.
  */
-export async function fetchPage(rawURL: string, allowedHost?: (url: URL) => boolean): Promise<{ title: string|null; summary: string|null }> {
+export async function fetchPage(rawURL: string, allowedHost?: (url: URL) => boolean, maxChars: number = DEFAULT_SUMMARY_CHARS): Promise<{ title: string|null; summary: string|null }> {
   let current = parsePublicURL(rawURL);
   for (let hop = 0; ; hop += 1) {
     const response = await fetchOne(current);
     if (!(response.status >= 300 && response.status < 400)) {
-      return readPage(response);
+      return readPage(response, maxChars);
     }
     const location = response.headers.get("location");
     if (!location) throw new Error("redirect with no destination");
@@ -85,7 +87,7 @@ export function requestPinned(url: URL, addresses: string[]): Promise<Response> 
   });
 }
 
-async function readPage(response: Response): Promise<{ title: string|null; summary: string|null }> {
+async function readPage(response: Response, maxChars: number): Promise<{ title: string|null; summary: string|null }> {
   if (!response.ok) throw new Error(`page fetch returned HTTP ${response.status}`);
   const type = response.headers.get("content-type") ?? "";
   if (!type.includes("text/html") && !type.includes("text/plain")) throw new Error("page is not HTML or plain text");
@@ -111,7 +113,7 @@ async function readPage(response: Response): Promise<{ title: string|null; summa
         tailAllowance = size + SUMMARY_TAIL_BYTES;
       }
     }
-    return extractPage(html, type.includes("text/plain"));
+    return extractPage(html, type.includes("text/plain"), maxChars);
   } finally { reader.cancel().catch(() => {}); }
 }
 
@@ -166,12 +168,12 @@ function parseV6(ip: string): number[] | null {
   return parts.length === 8 && parts.every((x) => x >= 0 && x <= 0xffff) ? parts : null;
 }
 
-function extractPage(input: string, plain: boolean): { title: string|null; summary: string|null } {
+function extractPage(input: string, plain: boolean, maxChars: number): { title: string|null; summary: string|null } {
   const title = plain ? null : decodeEntities(input.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? "").trim().slice(0, 300) || null;
   const text = plain ? input : input
     .replace(/<(script|style|noscript|svg)[^>]*>[\s\S]*?<\/\1>/gi, " ")
     .replace(/<[^>]+>/g, " ");
   const clean = decodeEntities(text).replace(/\s+/g, " ").trim();
-  return { title, summary: clean.slice(0, 600) || null };
+  return { title, summary: clean.slice(0, maxChars) || null };
 }
 function decodeEntities(text: string): string { return text.replace(/&nbsp;/g," ").replace(/&amp;/g,"&").replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&#(\d+);/g,(_, n:string)=>String.fromCodePoint(Number(n))); }

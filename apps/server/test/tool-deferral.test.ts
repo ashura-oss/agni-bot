@@ -60,7 +60,9 @@ describe("deferred tools", () => {
 
     expect(await handler({ names: ["grep", "nope"] }, ctx)).toEqual({ loaded: ["grep"], unknown: ["nope"] });
     expect([...loaded]).toEqual(["grep"]);
-    await expect(handler({ names: "grep" }, ctx)).rejects.toThrow();
+    await expect(handler({ names: 5 }, ctx)).rejects.toThrow();
+    // One name as a bare string is repaired into a list, like any other list of strings.
+    expect(await handler({ names: "glob" }, ctx)).toEqual({ loaded: ["glob"] });
   });
 });
 

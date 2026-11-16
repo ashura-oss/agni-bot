@@ -9,6 +9,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApprovalBroker } from "../src/agent/approval-broker";
+import { openDatabase } from "../src/db";
 import { readFile } from "../src/tools/read-file";
 import { glob, grep } from "../src/tools/search";
 import { isOutsideScratch } from "../src/tools/write-file";
@@ -119,7 +120,8 @@ describe("C2/H6/H7: approval defaults and preview", () => {
 
   test("the card shows the command's tail and the mail body", async () => {
     const frames: Array<{ action: string; preview: string }> = [];
-    const db = { run: () => undefined } as unknown as Database;
+    // The broker looks up the turn's bot before it raises a card, so it needs a real database.
+    const db = openDatabase(":memory:");
     const b = new ApprovalBroker({ db, emit: (f) => frames.push(f), waitForDecision: async () => null });
     const command = `echo ${"x".repeat(10_000)}; rm -rf ~`;
     await b.request("t", "u", "bash", "c", { command }, new AbortController().signal);

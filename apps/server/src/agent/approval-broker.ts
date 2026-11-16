@@ -12,12 +12,18 @@
  * Approvals are durable: they live in the `approvals` table and are surfaced
  * to the client as `approval.request` frames. The decision is recorded and the
  * loop resumes (or aborts) once the client answers.
+ *
+ * "Always allow" is a standing rule (`stores/approval-rules.ts`): one bot, one
+ * tool, one target, kept until the owner revokes it. Before a card is raised
+ * an active matching rule answers instead, and that answer is still recorded as
+ * an approval row so the audit trail shows what ran and which rule allowed it.
  */
 import type { Database } from "bun:sqlite";
 import { newID, nowISO } from "../util/ids";
 import { isReadOnlyCommand } from "../tools/bash";
-import { isOutsideScratch } from "../tools/write-file";
+import { isOutsideScratch, resolveWritePath, scratchDir, writeTargetExists } from "../tools/write-file";
 import { MCP_FREE_TOOLS } from "../plugins/mcp";
+import { addApprovalRule, agentForTurn, approvalTarget, findApprovalRule } from "../stores/approval-rules";
 
 export type Decision = "once" | "always" | "reject";
 
@@ -67,6 +73,18 @@ export interface ApprovalBrokerDeps {
   emit: (frame: { type: "approval.request"; requestID: string; action: string; preview: string; buttons: Decision[] }) => void;
   /** Wait for a decision on a pending approval. */
   waitForDecision: (requestID: string, signal: AbortSignal) => Promise<Decision | null>;
+  /**
+   * Why a call's arguments break the tool's schema, or null (the registry's
+   * `validateArgs`). A call that fails never raises a card: the tool refuses
+   * it with an error that names the field, so the owner is not asked about
+   * an action that cannot run.
+   */
+  validate?: (toolName: string, args: Record<string, unknown>) => string | null;
+  /**
+   * A line the integration wants the owner to read with the card for this tool
+   * (an MCP connector's own warning, say). Appended to the preview.
+   */
+  approvalNote?: (toolName: string) => string | undefined;
 }
 
 /** Tools that cannot destroy state or reach outside scratch. Everything else asks. */
@@ -98,18 +116,45 @@ export class ApprovalBroker {
     signal: AbortSignal,
   ): Promise<Decision | null> {
     const action = describeAction(toolName, args);
-    const preview = previewAction(toolName, args);
+    const note = this.deps.approvalNote?.(toolName);
+    const preview = note ? `${previewAction(toolName, args)}\n\n${note}` : previewAction(toolName, args);
+    const { db } = this.deps;
     const requestID = newID("apr");
+    // The rule's scope: this turn's bot, this tool, this exact target. Without
+    // a bot or a target there is nothing to scope a rule to, so we always ask.
+    const agentID = agentForTurn(db, threadID, turnID);
+    const target = approvalTarget(toolName, args);
+    const scope = agentID && target !== null ? { agentID, target } : null;
 
-    this.deps.db.run(
+    const rule = scope ? findApprovalRule(db, scope.agentID, toolName, scope.target) : null;
+    if (rule) {
+      const when = nowISO();
+      db.run(
+        `INSERT INTO approvals (id, thread_id, turn_id, action, preview, status, decision, call_id, tool_name, created_at, decided_at, rule_id)
+         VALUES (?, ?, ?, ?, ?, 'decided', 'always', ?, ?, ?, ?, ?)`,
+        [
+          requestID, threadID, turnID,
+          `${action} [auto-approved by standing rule ${rule.id}]`,
+          `${preview}
+
+Auto-approved by standing rule ${rule.id}: "Always allow" for ${rule.agentID} / ${rule.toolName}, given ${rule.createdAt}. Revoke the rule to be asked again.`,
+          callID, toolName, when, when, rule.id,
+        ],
+      );
+      return "always";
+    }
+
+    db.run(
       `INSERT INTO approvals (id, thread_id, turn_id, action, preview, status, decision, call_id, tool_name, created_at)
        VALUES (?, ?, ?, ?, ?, 'pending', NULL, ?, ?, ?)`,
       [requestID, threadID, turnID, action, preview, callID, toolName, nowISO()],
     );
 
-    this.deps.emit({ type: "approval.request", requestID, action, preview, buttons: ["once", "always", "reject"] });
+    this.deps.emit({ type: "approval.request", requestID, action, preview, buttons: scope ? ["once", "always", "reject"] : ["once", "reject"] });
 
-    return this.deps.waitForDecision(requestID, signal);
+    const decision = await this.deps.waitForDecision(requestID, signal);
+    if (decision === "always" && scope) addApprovalRule(db, { ...scope, toolName, approvalID: requestID });
+    return decision;
   }
 
   /**
@@ -121,13 +166,22 @@ export class ApprovalBroker {
    * `FREE_TOOLS` do not know gates.
    */
   requiresApproval(toolName: string, args: Record<string, unknown>): boolean {
+    // A call the tool will refuse for its arguments is not worth a card; the
+    // tool's own check turns it into an error the model can fix.
+    if (this.deps?.validate?.(toolName, args)) return false;
     switch (toolName) {
       case "bash":
         return !isReadOnlyCommand(String(args.command ?? ""), typeof args.cwd === "string" ? args.cwd : undefined);
-      case "write_file":
-        // Overwriting a file destroys whatever was there, so writes outside the
-        // owner-declared scratch tree gate. Inside scratch they run free.
-        return isOutsideScratch(String(args.path ?? ""));
+      case "write_file": {
+        // Writes outside the owner-declared scratch tree gate. Inside scratch,
+        // creating a new file is free; changing one that exists asks, whether
+        // it is replaced (a denied delete must not be doable as an overwrite)
+        // or appended to (an appended script is a changed script). A relative
+        // path means a path under scratch, as it does for the tool itself.
+        const path = typeof args.path === "string" ? args.path : "";
+        if (isOutsideScratch(path, scratchDir())) return true;
+        return writeTargetExists(path);
+      }
       case "mail_send":
         // Agni's own mailbox ("agent", also the default when omitted) is
         // ungated (AGENTS.md amendment 2026-10-17); every other value gates.
@@ -142,24 +196,44 @@ export class ApprovalBroker {
   }
 }
 
+/** An argument for display. A missing one reads as "(not given)", never "?" or "undefined". */
+function shown(value: unknown, max = 400): string {
+  if (value === undefined || value === null || value === "") return "(not given)";
+  return clip(typeof value === "string" ? value : JSON.stringify(value) ?? "(not given)", max);
+}
+
 function describeAction(toolName: string, args: Record<string, unknown>): string {
   switch (toolName) {
     case "bash": return `run shell: ${clip(String(args.command ?? ""), 400)}`;
-    case "write_file": return `write file: ${args.path ?? "?"}`;
-    case "read_file": return `read file: ${args.path ?? "?"}`;
+    case "write_file": {
+      const path = typeof args.path === "string" ? args.path : "";
+      const replaces = path !== "" && args.append !== true && !isOutsideScratch(path, scratchDir()) && writeTargetExists(path);
+      return `${replaces ? "overwrite existing file" : "write file"}: ${shown(path)}`;
+    }
+    case "read_file": return `read file: ${shown(args.path)}`;
     case "memory_write": return `save memory: ${String(args.text ?? "").slice(0, 80)}`;
-    case "link_save": return `save link: ${args.url ?? "?"}`;
-    case "task_create": return `add task: ${args.title ?? "?"}`;
-    case "task_update": return `update task ${args.id ?? "?"}`;
-    case "mail_send": return `send email to ${Array.isArray(args.to) ? args.to.join(", ") : args.to}: ${String(args.subject ?? "").slice(0, 80)}`;
-    case "rename_agent": return args.agentId ? `rename ${args.agentId} to ${args.name}` : `rename the assistant to ${args.name}`;
+    case "link_save": return `save link: ${shown(args.url)}`;
+    case "task_create": return `add task: ${shown(args.title)}`;
+    case "task_update": return `update task ${shown(args.id)}`;
+    case "mail_send": return `send email to ${Array.isArray(args.to) ? shown(args.to.join(", ")) : shown(args.to)}: ${String(args.subject ?? "").slice(0, 80)}`;
+    case "rename_agent": return args.agentId ? `rename ${shown(args.agentId)} to ${shown(args.name)}` : `rename the assistant to ${shown(args.name)}`;
     default: return `${toolName}(${clip(JSON.stringify(args), 400)})`;
   }
 }
 
 function previewAction(toolName: string, args: Record<string, unknown>): string {
   if (toolName === "bash") return clip(String(args.command ?? ""), 4_000);
-  if (toolName === "mail_send") return `${describeAction(toolName, args)}\n\n${clip(String(args.body ?? ""), 4_000)}`;
+  if (toolName === "mail_send") return `${describeAction(toolName, args)}
+
+${clip(String(args.body ?? ""), 4_000)}`;
+  if (toolName === "write_file" && typeof args.path === "string") {
+    // The path the write really lands on: a relative path means under scratch,
+    // and a link is followed. This is also what "always allow" would remember.
+    const real = resolveWritePath(args.path);
+    return `${describeAction(toolName, args)}
+
+Resolved path: ${real ?? "(cannot be resolved)"}`;
+  }
   return describeAction(toolName, args);
 }
 
