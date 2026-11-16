@@ -1127,4 +1127,14 @@ export const MIGRATIONS: Migration[] = [
         WHERE tool_name IN ('bash', 'run_privileged') AND revoked_at IS NULL;
     `,
   },
+  {
+    id: 52,
+    name: "job_run_once",
+    sql: `
+      -- "Run now" on a paused job: one claim is allowed through, and the claim
+      -- itself clears the flag (stores/jobs.ts), so nothing a handler does can
+      -- leave a paused job able to run again. enabled is never touched.
+      ALTER TABLE jobs ADD COLUMN run_once INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
 ];

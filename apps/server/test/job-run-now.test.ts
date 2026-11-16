@@ -29,7 +29,7 @@ describe("job.set run", () => {
     expect(client.seen().filter((frame) => frame.type === "job.list.ok")).toEqual([]);
   });
 
-  test("a queued job is made due now and the asker gets the fresh list", async () => {
+  test("a paused job is made due now, stays paused, and the asker gets the fresh list", async () => {
     harness = await startHarness();
     const job = enqueueJob(harness.db, { kind: "test.noop", runAt: FAR });
     harness.db.run("UPDATE jobs SET enabled = 0 WHERE id = ?", [job.id]);
@@ -39,7 +39,8 @@ describe("job.set run", () => {
     const list = await client.next("job.list.ok");
     expect(list.jobs.some((entry) => entry.id === job.id)).toBe(true);
     expect(getJob(harness.db, job.id)!.run_at < FAR).toBe(true);
-    expect(getJob(harness.db, job.id)!.enabled).toBe(1);
+    // Run now runs it once; it does not resume it.
+    expect(getJob(harness.db, job.id)!.enabled).toBe(0);
   });
 });
 

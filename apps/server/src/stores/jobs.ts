@@ -62,26 +62,23 @@ export function enqueueJob(
 }
 
 /**
- * The note a paused job carries from "Run now" until it is claimed: it lets
- * that one run through, and nothing else. `enabled` is never touched, so the
- * job is paused again as soon as the run is over.
+ * Atomically pick the oldest due job and mark it running. Paused jobs wait,
+ * except for a Run now (`run_once`), which the same UPDATE that claims it
+ * clears: one claim, whatever the handler then does.
  */
-export const RUN_NOW_NOTE = "run now (paused job, one run)";
-
-/** Atomically pick the oldest due job and mark it running. Paused jobs wait, except for one Run now. */
 export function claimDueJob(db: Database, now = nowISO(), excludeKinds: readonly string[] = []): JobRow | null {
   return db.transaction((): JobRow | null => {
     const row = db
-      .query<JobRow, [string, string, string]>(
+      .query<JobRow, [string, string]>(
         `SELECT ${COLUMNS} FROM jobs
-         WHERE state = 'queued' AND (enabled = 1 OR result = ?) AND run_at <= ?
+         WHERE state = 'queued' AND (enabled = 1 OR run_once = 1) AND run_at <= ?
            AND kind NOT IN (SELECT value FROM json_each(?))
          ORDER BY run_at ASC, rowid ASC
          LIMIT 1`,
       )
-      .get(RUN_NOW_NOTE, now, JSON.stringify(excludeKinds));
+      .get(now, JSON.stringify(excludeKinds));
     if (!row) return null;
-    db.run("UPDATE jobs SET state = 'running', attempts = attempts + 1, updated_at = ? WHERE id = ?", [
+    db.run("UPDATE jobs SET state = 'running', run_once = 0, attempts = attempts + 1, updated_at = ? WHERE id = ?", [
       nowISO(),
       row.id,
     ]);
@@ -138,8 +135,8 @@ export type WakeOutcome = "woken" | "running" | "not_found";
  */
 export function wakeJob(db: Database, id: string): WakeOutcome {
   const result = db.run(
-    "UPDATE jobs SET state = 'queued', run_at = ?, attempts = 0, result = CASE WHEN enabled = 1 THEN NULL ELSE ? END, updated_at = ? WHERE id = ? AND state != 'running'",
-    [nowISO(), RUN_NOW_NOTE, nowISO(), id],
+    "UPDATE jobs SET state = 'queued', run_at = ?, attempts = 0, result = NULL, run_once = CASE WHEN enabled = 1 THEN 0 ELSE 1 END, updated_at = ? WHERE id = ? AND state != 'running'",
+    [nowISO(), nowISO(), id],
   );
   if (result.changes > 0) return "woken";
   return getJob(db, id) ? "running" : "not_found";
@@ -194,7 +191,8 @@ export function listFinishedJobs(db: Database, limit = 10): JobRow[] {
 
 /** Pause or resume a job. A running job finishes; paused work stays visible. */
 export function setJobEnabled(db: Database, id: string, enabled: boolean): boolean {
-  const result = db.run("UPDATE jobs SET enabled = ?, updated_at = ? WHERE id = ?", [
+  // Pausing or resuming also withdraws a Run now that has not been claimed yet.
+  const result = db.run("UPDATE jobs SET enabled = ?, run_once = 0, updated_at = ? WHERE id = ?", [
     enabled ? 1 : 0,
     nowISO(),
     id,
