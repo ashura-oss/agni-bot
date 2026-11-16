@@ -2,6 +2,8 @@ import type { Database } from "bun:sqlite";
 import type { Router } from "../models/router";
 import { upsertChannelSummary, getChannelSummary, markMessagesCompacted, uncompactedMessages, type ChannelMessageRow } from "../stores/channels";
 import { extractJSONObject } from "../util/json";
+import { log } from "../log";
+import { AUX_FIRST_TOKEN_MS, AUX_MAX_TOKENS, AUX_TIMEOUT_MS } from "./aux-limits";
 
 const COMPACT_AT = 36;
 const KEEP_RECENT = 12;
@@ -51,13 +53,21 @@ export async function compactChannelHistory(db: Database, router: Router, channe
   try {
     const result = await router.route({
       messages: [{ role: "user", content: prompt }],
-      signal: AbortSignal.timeout(60_000),
-      firstTokenTimeoutMs: 8_000,
-      maxTokens: 1_500,
+      signal: AbortSignal.timeout(AUX_TIMEOUT_MS),
+      firstTokenTimeoutMs: AUX_FIRST_TOKEN_MS,
+      maxTokens: AUX_MAX_TOKENS,
       onDelta: () => {},
     });
     const parsed = extractJSONObject(result.text) as { updated_summary?: unknown } | null;
     if (typeof parsed?.updated_summary !== "string" || !parsed.updated_summary.trim()) {
+      // S1-17: nothing usable came back (an empty answer is what a reasoning
+      // model that spent its budget thinking returns). The channel keeps its
+      // summary and its uncompacted messages, and waits out the backoff.
+      log.warn(
+        `channel compaction ${result.text.trim() ? "unreadable" : "empty"} answer for ${channelID} ` +
+          `(reasoning ${result.reasoning?.length ?? 0} chars, output tokens ${result.outputTokens ?? "?"}); ` +
+          "previous summary kept",
+      );
       retryAfter.set(channelID, Date.now() + COMPACT_BACKOFF_MS);
       return;
     }

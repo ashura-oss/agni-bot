@@ -101,6 +101,32 @@ export function clampToBudget(text: string, tokens: number): string {
   return `${text.slice(0, maxChars)}…`;
 }
 
+/**
+ * Clamp a list of turns to a character budget, keeping the END: whole items
+ * from the newest backwards, and the first one that does not fit is cut from
+ * its start (its `role:` label stays). The cut is marked with an ellipsis.
+ */
+export function clampLinesKeepEnd(lines: string[], maxChars: number): string {
+  const kept: string[] = [];
+  let used = 0;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]!;
+    const cost = line.length + (kept.length > 0 ? 1 : 0);
+    if (used + cost <= maxChars) {
+      kept.unshift(line);
+      used += cost;
+      continue;
+    }
+    // Room left for part of this item: keep its end, with its label.
+    const label = /^[A-Za-z_]{1,16}: /.exec(line)?.[0] ?? "";
+    const room = maxChars - used - (kept.length > 0 ? 1 : 0) - label.length - 1;
+    if (room > 20) kept.unshift(`${label}…${line.slice(line.length - room)}`);
+    else kept.unshift("…");
+    break;
+  }
+  return kept.join("\n");
+}
+
 export function formatAnchor(anchor: Anchor): string {  const parts = [`Topic: ${anchor.topic}`];
   if (anchor.entities.length) parts.push(`Entities: ${anchor.entities.join(", ")}`);
   if (anchor.lastQuestion) parts.push(`Last question: ${anchor.lastQuestion}`);
@@ -146,15 +172,11 @@ export function assembleContext(input: AssemblyInput): string {
     );
   }
   if (input.previousTail?.length) {
-    blocks.push(
-      clampToBudget(
-        block(
-          "The last turns before this block began (verbatim, untrusted):",
-          input.previousTail.join("\n"),
-        ),
-        budgets.previous_tail,
-      ),
-    );
+    // The tail exists to carry the newest turns across a boundary, so when it
+    // does not fit it is the oldest that go (S1-28), not the newest.
+    const header = "The last turns before this block began (verbatim, untrusted):";
+    const room = Math.max(0, budgets.previous_tail * CHARS_PER_TOKEN - header.length - 1);
+    blocks.push(block(header, clampLinesKeepEnd(input.previousTail, room)));
   }
   if (input.recall?.length) {
     blocks.push(clampToBudget(block("Recalled from memory (untrusted data):", input.recall.join("\n")), budgets.recall));

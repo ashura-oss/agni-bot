@@ -14,6 +14,7 @@ import type { ResolvedPersona } from "./personas";
 import { MAX_FACT_PREFIX_CHARS } from "./guardrails";
 import { assembleContext, type Anchor } from "../context/compiler";
 import { PEER_RULE } from "./peer-message";
+import { resolveTimeZone } from "../config";
 
 /** Stable lane header — kept identical across turns in the same lane. */
 export function laneHeader(lane: "task" | "deep"): string {
@@ -51,6 +52,10 @@ export function buildDelegationPrefix(params: {
   rollups?: string[];
   /** The owner's open tasks, one short line each. */
   ledger?: string[];
+  /** The clock for the time line; the real time when omitted (tests pin it). */
+  now?: Date;
+  /** IANA zone for the time line; the server's zone (AGNI_TZ) when omitted. */
+  timeZone?: string;
 }): string {
   const summaries: string[] = [];
   if (params.carrySummary) {
@@ -96,7 +101,53 @@ export function buildDelegationPrefix(params: {
     summaries,
     recall: params.recall ?? [],
     previousTail: params.previousTail ?? [],
+    // S1-22: the volatile tail, after every slot that is cached or per-block.
+    tail: [currentTimeLine(params.now, params.timeZone)],
   });
+}
+
+/**
+ * S1-22: the current local date, time and zone, as one line.
+ *
+ * A bot with no clock loops creating jobs to learn the time. The line is
+ * to the minute, never the second, so it changes at most once a minute, and
+ * it is the LAST thing in the prompt: everything above it (persona, rules,
+ * facts, summaries) stays byte-identical for the provider's prefix cache.
+ * About 40 tokens (154 chars).
+ */
+export function currentTimeLine(now: Date = new Date(), timeZone?: string): string {
+  let zone = timeZone ?? resolveTimeZone();
+  let parts: Record<string, string>;
+  const read = (tz: string): Record<string, string> =>
+    Object.fromEntries(
+      new Intl.DateTimeFormat("en-US", {
+        timeZone: tz, weekday: "long", year: "numeric", month: "long", day: "numeric",
+        hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+      }).formatToParts(now).map((part) => [part.type, part.value]),
+    );
+  try {
+    parts = read(zone);
+  } catch {
+    zone = "UTC";
+    parts = read(zone);
+  }
+  // The offset is the zone's wall clock minus UTC, both cut to the minute.
+  const wall = Date.UTC(
+    Number(parts.year), monthIndex(parts.month!), Number(parts.day), Number(parts.hour) % 24, Number(parts.minute),
+  );
+  const offsetMinutes = Math.round((wall - Math.floor(now.getTime() / 60_000) * 60_000) / 60_000);
+  const sign = offsetMinutes < 0 ? "-" : "+";
+  const abs = Math.abs(offsetMinutes);
+  const offset = `UTC${sign}${String(Math.floor(abs / 60)).padStart(2, "0")}:${String(abs % 60).padStart(2, "0")}`;
+  return (
+    `Current date and time: ${parts.weekday} ${parts.day} ${parts.month} ${parts.year}, ${parts.hour}:${parts.minute} ` +
+    `(${zone}, ${offset}). Use this; never run a command or create a job just to learn the time.`
+  );
+}
+
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+function monthIndex(name: string): number {
+  return MONTHS.indexOf(name);
 }
 
 export function estimatePrefixTokens(text: string): number {
