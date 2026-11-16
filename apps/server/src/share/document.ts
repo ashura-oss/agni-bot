@@ -249,7 +249,9 @@ export function buildShareDocument(
       kind: "approval",
       at: row.decided_at ?? row.created_at,
       text: row.action,
-      decision: row.status === "pending" ? undefined : row.decision ?? "reject",
+      // An approval that timed out (or whose turn ended) was never answered: it is
+      // "expired", not a denial the owner did not give. A recorded decision wins.
+      decision: row.status === "pending" ? undefined : row.decision ?? (row.status === "expired" ? "expired" : "reject"),
     });
   }
 

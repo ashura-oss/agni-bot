@@ -129,6 +129,29 @@ describe("thread export document", () => {
     expect(doc.agentName).toBe("Researcher");
   });
 
+  test("an approval that expired without an answer is shown as expired, not denied (W2-A 7)", () => {
+    db = openDatabase(":memory:");
+    const conversation = ensureConversation(db, "ea");
+    const thread = createThread(db, "ea", undefined, { conversationID: conversation.id });
+    const turn = "turn_expired_1";
+    createTurn(db, { id: turn, threadID: thread.id, agentID: "ea" });
+    appendChannelMessage(db, { channelID: "main", fromType: "user", fromID: "user", text: "run it", turnID: turn });
+    db.run(
+      "INSERT INTO approvals (id, thread_id, turn_id, action, preview, status, decision, created_at, decided_at) VALUES ('apr_exp', ?, ?, 'bash: make build', 'make build', 'expired', NULL, datetime('now'), datetime('now'))",
+      [thread.id, turn],
+    );
+    db.run(
+      "INSERT INTO approvals (id, thread_id, turn_id, action, preview, status, decision, created_at, decided_at) VALUES ('apr_no', ?, ?, 'bash: rm x', 'rm x', 'decided', 'reject', datetime('now'), datetime('now'))",
+      [thread.id, turn],
+    );
+    const doc = buildShareDocument(db, { conversationID: conversation.id });
+    const html = renderShareHTML(doc);
+    expect(html).toContain("bash: make build — expired.");
+    expect(html).not.toContain("bash: make build — was denied.");
+    // A real rejection is still a denial.
+    expect(html).toContain("bash: rm x — was denied.");
+  });
+
   test("includes tool calls, approvals, unfinished turns, and reasoning", () => {
     db = openDatabase(":memory:");
     const conversation = ensureConversation(db, "ea");
