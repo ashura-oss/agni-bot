@@ -290,11 +290,9 @@ function ApprovalCard({
       <div className="card-heading">
         <Hand size={12} color="var(--ember)" />
         {requester ? `${requester} wants to run something` : "A bot wants to run something"}
-        <span className="spacer" />
-        <span className="card-heading-id">{approval.id}</span>
       </div>
-      <div className="approval-action">{safeLine(approval.action, 320)}</div>
-      {approval.preview.length > 0 ? <div className="approval-preview">{safeText(approval.preview, 4000)}</div> : null}
+      <div className="approval-action">{safeLine(approval.action, 800)}</div>
+      {approval.preview.length > 0 ? <div className="approval-preview">{safeText(approval.preview)}</div> : null}
       <div className="card-actions">
         {approval.decisions.map((decision) => (
           <button
@@ -444,10 +442,8 @@ function SecretCard({
       <div className="card-heading">
         <KeyRound size={12} color="var(--ember)" />
         {safeLine(secret.purpose, 320)}
-        <span className="spacer" />
-        <span className="card-heading-id">{secret.id}</span>
       </div>
-      <div className="secret-command">{safeLine(secret.command, 600)}</div>
+      <div className="secret-command">{safeText(secret.command)}</div>
       <div className="secret-row">
         <input
           className="secret-input"

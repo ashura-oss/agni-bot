@@ -40,7 +40,10 @@ export function MessageRowView({
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
 
   const explanation = stopExplanation(message);
-  const emptySystemRow = message.role === "system" && message.text.length === 0 && message.uiHint !== "handoff_notice";
+  // After a restart the daemon leaves a note for the model ("[This request was interrupted ...]")
+  // beside the owner-facing "This reply was interrupted" note: the owner reads one, not both.
+  const modelOnlyNote = message.role === "assistant" && /^\[This request was interrupted by a restart/u.test(message.text);
+  const emptySystemRow = modelOnlyNote || (message.role === "system" && message.text.length === 0 && message.uiHint !== "handoff_notice");
   // The name prompt is settled once the agent has a name. The daemon says so;
   // the agent's own flag settles it the moment a rename lands.
   const onboarded = agent?.onboarded === true;
@@ -131,7 +134,7 @@ export function MessageRowView({
 function UserBubble({ message }: { message: ChatMessage }) {
   return (
     <div className="user-bubble">
-      <div className="user-bubble-text"><MarkdownText text={message.text} /></div>
+      <div className="user-bubble-text"><MarkdownText text={message.text} literalHtml /></div>
       {message.attachments?.map((attachment) => <AttachmentCard key={attachment.id} attachment={attachment} />)}
       {message.state.kind === "failed" ? (
         <div className="user-bubble-error">{message.state.reason}</div>

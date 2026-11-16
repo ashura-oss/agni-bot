@@ -17,9 +17,24 @@ function CodeBlock({ children, ...props }: ComponentPropsWithoutRef<"pre">) {
   </div>;
 }
 
-export const MarkdownText = memo(function MarkdownText({ text }: { text: string }) {
+/**
+ * The owner's own words are not markup: `<b>x</b>` typed into the box should read back as typed.
+ * Raw HTML nodes become plain text before rendering, so it is shown, never run and never dropped.
+ */
+function htmlAsText() {
+  const visit = (node: { type?: string; value?: string; children?: unknown[] }): void => {
+    if (node.type === "html") {
+      node.type = "text";
+      return;
+    }
+    for (const child of node.children ?? []) visit(child as typeof node);
+  };
+  return visit;
+}
+
+export const MarkdownText = memo(function MarkdownText({ text, literalHtml = false }: { text: string; literalHtml?: boolean }) {
   return <div className="prose">
-    <ReactMarkdown skipHtml remarkPlugins={[remarkGfm, remarkBreaks]} components={{
+    <ReactMarkdown skipHtml={!literalHtml} remarkPlugins={literalHtml ? [remarkGfm, remarkBreaks, htmlAsText] : [remarkGfm, remarkBreaks]} components={{
       a: ({ children, href }) => <a href={href} target="_blank" rel="noreferrer noopener">{children}</a>,
       pre: ({ children }) => <CodeBlock>{children}</CodeBlock>,
       table: ({ children }) => <div className="markdown-table"><table>{children}</table></div>,

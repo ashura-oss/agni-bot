@@ -201,3 +201,11 @@
   color: var(--ink-secondary);
   font-size: var(--text-meta);
 }
+
+/* The phone drawer's shadow reaches 50px past its edge: while it is shut, that is a dark strip
+   down the left of the chat. Only an open drawer casts it. */
+@media (max-width: 720px) {
+  .sidebar:not(.open) {
+    box-shadow: none;
+  }
+}

@@ -497,6 +497,43 @@ describe("transcript", () => {
     expect(chat.apply(endFrame("trn_a", "thr_a", "end", { conversationID: "cnv_a" }))).not.toContainEqual({ kind: "reloadDurableState" });
   });
 
+  test("a reload mid-turn: the replayed turn.start arrives before the chat is bound (final round)", () => {
+    const chat = new Conversation("ea");
+    // Replay first: conversation.open has not answered, so the chat does not know its conversation yet.
+    chat.apply(startFrame("trn_1", "thr_1", "ea", "cnv_1"));
+    chat.apply(tokenFrame("trn_1", "thr_1", "dropped before bind"));
+    expect(chat.messages).toHaveLength(0);
+
+    chat.bind("cnv_1", "ea", "thr_1");
+    expect(chat.isStreaming).toBe(true);
+    expect(chat.inFlightTurnID).toBe("trn_1");
+    expect(chat.messages[0]?.isContinuation).toBe(true);
+
+    chat.apply(tokenFrame("trn_1", "thr_1", "tokens after bind"));
+    expect(chat.messages[0]?.text).toBe("tokens after bind");
+    const effects = chat.apply(endFrame("trn_1", "thr_1", "end", { conversationID: "cnv_1" }));
+    expect(effects).toContainEqual({ kind: "reloadDurableState" });
+    expect(chat.isStreaming).toBe(false);
+  });
+
+  test("a turn replayed before bind that belongs to another bot is declined once the chat is bound", () => {
+    const chat = new Conversation("bot_b");
+    chat.apply(startFrame("trn_a", "thr_a", "bot_a", "cnv_a"));
+    chat.bind("cnv_b", "bot_b", "thr_b");
+    expect(chat.isStreaming).toBe(false);
+    chat.apply(tokenFrame("trn_a", "thr_a", "must stay out"));
+    expect(chat.messages).toHaveLength(0);
+  });
+
+  test("a turn that ended before the bind is not adopted", () => {
+    const chat = new Conversation("ea");
+    chat.apply(startFrame("trn_1", "thr_1", "ea", "cnv_1"));
+    chat.apply(endFrame("trn_1", "thr_1", "end", { conversationID: "cnv_1" }));
+    chat.bind("cnv_1", "ea", "thr_1");
+    expect(chat.isStreaming).toBe(false);
+    expect(chat.messages).toHaveLength(0);
+  });
+
   test("a turn this chat declined at its start stays declined even if its block is later adopted", () => {
     const chat = new Conversation("bot_b");
     chat.bind("cnv_b", "bot_b", null);

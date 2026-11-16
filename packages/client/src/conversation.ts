@@ -224,6 +224,11 @@ export class Conversation {
    * their own, so this is the only way to tell them from this chat's.
    */
   private declinedTurns = new Set<string>();
+  /**
+   * Turns started in a conversation while this chat did not yet know its own (after a reload,
+   * the replay arrives before `conversation.open` answers). They are judged when the chat binds.
+   */
+  private pendingTurns = new Map<string, { threadID: string; conversationID: string; agentID: string }>();
 
   private static readonly noticeCap = 40;
 
@@ -286,10 +291,27 @@ export class Conversation {
     this.turnAgents.clear();
     this.failures.clear();
     this.declinedTurns.clear();
+    this.pendingTurns.clear();
     this.messages = this.messages.filter((message) => !isStreaming(message));
     this.approvals = this.approvals.filter((approval) => keep.has(approval.id));
     this.forms = this.forms.filter((form) => keep.has(form.id));
     this.secrets = this.secrets.filter((secret) => keep.has(secret.id));
+  }
+
+  /**
+   * The daemon says the turn Stop was pressed on is no longer running: it finished. Stop and
+   * "Writing" go away; the finished reply comes from the durable history.
+   */
+  finishTurnLocally(): void {
+    const turnID = this.inFlightTurnID;
+    this.inFlightTurnID = null;
+    this.inFlightThreadID = null;
+    if (turnID !== null) {
+      this.adoptedTurns.delete(turnID);
+      this.turnAgents.delete(turnID);
+      // A half-drawn bubble would outlive the reload (history keeps bubbles still streaming).
+      this.messages = this.messages.filter((message) => !(message.turnID === turnID && isStreaming(message)));
+    }
   }
 
   /** Take back a local echo the daemon refused, so the text can go back to the composer. */
@@ -348,6 +370,38 @@ export class Conversation {
     this.inFlightThreadID = null;
     this.adoptedTurns.clear();
     this.turnAnswers.clear();
+    this.adoptPendingTurns();
+  }
+
+  /** Decide the turns that began before this chat knew its conversation: ours are picked up, others declined. */
+  private adoptPendingTurns(): void {
+    const pending = [...this.pendingTurns];
+    this.pendingTurns.clear();
+    for (const [turnID, turn] of pending) {
+      if (turn.conversationID !== this.conversationID) {
+        this.declinedTurns.add(turnID);
+        continue;
+      }
+      this.adoptedTurns.add(turnID);
+      this.turnAgents.set(turnID, turn.agentID);
+      this.inFlightTurnID = turnID;
+      this.inFlightThreadID = turn.threadID;
+      this.messages.push(
+        newMessage({
+          id: Conversation.assistantID(turnID),
+          role: "assistant",
+          text: "",
+          createdAt: new Date(),
+          turnID,
+          agentID: turn.agentID,
+          sessionID: turn.threadID,
+          state: { kind: "streaming" },
+          isBackground: this.threadID !== null && this.threadID !== turn.threadID,
+          // The replay's tokens went by before the chat was bound: the start of the reply is not here.
+          isContinuation: true,
+        }),
+      );
+    }
   }
 
   /** A session block boundary arrived: everything after this lands in the new block. */
@@ -622,6 +676,11 @@ export class Conversation {
 
       case "turn.start": {
         const isOurs = this.belongsTo(frame.threadID, frame.conversationID ?? null);
+        if (!isOurs && this.conversationID === null && frame.conversationID !== undefined) {
+          // Not known yet whose this is: the chat has not learned its conversation. Judge it at bind.
+          this.pendingTurns.set(frame.turnID, { threadID: frame.threadID, conversationID: frame.conversationID, agentID: frame.agentID });
+          return [{ kind: "refreshThreadList" }];
+        }
         if (!isOurs) {
           this.declinedTurns.add(frame.turnID);
           for (const old of [...this.declinedTurns].slice(0, Math.max(0, this.declinedTurns.size - 100))) this.declinedTurns.delete(old);
@@ -696,6 +755,7 @@ export class Conversation {
       case "turn.end": {
         const adopted = this.adoptedTurns.delete(frame.turnID);
         const wasDeclined = this.declinedTurns.delete(frame.turnID);
+        this.pendingTurns.delete(frame.turnID);
         const isOurs =
           adopted ||
           this.belongsTo(frame.threadID, frame.conversationID ?? null) ||

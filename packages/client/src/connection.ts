@@ -41,8 +41,12 @@ export type ConnectionEvent =
   | { type: "frame"; frame: IncomingFrame }
   /** A frame the server sent that this build could not parse. */
   | { type: "malformed"; detail: string }
-  /** `resync` could not be replayed: reload durable state. */
-  | { type: "durableReloadRequired" }
+  /**
+   * `resync` could not be replayed: reload durable state. `restarted` is true only when the
+   * daemon's own counter is behind ours, which proves it restarted. A plain resync gap (a log
+   * that moved on while we slept) proves nothing about the turns it was running.
+   */
+  | { type: "durableReloadRequired"; restarted: boolean }
   /** lastSeq moved; persist it so a reload can resume. */
   | { type: "lastSeq"; seq: number };
 
@@ -265,7 +269,7 @@ export class AgniConnection {
                 // Server restarted behind us (M3): our seq is meaningless now.
                 this.settings.lastSeq = frame.lastSeq;
                 this.onEventValue?.({ type: "lastSeq", seq: frame.lastSeq });
-                this.onEventValue?.({ type: "durableReloadRequired" });
+                this.onEventValue?.({ type: "durableReloadRequired", restarted: true });
               }
               const resumeAfterSeq = this.settings.lastSeq;
               // Re-enter the stream where this browser left off. This must reach
@@ -297,7 +301,7 @@ export class AgniConnection {
           this.observe(seq);
 
           if (frame.type === "error" && !("__unknown" in frame) && frame.code === "resync_gap") {
-            this.onEventValue?.({ type: "durableReloadRequired" });
+            this.onEventValue?.({ type: "durableReloadRequired", restarted: false });
           }
           this.onEventValue?.({ type: "frame", frame });
         }
