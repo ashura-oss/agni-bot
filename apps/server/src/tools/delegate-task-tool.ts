@@ -231,7 +231,7 @@ function taskView(task: TaskRow, deps: DelegateTaskToolDeps): Record<string, unk
   // The result is the deliverable of work this caller asked for, so a
   // `summary` bot's answer comes back in full up to RESULT_MAX_CHARS; the
   // task's notes (its working) keep the short cap.
-  const redacted = redactStoredForCaller(artifact?.content ?? task.result, owner, deps.currentAgentID, visibility, RESULT_MAX_CHARS);
+  const redacted = redactStoredForCaller(artifact?.content ?? task.result, owner, deps.currentAgentID, visibility, RESULT_MAX_CHARS, true);
   const result = { value: clipResult(redacted.value, task.artifact_id), redacted: redacted.redacted };
   // The task's scratchpad crosses to the caller through the same filter.
   const noteText = listTaskNotes(deps.db, task.id).map((note) => `- ${note.text}`).join("\n");

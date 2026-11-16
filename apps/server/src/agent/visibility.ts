@@ -61,12 +61,15 @@ export interface RedactedText {
  * `summary` mode and for receipts: enough to say what happened, not the
  * working.
  */
-export function summarizeText(text: string, maxChars: number = SUMMARY_MAX_CHARS): string | null {
-  const cleaned = text.replace(/\s+/g, " ").trim();
+export function summarizeText(text: string, maxChars: number = SUMMARY_MAX_CHARS, keepLines = false): string | null {
+  // A work result keeps its line breaks (a list stays a list); only runs of blank lines and of spaces collapse.
+  const cleaned = keepLines
+    ? text.replace(/\r\n?/g, "\n").split("\n").map((line) => line.replace(/[^\S\n]+/g, " ").trim()).join("\n").replace(/\n{3,}/g, "\n\n").trim()
+    : text.replace(/\s+/g, " ").trim();
   if (!cleaned) return null;
   if (cleaned.length <= maxChars) return cleaned;
   const head = cleaned.slice(0, maxChars);
-  const cut = head.lastIndexOf(" ");
+  const cut = Math.max(head.lastIndexOf(" "), head.lastIndexOf("\n"));
   const body = cut > maxChars * 0.6 ? head.slice(0, cut) : head;
   return `${body}…`;
 }
@@ -82,6 +85,7 @@ export function redactForCaller(
   callerAgentID: string | null | undefined,
   visibility: Visibility,
   summaryMaxChars: number = SUMMARY_MAX_CHARS,
+  keepLines = false,
 ): RedactedText {
   const mode = normalizeVisibility(visibility);
   const body = text ?? "";
@@ -93,7 +97,7 @@ export function redactForCaller(
   }
   if (mode === "shared") return { text: body, redacted: false, mode };
   if (mode === "summary") {
-    const summary = summarizeText(body, summaryMaxChars);
+    const summary = summarizeText(body, summaryMaxChars, keepLines);
     return { text: summary, redacted: false, mode };
   }
   return { text: null, redacted: true, mode };
@@ -109,7 +113,7 @@ export function redactResultForCaller(
   callerAgentID: string | null | undefined,
   visibility: Visibility,
 ): RedactedText {
-  return redactForCaller(text, ownerAgentID, callerAgentID, visibility, RESULT_MAX_CHARS);
+  return redactForCaller(text, ownerAgentID, callerAgentID, visibility, RESULT_MAX_CHARS, true);
 }
 
 /**
@@ -123,8 +127,9 @@ export function redactStoredForCaller(
   callerAgentID: string | null | undefined,
   visibility: Visibility,
   summaryMaxChars: number = SUMMARY_MAX_CHARS,
+  keepLines = false,
 ): { value: string | null; redacted: boolean } {
   if (value === null || value === undefined || value === "") return { value: null, redacted: false };
-  const result = redactForCaller(value, ownerAgentID, callerAgentID, visibility, summaryMaxChars);
+  const result = redactForCaller(value, ownerAgentID, callerAgentID, visibility, summaryMaxChars, keepLines);
   return { value: result.text, redacted: result.redacted };
 }

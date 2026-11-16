@@ -92,3 +92,44 @@ describe("a locked database does not become an unhandled rejection", () => {
     }
   });
 });
+
+describe("a delegated result keeps its line breaks when the delegating bot reads it", () => {
+  async function viewOf(visibility: "summary" | "shared", content: string): Promise<{ result: string }> {
+    const { ToolRegistry } = await import("../src/tools/registry");
+    const { registerDelegateTaskTool } = await import("../src/tools/delegate-task-tool");
+    const { saveArtifact } = await import("../src/stores/artifacts");
+    const { setDelegationArtifact, setDelegationState } = await import("../src/stores/tasks");
+    db = openDatabase(":memory:");
+    db.run("UPDATE agents SET visibility = ? WHERE id = 'researcher'", [visibility]);
+    const registry = new ToolRegistry();
+    registerDelegateTaskTool(registry, { db, emit: () => undefined, currentAgentID: "ea", channelID: "main", parentTurnID: "trn_p", parentThreadID: "thr_p" });
+    const ctx = { threadID: "thr_p", turnID: "trn_p", signal: new AbortController().signal };
+    const call = (name: string, args: Record<string, unknown>) =>
+      (registry.get(name)!.handler as unknown as (a: Record<string, unknown>, c: unknown) => Promise<Record<string, unknown>>)(args, ctx);
+    const queued = await call("delegate_task", { toAgentID: "researcher", goal: "List things" }) as { taskID: string };
+    const artifact = saveArtifact(db, { taskID: queued.taskID, agentID: "researcher", content });
+    setDelegationArtifact(db, queued.taskID, artifact.id);
+    setDelegationState(db, queued.taskID, "done", "done");
+    return await call("task_status", { taskID: queued.taskID }) as { result: string };
+  }
+  const sixty = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join("\n");
+
+  for (const visibility of ["summary", "shared"] as const) {
+    test(`${visibility}: 60 lines come back as 60 lines`, async () => {
+      const view = await viewOf(visibility, sixty);
+      expect(view.result.split("\n")).toHaveLength(60);
+      expect(view.result.startsWith("line 1\nline 2\n")).toBe(true);
+    });
+  }
+
+  test("only runs of blank lines are collapsed, and spaces inside a line", async () => {
+    const view = await viewOf("summary", "first   line\n\n\n\n\nsecond line\t\twith tabs  \nthird");
+    expect(view.result).toBe("first line\n\nsecond line with tabs\nthird");
+  });
+
+  test("the short summary a third bot gets may stay one line", async () => {
+    const { redactForCaller } = await import("../src/agent/visibility");
+    const out = redactForCaller("one\ntwo\nthree", "researcher", "someone_else", "summary");
+    expect(out.text).toBe("one two three");
+  });
+});
