@@ -92,6 +92,8 @@ export interface ChatResult {
   firstTokenMs: number;
   inputTokens?: number;
   outputTokens?: number;
+  /** Prompt tokens served from the provider's cache (part of `inputTokens`), when the provider says. */
+  cachedInputTokens?: number;
   /** Structured tool calls the model emitted, if any. */
   toolCalls?: ToolCall[];
   /**
@@ -196,6 +198,7 @@ export async function streamChat(request: ChatRequest): Promise<ChatResult> {
   let firstTokenMs = -1;
   let inputTokens: number | undefined;
   let outputTokens: number | undefined;
+  let cachedInputTokens: number | undefined;
   // Tool calls arrive as incremental fragments keyed by index; accumulate them.
   const toolFragments = new Map<number, { id?: string; name?: string; arguments: string }>();
   // A stream that closes without [DONE] or a finish_reason was cut off, not finished.
@@ -261,10 +264,11 @@ export async function streamChat(request: ChatRequest): Promise<ChatResult> {
             toolFragments.set(index, existing);
           }
         }
-        const usage = (payload as { usage?: { prompt_tokens?: number; completion_tokens?: number } }).usage;
+        const usage = (payload as { usage?: UsageChunk }).usage;
         if (usage) {
           inputTokens = usage.prompt_tokens ?? inputTokens;
           outputTokens = usage.completion_tokens ?? outputTokens;
+          cachedInputTokens = cachedTokensOf(usage) ?? cachedInputTokens;
         }
       }
     }
@@ -291,10 +295,26 @@ export async function streamChat(request: ChatRequest): Promise<ChatResult> {
   const toolCalls = buildToolCalls(toolFragments);
   return {
     text, firstTokenMs, inputTokens, outputTokens,
+    ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}),
     ...(finishReason ? { finishReason } : {}),
     ...(reasoning.trim().length > 0 ? { reasoning: reasoning.trim() } : {}),
     ...(toolCalls.length ? { toolCalls } : {}),
   };
+}
+
+interface UsageChunk {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  /** OpenAI, OpenRouter, Qwen: cached part of the prompt. */
+  prompt_tokens_details?: { cached_tokens?: number } | null;
+  /** DeepSeek's own API. */
+  prompt_cache_hit_tokens?: number;
+}
+
+/** Cached prompt tokens, however the provider spells them; undefined when it does not say. */
+function cachedTokensOf(usage: UsageChunk): number | undefined {
+  const value = usage.prompt_tokens_details?.cached_tokens ?? usage.prompt_cache_hit_tokens;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
 /**

@@ -82,6 +82,8 @@ export interface RouteResult {
   latencyMs: number;
   inputTokens?: number;
   outputTokens?: number;
+  /** Prompt tokens the provider served from its cache (part of `inputTokens`), when it said. */
+  cachedInputTokens?: number;
   attempts: number;
   /** Structured tool calls the model emitted (task lane). */
   toolCalls?: import("./client").ToolCall[];
@@ -225,6 +227,7 @@ export class Router {
             model: provider.model,
             inputTokens: result.inputTokens,
             outputTokens: result.outputTokens,
+            cachedInputTokens: result.cachedInputTokens,
             latencyMs,
             purpose: options.purpose,
             agentID: options.agentID,
@@ -240,6 +243,7 @@ export class Router {
             latencyMs,
             inputTokens: result.inputTokens,
             outputTokens: result.outputTokens,
+            ...(result.cachedInputTokens !== undefined ? { cachedInputTokens: result.cachedInputTokens } : {}),
             attempts,
             ...(result.toolCalls ? { toolCalls: result.toolCalls } : {}),
             ...(result.reasoning ? { reasoning: result.reasoning } : {}),
