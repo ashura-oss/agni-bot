@@ -15,7 +15,8 @@ import { closeSync, mkdirSync, openSync, readFileSync, readSync, statSync, unlin
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Config } from "./config";
-import { type HealthReport } from "./ws/server";
+import { type HealthReport, type Liveness } from "./ws/server";
+import { formatDuration } from "./util/time";
 import { log } from "./log";
 import { restrictToOwnerOnWindows } from "./util/windows-acl";
 
@@ -24,11 +25,17 @@ export interface PidInfo {
   startedAt?: string;
 }
 
+/**
+ * What `GET /health` answered: liveness for anyone, and the rest (providers,
+ * usage, capacity) only to a paired device. The extra fields may be missing.
+ */
+export type HealthAnswer = Liveness & Partial<Omit<HealthReport, keyof Liveness>>;
+
 export interface StartOutcome {
   ok: boolean;
   pid?: number;
   alreadyRunning?: boolean;
-  health?: HealthReport;
+  health?: HealthAnswer;
   error?: string;
   logTail?: string[];
 }
@@ -46,7 +53,7 @@ export interface StatusOutcome {
   unhealthy: boolean;
   pid?: number;
   stalePidFile: boolean;
-  health?: HealthReport;
+  health?: HealthAnswer;
   pidPath: string;
   logPath: string;
 }
@@ -107,15 +114,58 @@ export function isProcessAlive(pid: number): boolean {
   }
 }
 
-export async function fetchHealth(config: Config, timeoutMs = 1500): Promise<HealthReport | null> {
+/** The device token this machine keeps for local tools (`AGNI_TOKEN`, from the environment or config.env), if any. */
+export function localDeviceToken(env: Record<string, string | undefined> = process.env): string | undefined {
+  return env.AGNI_TOKEN?.trim() || undefined;
+}
+
+/**
+ * Ask the server how it is. The stored local device token is sent so a paired
+ * machine gets the full report; without one (or with a stale one) the server
+ * answers liveness only, which still proves it is up.
+ */
+export async function fetchHealth(
+  config: Config,
+  timeoutMs = 1500,
+  env: Record<string, string | undefined> = process.env,
+): Promise<HealthAnswer | null> {
   try {
-    const response = await fetch(healthURL(config), { signal: AbortSignal.timeout(timeoutMs) });
+    const token = localDeviceToken(env);
+    const response = await fetch(healthURL(config), {
+      signal: AbortSignal.timeout(timeoutMs),
+      ...(token ? { headers: { authorization: `Bearer ${token}` } } : {}),
+    });
     if (!response.ok) return null;
-    const body = (await response.json()) as HealthReport;
+    const body = (await response.json()) as HealthAnswer;
     return body.ok ? body : null;
   } catch {
     return null;
   }
+}
+
+/** The lines `daemon status/start/restart` print under the header. Tolerates the minimal, unpaired answer. */
+export function formatHealthLines(health: HealthAnswer | undefined, config: Config): string[] {
+  if (!health) return [];
+  const lines: string[] = [];
+  const usage = health.usageToday;
+  const seq = health.seq === undefined ? "" : ` · seq ${health.seq}`;
+  const today = usage ? ` · today ${usage.turns} turns (${usage.inputTokens} in / ${usage.outputTokens} out tokens)` : "";
+  lines.push(`  up ${formatDuration(health.uptimeMs)} · protocol v${health.v}${seq}${today}`);
+  if (!usage || !health.providers || !health.modelCapacity) {
+    lines.push("  (details need a paired device: set AGNI_TOKEN to a device token from `agni pair`)");
+    return lines;
+  }
+  lines.push(`  model streams ${health.modelCapacity.active}/${health.modelCapacity.capacity}`);
+  for (const provider of health.providers) {
+    const state = provider.available
+      ? "ok"
+      : `cooling ${Math.ceil(provider.cooldownRemainingMs / 1000)}s${provider.lastError ? `: ${provider.lastError}` : ""}`;
+    lines.push(`    ${provider.id.padEnd(11)} ${provider.model} ${state}`);
+  }
+  if (health.providers.length === 0) {
+    lines.push(`    (no providers configured — set a key in ~/.agni/config.env; server ${config.host}:${config.port} is up)`);
+  }
+  return lines;
 }
 
 export interface StartOptions {
