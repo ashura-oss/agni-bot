@@ -9,8 +9,8 @@
  *              task id, the state, and the fact that it finished. The text
  *              stays in the agent's own conversation, which the owner can
  *              open directly.
- *   summary  → the caller gets one line (bounded), enough to report status
- *              and an outcome, not the working.
+ *   summary  → the caller gets a bounded summary (SUMMARY_MAX_CHARS), enough
+ *              to report status and an outcome, not the working.
  *   shared   → the caller gets the full text.
  *
  * The rule that matters: every path that can carry that text goes through
@@ -31,8 +31,13 @@ export function normalizeVisibility(value: string | null | undefined): Visibilit
   return VISIBILITIES.includes(value as Visibility) ? (value as Visibility) : DEFAULT_VISIBILITY;
 }
 
-/** How much of a summary a `summary` caller gets. */
-export const SUMMARY_MAX_CHARS = 240;
+/**
+ * How much of a result a `summary` caller gets. It was one 240-character
+ * line, which cut a real answer to its first sentence; a summary now holds a
+ * full short answer. Anything longer is cut and the full text stays in the
+ * artifact the task points at.
+ */
+export const SUMMARY_MAX_CHARS = 4_000;
 
 export interface RedactedText {
   /** The text the caller may see, or null when nothing may cross. */

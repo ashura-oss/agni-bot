@@ -9,7 +9,7 @@ import { ToolRegistry } from "../src/tools/registry";
 import { registerHandoffTool } from "../src/tools/handoff-tool";
 import { registerDelegateTaskTool } from "../src/tools/delegate-task-tool";
 import { defaultResolvedPersona, personaInfo } from "../src/agent/personas";
-import { redactForCaller, summarizeText } from "../src/agent/visibility";
+import { SUMMARY_MAX_CHARS, redactForCaller, summarizeText } from "../src/agent/visibility";
 import { putAgentMemory, listAgentMemories } from "../src/stores/agent-memories";
 import { recallFact } from "../src/tools/facts";
 import { createThread } from "../src/stores/threads";
@@ -55,7 +55,7 @@ describe("the redaction choke point", () => {
     const sum = redactForCaller(text, "vault", "ea", "summary");
     expect(sum.redacted).toBe(false);
     expect(sum.text).toBe(text);
-    expect(sum.text!.length).toBeLessThanOrEqual(240);
+    expect(sum.text!.length).toBeLessThanOrEqual(SUMMARY_MAX_CHARS);
 
     const shared = redactForCaller(text, "vault", "ea", "shared");
     expect(shared.text).toBe(text);
@@ -70,11 +70,13 @@ describe("the redaction choke point", () => {
     expect(noCaller.text).toBe("anything");
   });
 
-  test("a summary is one bounded line", () => {
-    const long = `${"word ".repeat(200)}tail-marker`;
+  test("a summary is bounded", () => {
+    const long = `${"word ".repeat(2_000)}tail-marker`;
     const summary = summarizeText(long);
-    expect(summary!.length).toBeLessThanOrEqual(240);
+    expect(summary!.length).toBeLessThanOrEqual(SUMMARY_MAX_CHARS);
     expect(summary).not.toContain("tail-marker");
+    // A short answer is not touched.
+    expect(summarizeText("It is done.")).toBe("It is done.");
   });
 });
 

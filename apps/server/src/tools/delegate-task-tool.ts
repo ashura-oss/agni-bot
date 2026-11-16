@@ -10,7 +10,8 @@
 import type { Database } from "bun:sqlite";
 import { PEER_INTENTS, PeerIntentSchema, type PeerIntent, type ServerFrameBody } from "@agni/protocol";
 import type { ToolRegistry } from "./registry";
-import { teamRoster, resolvePersona } from "../agent/personas";
+import { assertTeammate, canonicalAgentID, resolvePersona } from "../agent/personas";
+import { getAgentMemory } from "../stores/agent-memories";
 import { DEFAULT_VISIBILITY, redactStoredForCaller } from "../agent/visibility";
 import {
   createDelegationTask,
@@ -27,6 +28,7 @@ import { checkPeerRequest, fingerprintPeerRequest } from "../stores/peer-chains"
 import { appendChannelMessage } from "../stores/channels";
 import { MAX_DEPTH } from "../agent/guardrails";
 import { listTaskNotes } from "../stores/task-notes";
+import { getArtifact } from "../stores/artifacts";
 
 const objectSchema = (properties: Record<string, unknown>, required: string[]): Record<string, unknown> => ({
   type: "object", properties, required, additionalProperties: false,
@@ -50,7 +52,6 @@ export interface DelegateTaskToolDeps {
 
 export function registerDelegateTaskTool(registry: ToolRegistry, deps: DelegateTaskToolDeps): void {
   if (registry.get("delegate_task")) return;
-  const team = teamRoster(deps.db, { exclude: deps.currentAgentID });
 
   registry.register({
     name: "delegate_task",
@@ -63,9 +64,9 @@ export function registerDelegateTaskTool(registry: ToolRegistry, deps: DelegateT
     // Large enough for mode=wait; async calls return immediately.
     timeoutMs: 310_000,
     schema: objectSchema({
-      toAgentID: team.length > 0
-        ? { type: "string", enum: team.map((member) => member.id), description: team.map((member) => `${member.id}: ${member.role}`).join("; ") }
-        : stringProp,
+      // Not an enum: the roster changes while a turn runs (a bot can create
+      // one), so the target is checked against the live roster when called.
+      toAgentID: { ...stringProp, description: "The id of a teammate (see your team list). An unknown id is refused with the current team." },
       goal: { type: "string", minLength: 1, description: "What the specialist must accomplish, in one or two sentences." },
       intent: {
         type: "string",
@@ -86,9 +87,7 @@ export function registerDelegateTaskTool(registry: ToolRegistry, deps: DelegateT
     handler: async (args: Record<string, unknown>, ctx) => {
       const toAgentID = String(args.toAgentID ?? "").trim();
       if (!toAgentID) throw new Error("delegate_task requires a toAgentID");
-      if (team.length > 0 && !team.some((member) => member.id === toAgentID)) {
-        throw new Error(`unknown agent ${toAgentID}; the team is ${team.map((member) => member.id).join(", ")}`);
-      }
+      assertTeammate(deps.db, deps.currentAgentID, toAgentID);
       const goal = String(args.goal ?? "").trim();
       if (!goal) throw new Error("delegate_task requires a goal");
       const depth = ctx.chain?.depth ?? 1;
@@ -104,7 +103,13 @@ export function registerDelegateTaskTool(registry: ToolRegistry, deps: DelegateT
         deadline: args.deadline === undefined ? null : String(args.deadline),
         outputSchema: args.outputSchema === undefined ? null : String(args.outputSchema),
         ...(factIDs && factIDs.length > 0 ? { factIDs } : {}),
-      };      // Idempotency: the same goal already in flight for the same specialist
+      };
+      // The facts the brief names go with it, read as the caller (so a private
+      // fact of another bot stays private). The child has only the brief.
+      const facts = factIDs && factIDs.length > 0
+        ? readFacts(deps.db, readableFactIDs(deps.db, factIDs, deps.currentAgentID), deps.currentAgentID)
+        : [];
+      // Idempotency: the same goal already in flight for the same specialist
       // from this caller is returned, not queued twice. A model retry must not
       // double the work; two different callers asking the same thing are two
       // pieces of work.
@@ -165,7 +170,7 @@ export function registerDelegateTaskTool(registry: ToolRegistry, deps: DelegateT
           // so it is not replayed to the model as a bare user message later.
           inputRole: "system",
           agentID: toAgentID,
-          text: formatBrief(brief),
+          text: formatBrief(brief, facts),
           peer: {
             from: deps.db.query<{ display_name: string | null }, [string]>("SELECT display_name FROM agents WHERE id = ?").get(deps.currentAgentID)?.display_name?.trim() || deps.currentAgentID,
             intent: brief.intent ?? "request",
@@ -219,7 +224,13 @@ function taskView(task: TaskRow, deps: DelegateTaskToolDeps): Record<string, unk
   // synchronous handoff applies, so the async path cannot be the weak one.
   const owner = task.owner_agent_id ?? "";
   const visibility = owner ? resolvePersona(deps.db, owner)?.visibility ?? DEFAULT_VISIBILITY : DEFAULT_VISIBILITY;
-  const result = redactStoredForCaller(task.result, owner, deps.currentAgentID, visibility);
+  // The row keeps a short summary; the artifact holds what the specialist
+  // actually wrote (DEL-004). A finished task is shown from the artifact so a
+  // long answer is not cut to the row's summary. It is still redacted for
+  // this caller, and still bounded, with a pointer to the rest.
+  const artifact = task.delegate_state === "done" && task.artifact_id ? getArtifact(deps.db, task.artifact_id) : null;
+  const redacted = redactStoredForCaller(artifact?.content ?? task.result, owner, deps.currentAgentID, visibility);
+  const result = { value: clipResult(redacted.value, task.artifact_id), redacted: redacted.redacted };
   // The task's scratchpad crosses to the caller through the same filter.
   const noteText = listTaskNotes(deps.db, task.id).map((note) => `- ${note.text}`).join("\n");
   const notes = redactStoredForCaller(noteText, owner, deps.currentAgentID, visibility);
@@ -241,6 +252,37 @@ function taskView(task: TaskRow, deps: DelegateTaskToolDeps): Record<string, unk
     jobID: task.job_id,
     updatedAt: task.updated_at,
   };
+}
+
+/**
+ * The named fact ids this caller may read. A private fact belongs to its owner
+ * alone (the same rule the query layer applies when facts are listed or
+ * recalled); `readFacts` only applies the owning bot's visibility, which would
+ * let a caller who knew a private fact's id put it in a brief.
+ */
+function readableFactIDs(db: Database, ids: string[], callerAgentID: string): string[] {
+  const caller = canonicalAgentID(callerAgentID);
+  return ids.filter((id) => {
+    const row = getAgentMemory(db, id);
+    return Boolean(row) && (row!.visibility !== "private" || (row!.agent_id ?? "ea") === caller);
+  });
+}
+
+/**
+ * How much of a delegated result goes into one tool result. The loop cuts a
+ * whole tool result at 4,000 characters and shrinks every string in it when
+ * it is longer, so the result text keeps to what leaves room for the other
+ * fields of the view. Past this the text is cut and says where the rest is.
+ */
+export const TASK_VIEW_RESULT_MAX_CHARS = 3_000;
+
+function clipResult(value: string | null, artifactID: string | null): string | null {
+  if (value === null || value.length <= TASK_VIEW_RESULT_MAX_CHARS) return value;
+  const head = value.slice(0, TASK_VIEW_RESULT_MAX_CHARS);
+  const cut = head.lastIndexOf(" ");
+  const body = cut > TASK_VIEW_RESULT_MAX_CHARS * 0.8 ? head.slice(0, cut) : head;
+  const where = artifactID ? `full result: read_artifact ${artifactID}` : "the rest is in the specialist's own chat";
+  return `${body}… [cut at ${body.length} of ${value.length} characters; ${where}]`;
 }
 
 /** Read the optional intent; absent means "request", invalid is an error. */
