@@ -116,8 +116,8 @@ function judge(run: RunContext, input: PolicyInput, record: boolean): Decision {
   }
   if (refusedRun) {
     asks = true;
-    tier = Math.max(tier, tool === "write_file" ? 1 : 3) as ToolTier;
-    why = "a run that holds a refusal: a shell command the server cannot read file names from, or a call the refused shell command could have reached";
+    tier = Math.max(tier, tool === "write_file" ? 1 : tool.startsWith("mcp_") ? 2 : 3) as ToolTier;
+    why = "a run that holds a refusal: a shell command the server cannot read file names from, a connector tool, or a call the refused shell command could have reached";
   }
   if (!asks) return { action: "run", via: "free", reason: why, assessment };
 
@@ -179,22 +179,27 @@ function deniedEarlier(run: RunContext, tool: string, args: Record<string, unkno
 
 /**
  * The card's lead line when this run holds a refusal that reaches this call, or null. Reached: a shell command the server cannot
- * read file names from, in a run that holds any refusal; and any shell call or file write once the owner refused a shell command.
+ * read file names from, in a run that holds any refusal; any shell call, file write or connector (MCP) tool once the owner refused
+ * a shell command; and a connector tool in a run that holds any refusal (its arguments name no file the server can compare, so
+ * the trust the owner gave it, and any stored rule, do not apply while the run holds a "no").
  */
 function refusalOnCard(run: RunContext, tool: string, assessment: CallAssessment): string | null {
-  if (assessment.unprovenShell) return refusalNamedOnCard(run);
-  const reached = tool === "write_file" || assessment.risk === "command";
-  return reached && shellDenial(run.services.db, run) ? SHELL_REFUSED_LINE : null;
+  if (assessment.unprovenShell) return refusalNamedOnCard(run, "command");
+  const connector = tool.startsWith("mcp_");
+  const reached = tool === "write_file" || assessment.risk === "command" || connector;
+  if (reached && shellDenial(run.services.db, run)) return SHELL_REFUSED_LINE;
+  return connector ? refusalNamedOnCard(run, "tool") : null;
 }
 
 const SHELL_REFUSED_LINE = "You said no to running a command earlier in this task. I cannot tell which files it would have touched, so every command and every file change now asks you first.";
 
-/** The card's line for a command the server cannot read file names from, when the run holds a refusal; null when it holds none. */
-function refusalNamedOnCard(run: RunContext): string | null {
+/** The card's line for a call the server cannot read file names from, when the run holds a refusal; null when it holds none. */
+function refusalNamedOnCard(run: RunContext, what: "command" | "tool"): string | null {
   const held = anyDenial(run.services.db, run);
   if (!held) return null;
   if (isShellDenial(held)) return SHELL_REFUSED_LINE;
-  return `You said no to ${OPERATION_PHRASE[held.operation]} ${entry(held.key, 200)} earlier in this task. This command may touch it, and I cannot tell from the command which files it reaches.`;
+  const why = what === "command" ? "This command may touch it, and I cannot tell from the command which files it reaches." : "This tool may reach it, and I cannot tell from its arguments what it touches.";
+  return `You said no to ${OPERATION_PHRASE[held.operation]} ${entry(held.key, 200)} earlier in this task. ${why}`;
 }
 
 function refusedAfterNo(run: RunContext, tool: string, args: Record<string, unknown>, assessment: CallAssessment, hit: DenialRecord): Decision {

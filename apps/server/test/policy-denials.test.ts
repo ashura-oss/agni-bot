@@ -8,7 +8,10 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ApprovalBroker, type Decision } from "../src/agent/approval-broker";
 import { gateToolCall, type GateResult } from "../src/agent/tool-gate";
-import { findDenial, recordDenial } from "../src/policy/denials";
+import { SHELL_REFUSAL, findDenial, recordDenial } from "../src/policy/denials";
+import { decide } from "../src/policy/engine";
+import { MCP_FREE_TOOLS } from "../src/plugins/mcp";
+import { addApprovalRule, approvalTarget } from "../src/stores/approval-rules";
 import type { RunContext } from "../src/policy/types";
 import { policyRig, type PolicyRig } from "./policy-fixture";
 
@@ -222,5 +225,55 @@ describe("a denied read covers every route that reads the file", () => {
     answers.push("reject");
     await ask(rig.run, "bash", { command: `rm ${word}` });
     expect(refused(await ask(rig.run, "bash", { command: `cat ${word}` }))).toBe(false);
+  });
+});
+
+describe("a run that holds a refusal does not give a connector tool a free pass", () => {
+  const TOOL = "mcp_notion_search";
+  const shellRefusal = { tool: "bash", operation: "run" as const, cause: "denied" as const, resources: [SHELL_REFUSAL] };
+  const fileRefusal = { tool: "bash", operation: "delete" as const, cause: "denied" as const, resources: [{ kind: "path" as const, value: "/x/report.txt" }] };
+
+  /** A connector tool the owner trusted (it runs without a card in a clean run). */
+  function trustedConnector(): RunContext {
+    rig.registry.register({ name: TOOL, description: "x", kind: "static", schema: { type: "object", properties: {} }, timeoutMs: 1000, handler: async () => ({}) });
+    MCP_FREE_TOOLS.add(TOOL);
+    return rig.another({ capabilities: [TOOL] });
+  }
+  afterEach(() => MCP_FREE_TOOLS.delete(TOOL));
+  const decideTool = (run: RunContext) => decide(run, { tool: TOOL, args: {}, callID: "call_mcp" });
+
+  test("baseline: a trusted connector tool runs free when the run holds no refusal", () => {
+    expect(decideTool(trustedConnector()).action).toBe("run");
+  });
+
+  test("after a refused shell command it asks, names the refusal, and cannot be remembered", () => {
+    const run = trustedConnector();
+    recordDenial(rig.db, run, shellRefusal);
+    const decision = decideTool(run);
+    expect(decision.action).toBe("ask");
+    if (decision.action !== "ask") return;
+    expect(decision.card.refusedRun).toContain("You said no to running a command");
+    expect(decision.card.canRemember).toBe(false);
+  });
+
+  test("after a refused file, it asks and the card names the file", () => {
+    const run = trustedConnector();
+    recordDenial(rig.db, run, fileRefusal);
+    const decision = decideTool(run);
+    expect(decision.action).toBe("ask");
+    if (decision.action !== "ask") return;
+    expect(decision.card.refusedRun).toContain("You said no to deleting");
+    expect(decision.card.refusedRun).toContain("report.txt");
+    expect(decision.card.canRemember).toBe(false);
+  });
+
+  test("a stored rule does not approve it while the run holds a refusal", () => {
+    const run = trustedConnector();
+    MCP_FREE_TOOLS.delete(TOOL);
+    const target = approvalTarget(TOOL, {})!;
+    addApprovalRule(rig.db, { agentID: run.bot, toolName: TOOL, target });
+    expect(decideTool(run).action, "baseline: the stored rule approves it in a clean run").toBe("run");
+    recordDenial(rig.db, run, fileRefusal);
+    expect(decideTool(run).action).toBe("ask");
   });
 });
