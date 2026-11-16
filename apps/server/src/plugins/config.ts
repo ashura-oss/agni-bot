@@ -38,7 +38,7 @@
 import { chmodSync, closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
 import { entryName, vaultForReads, vaultForWrites } from "../credentials/vault-mode";
-import { forgetSecretSlots, rememberSecretsAt, stageSecretsAt } from "../util/redact";
+import { forgetSecretSlots, rememberSecretsAt, stageSecretsAt, type SlotSecret } from "../util/redact";
 import { log } from "../log";
 import { valueCarriesCredential } from "../secrets/classify";
 import { VaultError, type Vault } from "../secrets/types";
@@ -232,13 +232,19 @@ export function collectPluginSecrets(config: PluginsFile): Map<string, string> {
 /** Slots of the secrets in plugins.json (see `rememberSecretsAt`). */
 const CONFIG_SLOT_PREFIX = "plugins.json:";
 
-/** Every secret in the config, by slot. Needs no vault and no valid ids, so it also works in file mode. */
-function pluginSecretSlots(config: PluginsFile): Map<string, string> {
-  const slots = new Map<string, string>();
+/**
+ * Every secret in the config, by slot, an access token with the expiry that is stored beside it.
+ * Needs no vault and no valid ids, so it also works in file mode.
+ */
+function pluginSecretSlots(config: PluginsFile): Map<string, SlotSecret> {
+  const slots = new Map<string, SlotSecret>();
   for (const [id, entry] of Object.entries(config.plugins)) {
     const auth = entry?.auth;
     if (!auth) continue;
-    for (const field of SECRET_AUTH_FIELDS) if (nonEmpty(auth[field])) slots.set(`${CONFIG_SLOT_PREFIX}${id}:${field}`, auth[field]);
+    for (const field of SECRET_AUTH_FIELDS) {
+      if (!nonEmpty(auth[field])) continue;
+      slots.set(`${CONFIG_SLOT_PREFIX}${id}:${field}`, field === "access_token" ? { value: auth[field], expiresAt: auth.expires_at } : auth[field]);
+    }
     if (urlIsSecret(auth.kind, auth.url)) slots.set(`${CONFIG_SLOT_PREFIX}${id}:url`, auth.url);
   }
   for (const [provider, client] of Object.entries(config.oauthClients ?? {})) {
@@ -254,8 +260,9 @@ function registerPluginSecrets(config: PluginsFile): void {
 
 /**
  * After the config is saved: each secret's slot now holds exactly what was saved, so a token
- * that was refreshed, or a plugin that was removed, stops being masked. Done after the write,
- * not before: a save that fails leaves the old values in the file, and they must stay masked.
+ * that was refreshed, or a plugin that was removed, is no longer the live one. It is queued, not
+ * unmasked: it stays masked until it expires or a revoke is confirmed (`releaseRetiredSecrets`).
+ * Done after the write, not before: a save that fails leaves the old values in the file.
  */
 function settlePluginSecrets(config: PluginsFile): void {
   const slots = pluginSecretSlots(config);

@@ -8,6 +8,7 @@ import type { Database } from "bun:sqlite";
 import type { PluginAccount, PluginInfo, PluginStatus, ServerFrameBody } from "@agni/protocol";
 import type { Config } from "../config";
 import { CATALOG, manifestFor, type PluginManifest } from "./catalog";
+import { releaseRetiredSecrets } from "../util/redact";
 import * as oauth from "./oauth";
 import { consumeOAuthState, dropOAuthStates, issueOAuthState, newOAuthState } from "./oauth-state";
 import { mcpHub } from "./mcp";
@@ -20,6 +21,7 @@ import {
   getConnectionFor,
   getConnections,
   markError,
+  readConnectionTokens,
   startPending,
   type PluginConnectionRow,
   updateTokens,
@@ -431,9 +433,12 @@ export class PluginService {
 
     const entry = this.authFor(row.plugin_id);
     const tokens = entry?.auth;
+    // What this connection's tokens were, for the redaction registry: they stay masked until known dead.
+    const held = [tokens?.access_token, tokens?.refresh_token, readConnectionTokens(row).access_token, readConnectionTokens(row).refresh_token];
+    let revoked = false;
     try {
       const target = tokens?.refresh_token ?? tokens?.access_token;
-      if (target) await oauth.revoke(this.oauthDeps(), target);
+      if (target) revoked = await oauth.revoke(this.oauthDeps(), target);
     } catch {
       // A Google-side failure must not strand the credential locally.
     }
@@ -449,6 +454,8 @@ export class PluginService {
       entry.connectedAt = undefined;
       this.save();
     }
+    // Google confirmed the revoke: the grant is dead, so its tokens no longer need masking. Unconfirmed, they stay masked until they expire.
+    if (revoked) releaseRetiredSecrets(...held.filter((value): value is string => typeof value === "string"));
     this.emitState();
     return {};
   }

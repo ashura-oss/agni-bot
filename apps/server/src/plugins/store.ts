@@ -16,7 +16,7 @@ import type { PluginAccount } from "@agni/protocol";
 import { entryName, vaultForReads, vaultForWrites } from "../credentials/vault-mode";
 import { VaultError } from "../secrets/types";
 import { newID, nowISO } from "../util/ids";
-import { rememberSecretsAt } from "../util/redact";
+import { rememberSecretsAt, stageSecretsAt, type SlotSecret } from "../util/redact";
 
 export interface PluginConnectionRow {
   id: string;
@@ -41,7 +41,7 @@ export interface TokenBlob {
   state?: string;
   refresh_token?: string;
   access_token?: string;
-  /** Epoch ms after which the access token needs a refresh. */
+  /** Epoch ms after which the access token needs a refresh (and is dead). */
   expires_at?: number;
 }
 
@@ -72,24 +72,30 @@ function holdsCredential(tokens: TokenBlob): boolean {
  * `tokens`. A blob with no credential in it (an MCP connect) is not worth a vault
  * entry and stays in the column. File mode: the column, as before.
  */
-/** The redaction slot of one connection's tokens: a refresh replaces them, it does not add to them. */
+/**
+ * The redaction slot of one connection's tokens (see `rememberSecretsAt`). A refresh replaces the
+ * tokens; what they replace stays masked until it is known dead, so a caller stages the new ones
+ * before the write (`saveTokens`) and settles the slot after it (`settleTokens`).
+ */
 const tokenSlot = (id: string): string => `plugin-connection:${id}`;
+
+/** What a blob puts in the slot: the access token with its known expiry, and the refresh token. */
+const tokenSecrets = (tokens: TokenBlob): SlotSecret[] => [{ value: tokens.access_token, expiresAt: tokens.expires_at }, tokens.refresh_token];
 
 function saveTokens(db: Database, id: string, tokens: TokenBlob): { tokens: string | null; token_ref: string | null } {
   const vault = vaultForWrites();
+  // Masked before anything is written, in either mode: once saved, a token may reach a log line.
+  stageSecretsAt(tokenSlot(id), ...tokenSecrets(tokens));
   if (!vault || !holdsCredential(tokens)) {
     // Any earlier vault copy of this row is now stale.
     const old = getConnection(db, id)?.token_ref;
     if (old) vault?.delete(old);
-    // File mode keeps these in the column: they are masked from here on, whichever mode wrote them.
-    rememberSecretsAt(tokenSlot(id), tokens.access_token, tokens.refresh_token);
     return { tokens: JSON.stringify(tokens), token_ref: null };
   }
   const name = entryName.connectionTokens(id);
   const blob = JSON.stringify(tokens);
   vault.set(name, blob);
   if (vault.get(name) !== blob) throw new VaultError("WRITE_FAILED", "The connection's tokens could not be read back from the vault, so they were not saved.");
-  rememberSecretsAt(tokenSlot(id), tokens.access_token, tokens.refresh_token);
   return { tokens: null, token_ref: name };
 }
 
@@ -152,7 +158,7 @@ export function startPending(db: Database, patch: ConnectPatch): PluginConnectio
     ],
   );
   if (existing?.token_ref) tryDeleteVaultEntry(existing.token_ref);
-  rememberSecretsAt(tokenSlot(id)); // a re-connect wipes the old tokens
+  rememberSecretsAt(tokenSlot(id)); // a re-connect wipes the old tokens: queued, masked until known dead
   return getConnection(db, id)!;
 }
 
@@ -171,12 +177,15 @@ export function completeConnect(db: Database, id: string, tokens: Omit<TokenBlob
      WHERE id = ?`,
     [accountLabel, saved.tokens, saved.token_ref, nowISO(), nowISO(), id],
   );
+  // The row holds the new tokens now: the ones they replace stop being the live ones (and are queued, not unmasked).
+  rememberSecretsAt(tokenSlot(id), ...tokenSecrets(tokens));
   return getConnection(db, id)!;
 }
 
 export function updateTokens(db: Database, id: string, tokens: TokenBlob): void {
   const saved = saveTokens(db, id, tokens);
   db.run("UPDATE plugin_connections SET tokens = ?, token_ref = ?, updated_at = ? WHERE id = ?", [saved.tokens, saved.token_ref, nowISO(), id]);
+  rememberSecretsAt(tokenSlot(id), ...tokenSecrets(tokens)); // after the write, like `completeConnect`
 }
 
 export function markError(db: Database, id: string, error: string): void {
@@ -188,6 +197,7 @@ export function deleteConnection(db: Database, id: string): boolean {
   const ref = getConnection(db, id)?.token_ref;
   const deleted = db.run("DELETE FROM plugin_connections WHERE id = ?", [id]).changes > 0;
   if (ref) tryDeleteVaultEntry(ref);
+  // The row is gone, the tokens are not necessarily dead: they stay masked until they expire or the caller confirms a revoke.
   rememberSecretsAt(tokenSlot(id));
   return deleted;
 }

@@ -9,7 +9,7 @@ import { ProviderError } from "./client";
 import type { ProviderConfig } from "./providers";
 import { chatGPTPage } from "./chatgpt-page";
 import { entryName, eraseFile, inVaultMode, vaultForReads, vaultForWrites } from "../credentials/vault-mode";
-import { forgetSecretSlots, rememberSecretsAt, stageSecretsAt } from "../util/redact";
+import { forgetSecretSlots, releaseRetiredSecrets, rememberSecretsAt, stageSecretsAt } from "../util/redact";
 import { log } from "../log";
 import { VaultError } from "../secrets/types";
 import { restrictToOwnerOnWindowsAsync } from "../util/windows-acl";
@@ -261,7 +261,9 @@ export class ChatGPTAuth {
         } catch { /* Retry once; never expose endpoint bodies or credentials. */ }
         if (!revoked && retry === 0) await new Promise((resolve) => setTimeout(resolve, 250));
       }
-      if (!revoked) this.message = "Signed out locally. Remote sign-out could not be confirmed; disconnect Agni in ChatGPT Settings → Apps.";
+      // Unconfirmed, the tokens (let go of by the save above) stay masked until they expire; confirmed, they are dead.
+      if (revoked) releaseRetiredSecrets(tokens.accessToken, tokens.refreshToken);
+      else this.message = "Signed out locally. Remote sign-out could not be confirmed; disconnect Agni in ChatGPT Settings → Apps.";
     }
     this.changed();
   }
@@ -456,9 +458,10 @@ function rememberTokens(store: Store, settle = true): void {
   for (const account of store.accounts) {
     const slot = `${prefix}${account.id}`;
     live.add(slot);
-    const { accessToken, refreshToken, idToken } = account.tokens ?? {};
-    if (settle) rememberSecretsAt(slot, accessToken, refreshToken, idToken);
-    else stageSecretsAt(slot, accessToken, refreshToken, idToken);
+    const { accessToken, refreshToken, idToken, expiresAt } = account.tokens ?? {};
+    const secrets = [{ value: accessToken, expiresAt }, refreshToken, idToken];
+    if (settle) rememberSecretsAt(slot, ...secrets);
+    else stageSecretsAt(slot, ...secrets);
   }
   if (settle) forgetSecretSlots(prefix, live);
 }
