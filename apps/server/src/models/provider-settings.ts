@@ -304,7 +304,7 @@ function updateEnv(contents: string, values: Record<string, string>): string {
   for (const [key, value] of Object.entries(values)) {
     const assignment = `${key}=${JSON.stringify(value)}`;
     const pattern = new RegExp(`^\\s*(?:export\\s+)?${key}\\s*=.*$`, "m");
-    next = pattern.test(next) ? next.replace(pattern, assignment) : `${next}${next.length > 0 && !next.endsWith("\n") ? "\n" : ""}${assignment}\n`;
+    next = pattern.test(next) ? next.replace(pattern, () => assignment) : `${next}${next.length > 0 && !next.endsWith("\n") ? "\n" : ""}${assignment}\n`;
   }
   return next;
 }

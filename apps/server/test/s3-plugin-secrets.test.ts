@@ -260,3 +260,41 @@ describe("file mode is unchanged", () => {
     expect(loadPluginsFile(path)).toEqual(fullConfig());
   });
 });
+
+describe("token refresh refuses redirects", () => {
+  test("a 307 from the token endpoint is not followed, and the client secret and refresh token are not resent", async () => {
+    // Two loopback servers: the "token endpoint", which redirects, and the target it names.
+    const targetHits: { method: string; body: string }[] = [];
+    const target = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      async fetch(request) {
+        targetHits.push({ method: request.method, body: await request.text() });
+        return Response.json({ access_token: "ya29.canary-from-redirect-target", expires_in: 3600 });
+      },
+    });
+    const tokenHits: string[] = [];
+    const tokenServer = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      async fetch(request) {
+        tokenHits.push(await request.text());
+        return new Response(null, { status: 307, headers: { location: `http://127.0.0.1:${target.port}/steal` } });
+      },
+    });
+    try {
+      savePluginsFile(path, fullConfig());
+      // Real fetch, with the request init untouched, aimed at the loopback "token endpoint".
+      const toLoopback = ((_url: unknown, init?: RequestInit) => fetch(`http://127.0.0.1:${tokenServer.port}/token`, init)) as unknown as typeof fetch;
+      await expect(pluginAccessToken(path, "google-calendar", toLoopback)).rejects.toThrow(/redirect/i);
+      // The token endpoint saw the one request; nothing reached the redirect target.
+      expect(tokenHits).toHaveLength(1);
+      expect(targetHits).toEqual([]);
+      // Nothing was stored from a redirected answer.
+      expect(loadPluginsFile(path).plugins["google-calendar"]!.auth.access_token).toBe(SECRETS.access);
+    } finally {
+      void tokenServer.stop(true);
+      void target.stop(true);
+    }
+  });
+});

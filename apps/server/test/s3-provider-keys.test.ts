@@ -187,3 +187,16 @@ describe("a key typed by the owner in vault mode is not stored by a failed save"
     expect(filesContaining(KEY)).toEqual([]);
   });
 });
+
+describe("file mode: replacement characters in a key", () => {
+  test("a key with $& and $' replaces an existing line exactly and leaves the other lines alone", async () => {
+    const before = ['# keep this comment', 'OTHER_SETTING="a b"', 'GROQ_API_KEY="old-value"', 'LAST_LINE=1', ""].join("\n");
+    writeFileSync(join(home, "config.env"), before);
+    const tricky = "gsk_pre$&mid$'post$`end$$tail";
+    const result = await addProviderCredential(router(), "groq", tricky);
+    expect(result.ok).toBe(true);
+    const after = readFileSync(join(home, "config.env"), "utf8");
+    expect(after).toBe(['# keep this comment', 'OTHER_SETTING="a b"', `GROQ_API_KEY=${JSON.stringify(tricky)}`, 'LAST_LINE=1', ""].join("\n"));
+    expect(process.env.GROQ_API_KEY).toBe(tricky);
+  });
+});
