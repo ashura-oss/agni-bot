@@ -26,7 +26,7 @@ import { entry } from "../agent/card-text";
 import { approvalTarget, matchApprovalRule } from "../stores/approval-rules";
 import { audit } from "./audit-sink";
 import { isTainted, newestFirst } from "./context";
-import { REFUSALS_BEFORE_STOP, anyDenial, findDenial, noteBlockedAttempt, type DenialRecord } from "./denials";
+import { REFUSALS_BEFORE_STOP, anyDenial, findDenial, isShellDenial, noteBlockedAttempt, shellDenial, type DenialRecord } from "./denials";
 import { unnamedDestinations } from "./egress";
 import { policyHooks } from "./hooks";
 import { assessCall, policyFor } from "./metadata";
@@ -83,9 +83,11 @@ function judge(run: RunContext, input: PolicyInput, record: boolean): Decision {
   if (denied) return denied;
   // A shell command the server cannot prove to be one plain allowlisted command (policy/shell-proof.ts) names no file, so no
   // refusal can be compared with it. While this run holds ANY refusal it may touch it: it is never run on its own, and
-  // the owner is asked with the refusal named. (Sprint 7: an unattended, sandboxed shell is off in any run that holds a
-  // refusal; the sandbox profile, not this check, is the boundary there.)
-  const refusedRun = assessment.unprovenShell ? refusalNamedOnCard(run) : null;
+  // the owner is asked with the refusal named. And once the owner has refused such a command, the run holds a run-wide
+  // refusal of the shell: every later shell call and every file write asks too, whatever it names. (Sprint 7: an
+  // unattended, sandboxed shell is off in any run that holds a refusal; the sandbox profile, not this check, is the
+  // boundary there.)
+  const refusedRun = refusalOnCard(run, tool, assessment);
 
   // 4. budget
   const budget = policyHooks.checkBudget(run);
@@ -114,8 +116,8 @@ function judge(run: RunContext, input: PolicyInput, record: boolean): Decision {
   }
   if (refusedRun) {
     asks = true;
-    tier = Math.max(tier, 3) as ToolTier;
-    why = "shell command the server cannot read file names from, in a run that holds a refusal";
+    tier = Math.max(tier, tool === "write_file" ? 1 : 3) as ToolTier;
+    why = "a run that holds a refusal: a shell command the server cannot read file names from, or a call the refused shell command could have reached";
   }
   if (!asks) return { action: "run", via: "free", reason: why, assessment };
 
@@ -175,10 +177,23 @@ function deniedEarlier(run: RunContext, tool: string, args: Record<string, unkno
   return refusedAfterNo(run, tool, args, assessment, hit);
 }
 
+/**
+ * The card's lead line when this run holds a refusal that reaches this call, or null. Reached: a shell command the server cannot
+ * read file names from, in a run that holds any refusal; and any shell call or file write once the owner refused a shell command.
+ */
+function refusalOnCard(run: RunContext, tool: string, assessment: CallAssessment): string | null {
+  if (assessment.unprovenShell) return refusalNamedOnCard(run);
+  const reached = tool === "write_file" || assessment.risk === "command";
+  return reached && shellDenial(run.services.db, run) ? SHELL_REFUSED_LINE : null;
+}
+
+const SHELL_REFUSED_LINE = "You said no to running a command earlier in this task. I cannot tell which files it would have touched, so every command and every file change now asks you first.";
+
 /** The card's line for a command the server cannot read file names from, when the run holds a refusal; null when it holds none. */
 function refusalNamedOnCard(run: RunContext): string | null {
   const held = anyDenial(run.services.db, run);
   if (!held) return null;
+  if (isShellDenial(held)) return SHELL_REFUSED_LINE;
   return `You said no to ${OPERATION_PHRASE[held.operation]} ${entry(held.key, 200)} earlier in this task. This command may touch it, and I cannot tell from the command which files it reaches.`;
 }
 

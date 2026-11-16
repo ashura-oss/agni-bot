@@ -28,6 +28,8 @@ const neverRanOnItsOwn = (record: CallRecord | undefined): boolean =>
 
 /** The owner says no to everything that asks, so a command that was put to them did not run. */
 const refuseEveryCard = { answer: () => "reject" as const };
+/** The owner refuses every command, and allows the write of the one different file the test makes (it asks once a command was refused). */
+const refuseCommandsAllowFresh = { answer: (card: { action: string }) => (card.action.includes("fresh.txt") ? ("once" as const) : ("reject" as const)) };
 
 const shell = (path: string): string => path.replaceAll("\\", "/");
 
@@ -84,11 +86,13 @@ describe("INV-07 a denied delete holds against shell spellings of the same file"
         say("Done."),
       ]));
       const a = await s.connect({ label: "A" });
-      const report = await playTurn(s, a, "clean up q1", refuseEveryCard);
+      const report = await playTurn(s, a, "clean up q1", refuseCommandsAllowFresh);
 
       const record = report.calls.find((entry) => entry.callID === "call_route");
       expect(record, "the bot never tried the route; the script is out of step").toBeDefined();
       expect(neverRanOnItsOwn(record), `${route.id} ran with no card and no refusal: ${record!.result.slice(0, 120)}`).toBe(true);
+      // The owner refused the command, so the write of a different file asks (policy/engine.ts); it is asked, not refused, and the owner said yes.
+      expect(report.calls.find((entry) => entry.callID === "call_fresh")?.card, "the write after a refused command did not ask").not.toBeNull();
       expect(readFileSync(files.target, "utf8"), "the refused file changed").toBe("original");
       expect(existsSync(files.fresh), "a plain write to a different file was blocked (a denial must not over-reach)").toBe(true);
     });

@@ -11,7 +11,7 @@ import type { ServerFrameBody } from "@agni/protocol";
 import type { ApprovalBroker } from "./approval-broker";
 import { expireApprovalForCall } from "./pending-cards";
 import { audit } from "../policy/audit-sink";
-import { recordDenial } from "../policy/denials";
+import { SHELL_REFUSAL, recordDenial } from "../policy/denials";
 import { decide } from "../policy/engine";
 import type { ApprovalCard, CallAssessment, PolicyInput, RunContext, RunStop } from "../policy/types";
 import { entry } from "./card-text";
@@ -108,7 +108,8 @@ async function askOwner(
   const denial = (cause: "denied" | "expired"): void => {
     // The owner's no covers the thing, not just this call (S2-07). A bad row must not make the refusal weaker, so it is not left to chance:
     // a failure to write it is raised, and the call is refused either way.
-    recordDenial(deps.db, run, { tool: input.tool, operation: card.operation, resources: card.resources, cause });
+    // A shell command the server could not read file names from names none, so its refusal is of running commands (policy/denials.ts).
+    recordDenial(deps.db, run, { tool: input.tool, operation: card.operation, resources: assessment.unprovenShell ? [SHELL_REFUSAL] : card.resources, cause });
   };
   // Nobody answered in time (the turn itself was not stopped): expire the card.
   if (!answer && !signal.aborted && waitSignal.aborted) {

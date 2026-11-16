@@ -165,8 +165,9 @@ export interface ApprovalCard {
   resources: ToolResource[];
   operation: Operation;
   /**
-   * This run holds a refusal and the call is a shell command the server cannot read file names from: one
-   * sentence naming what the owner refused and saying the command may touch it. The card leads with it.
+   * This run holds a refusal that reaches the call: a shell command the server cannot read file names from, or (after
+   * the owner refused such a command) any shell call or file write. One sentence naming what the owner refused. The
+   * card leads with it.
    */
   refusedRun?: string;
 }

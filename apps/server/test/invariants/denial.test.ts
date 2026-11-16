@@ -37,6 +37,8 @@ const refusedWithoutACard = (record: CallRecord | undefined): boolean =>
 
 /** The owner refuses the delete and, tired, allows anything else that asks: an "Allow" must not undo the refusal. */
 const refuseTheDeleteOnly = { answer: (card: { action: string }) => (card.action.includes("rm ") ? ("reject" as const) : ("once" as const)) };
+/** The owner refuses the delete and every command, and allows the write of the one different file (it asks once a command was refused). */
+const refuseCommandsAllowFresh = { answer: (card: { action: string }) => (card.action.includes("fresh.txt") ? ("once" as const) : ("reject" as const)) };
 
 /**
  * Other ways to reach the file the owner would not let the bot delete. A shell route the server cannot prove to be one
@@ -66,7 +68,7 @@ describe("INV-07 a denied delete holds across tools for the rest of the run", ()
         say("Done."),
       ]));
       const a = await s.connect({ label: "A" });
-      const report = await playTurn(s, a, "clean up the old ledger", route.unproven ? { answer: () => "reject" as const } : refuseTheDeleteOnly);
+      const report = await playTurn(s, a, "clean up the old ledger", route.unproven ? refuseCommandsAllowFresh : refuseTheDeleteOnly);
 
       const record = report.calls.find((entry) => entry.callID === "call_route");
       expect(record, "the bot never tried the route; the script is out of step").toBeDefined();

@@ -30,6 +30,14 @@ export interface DenialRecord {
   blockedCount: number;
 }
 
+/**
+ * What a refused shell command the server could not prove is recorded under: it names no file, so the refusal is
+ * of running commands at all. It is held for the rest of the run and never matches a resource (`findDenial`);
+ * the engine reads it with `shellDenial`.
+ */
+export const SHELL_REFUSAL: ToolResource = { kind: "other", value: "agni:shell" };
+const isShellRefusal = (kind: ToolResource["kind"], key: string): boolean => kind === SHELL_REFUSAL.kind && key === SHELL_REFUSAL.value;
+
 /** The run a denial belongs to: the job at the root of the chain, or the chat turn that began it. */
 export function denialScope(run: Pick<RunContext, "rootJob" | "rootTurnID">): string {
   return run.rootJob ?? run.rootTurnID;
@@ -70,6 +78,17 @@ export function anyDenial(db: Database, run: Pick<RunContext, "rootJob" | "rootT
   return row ? toRecord(row) : null;
 }
 
+/** The run-wide refusal of a shell command the owner was asked about and refused, or null. One indexed read. */
+export function shellDenial(db: Database, run: Pick<RunContext, "rootJob" | "rootTurnID">): DenialRecord | null {
+  const row = db
+    .query<DenialRow, [string, string, string]>("SELECT id, resource_kind, resource_key, operation, tool_name, cause, blocked_count FROM run_denials WHERE run_key = ? AND resource_kind = ? AND resource_key = ? ORDER BY created_at LIMIT 1")
+    .get(denialScope(run), SHELL_REFUSAL.kind, SHELL_REFUSAL.value);
+  return row ? toRecord(row) : null;
+}
+
+/** Is this the run-wide refusal of a shell command, whose key names no file? */
+export const isShellDenial = (record: Pick<DenialRecord, "kind" | "key">): boolean => isShellRefusal(record.kind, record.key);
+
 function toRecord(row: DenialRow): DenialRecord {
   return { id: row.id, kind: row.resource_kind, key: row.resource_key, operation: row.operation, tool: row.tool_name, cause: row.cause, blockedCount: row.blocked_count };
 }
@@ -90,6 +109,8 @@ export function findDenial(
 }
 
 function resourceCovered(kind: ToolResource["kind"], key: string, attempt: ToolResource): boolean {
+  // The run-wide shell refusal names no resource; the engine applies it to whole kinds of call (policy/engine.ts).
+  if (isShellRefusal(kind, key)) return false;
   if (attempt.kind === "path" && kind === "path") return pathsOverlap(key, attempt.value);
   // An address and a host are the same kind of thing whichever tool reached for it.
   const sameKind = attempt.kind === kind || (kind === "host" && attempt.kind === "url") || (kind === "url" && attempt.kind === "host");
