@@ -653,9 +653,15 @@ export class Conversation {
             // The answer was sealed under its durable id; this is only the
             // empty bubble opened for a next step that never came.
             this.messages = this.messages.filter((candidate) => candidate !== message);
-          } else if (message.text.length === 0 && message.isBackground && message.tools.length === 0) {
-            // A background job that said nothing is not a failed reply in the
-            // owner's chat. Its own session block keeps the record.
+          } else if (
+            message.text.length === 0 &&
+            message.isBackground &&
+            message.tools.length === 0 &&
+            frame.stopReason === "end"
+          ) {
+            // A background job that finished and said nothing is not a failed reply in the
+            // owner's chat. One that failed or timed out keeps its bubble, so the owner
+            // hears that their reminder did not run.
             this.messages = this.messages.filter((candidate) => candidate !== message);
           } else {
             // A turn that ended badly keeps the daemon's own explanation when

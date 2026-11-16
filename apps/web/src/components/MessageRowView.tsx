@@ -160,6 +160,13 @@ function AssistantProse({
   const failure =
     failureOf(message.text) ??
     (message.state.kind === "failed" && message.text.length === 0 ? describeFailure(message.state.reason) : null);
+  // A background job (a reminder) that failed or timed out says so, naming its bot.
+  const backgroundFailure =
+    message.isBackground && message.text.length === 0 && (message.state.kind === "stopped" || message.state.kind === "failed")
+      ? `${agent?.name ?? "A bot"}'s background job didn't finish${
+          explanation ? `: ${(message.state.kind === "failed" ? describeFailure(explanation).summary : explanation).replace(/\.$/u, "")}` : ""
+        }.`
+      : null;
   // A background job (a reminder) that only ran tools is not the owner's empty reply.
   const quietBackground = message.isBackground && message.text.length === 0 && message.state.kind === "complete";
 
@@ -170,6 +177,8 @@ function AssistantProse({
           <ThinkingDots />
           Thinking
         </div>
+      ) : backgroundFailure ? (
+        <div className="prose">{backgroundFailure}</div>
       ) : failure ? (
         <FailureNote failure={failure} />
       ) : message.text.length > 0 ? (

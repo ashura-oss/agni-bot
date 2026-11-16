@@ -563,6 +563,19 @@ describe("session seams", () => {
     expect(conversation.messages[0]?.isBackground).toBe(false);
   });
 
+  test("a background job that failed or timed out is not silently dropped (review)", () => {
+    for (const reason of ["error", "timeout"]) {
+      const conversation = new Conversation("agni");
+      conversation.bind("cnv_1", "agni", "thr_active");
+      conversation.apply(startFrame("trn_f", "thr_job", "agni", "cnv_1"));
+      conversation.apply(endFrame("trn_f", "thr_job", reason, { conversationID: "cnv_1" }));
+      const kept = conversation.messages.find((message) => message.turnID === "trn_f");
+      expect(kept?.isBackground).toBe(true);
+      expect(kept?.state.kind).not.toBe("complete");
+      expect(kept?.state.kind).not.toBe("streaming");
+    }
+  });
+
   test("a background job that spoke keeps its text; one that only ran tools is flagged, not failed", () => {
     const conversation = new Conversation("agni");
     conversation.bind("cnv_1", "agni", "thr_active");

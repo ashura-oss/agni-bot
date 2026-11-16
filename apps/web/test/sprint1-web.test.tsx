@@ -180,8 +180,11 @@ describe("the header and the lost connection", () => {
     renderWith(model, <RootView />);
 
     expect(screen.queryByText("Writing…")).not.toBeInTheDocument();
-    const banner = screen.getByRole("status", { name: "" , hidden: false });
+    const banner = document.querySelector(".connection-banner")!;
     expect(banner).toHaveTextContent(/Connection lost/);
+    // The band is not a live region; a hidden one announces the loss once.
+    expect(banner.closest("[aria-live]")).toBeNull();
+    expect(document.querySelector(".visually-hidden[aria-live]")).toHaveTextContent("Connection lost. Reconnecting.");
     expect(banner).toHaveTextContent(/attempt 3/);
     expect(screen.getByRole("button", { name: "Retry now" })).toBeInTheDocument();
   });
@@ -194,6 +197,58 @@ describe("the header and the lost connection", () => {
     renderWith(model, <RootView />);
     expect(screen.getByText("Writing…")).toBeInTheDocument();
     expect(screen.queryByText(/Connection lost/)).not.toBeInTheDocument();
+  });
+});
+
+function setConnection(model: AppModel, state: unknown): void {
+  (model as unknown as { connectionState: unknown }).connectionState = state;
+  act(() => (model as unknown as { publish: () => void }).publish());
+}
+
+describe("the connection banner (review)", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("stays out of the way of a normal first connect, and appears only if it drags on", () => {
+    vi.useFakeTimers();
+    const { model } = rig({ ready: false });
+    setConnection(model, { kind: "connecting" });
+    renderWith(model, <RootView />);
+    expect(document.querySelector(".connection-banner")).toBeNull();
+
+    setConnection(model, { kind: "handshaking" });
+    act(() => void vi.advanceTimersByTime(1500));
+    expect(document.querySelector(".connection-banner")).toBeNull();
+
+    act(() => void vi.advanceTimersByTime(1000));
+    expect(document.querySelector(".connection-banner")).toHaveTextContent(/Connecting/);
+
+    setConnection(model, { kind: "ready", lastSeq: 1 });
+    expect(document.querySelector(".connection-banner")).toBeNull();
+    expect(document.querySelector(".visually-hidden[aria-live]")?.textContent).toBe("");
+  });
+
+  it("announces the loss and the return, not each step in between", () => {
+    const { model } = rig();
+    renderWith(model, <RootView />);
+    const live = () => document.querySelector(".visually-hidden[aria-live]")?.textContent;
+    expect(live()).toBe("");
+
+    setConnection(model, { kind: "waiting", attempt: 1, seconds: 1, reason: "x" });
+    expect(live()).toBe("Connection lost. Reconnecting.");
+    for (const state of [
+      { kind: "connecting" },
+      { kind: "handshaking" },
+      { kind: "waiting", attempt: 2, seconds: 2, reason: "x" },
+    ]) {
+      setConnection(model, state);
+      expect(live()).toBe("Connection lost. Reconnecting.");
+      // Still shown through every sub-state of the episode, never as a live region.
+      expect(document.querySelector(".connection-banner")).not.toBeNull();
+    }
+
+    setConnection(model, { kind: "ready", lastSeq: 2 });
+    expect(live()).toBe("Connected again.");
+    expect(document.querySelector(".connection-banner")).toBeNull();
   });
 });
 
@@ -376,6 +431,14 @@ describe("message rows", () => {
     cleanup();
     const own = row({ isBackground: false });
     expect(own.container.textContent).toMatch(/produced no reply/);
+  });
+
+  it("tells the owner when a background job failed or timed out (review)", () => {
+    const failed = row({ isBackground: true, state: { kind: "stopped", reason: "timeout" } });
+    expect(failed.container.textContent).toMatch(/background job didn't finish/);
+    cleanup();
+    const errored = row({ isBackground: true, state: { kind: "failed", reason: "model unreachable" } });
+    expect(errored.container.textContent).toMatch(/background job didn't finish: model unreachable\./);
   });
 
   it("marks a reply picked up mid-stream so it does not read as a whole sentence (S1-40)", () => {
