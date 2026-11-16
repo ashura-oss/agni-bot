@@ -35,6 +35,14 @@ export interface HandoffRequest {
    * "request". It rides in the child's peer envelope.
    */
   intent?: PeerIntent;
+  /**
+   * Carry the target bot's own recent direct chat with the brief. Off unless
+   * the caller sets it, and the caller sets it only when the chain started
+   * from the owner's own turn: a chain that began with a peer, a wake or a
+   * group message could be steered by text the owner never wrote, and would
+   * read the bot's private DM through the answer.
+   */
+  includeOwnChat?: boolean;
   /** Parent turn's emit, so the child streams to the same client. */
   emit: (frame: ServerFrameBody) => void;
   /** Parent turn's abort signal; cancelling the parent cancels the child. */
@@ -83,7 +91,9 @@ export async function handoff(deps: HandoffDeps, request: HandoffRequest): Promi
   // Read the bot's own recent chat before the handoff block exists: the block
   // may become its active one, and the chat the owner had with it is in the
   // block that is active now.
-  const ownChat = ownRecentChat(deps.db, conversation);
+  // Only when the caller says the chain began with the owner's own turn, and
+  // never from a private bot: its chat stays in its own conversation.
+  const ownChat = request.includeOwnChat && persona.visibility !== "private" ? ownRecentChat(deps.db, conversation) : null;
   const childThread = delegationSession(deps.db, conversation, `${parent} messaged ${persona.name}`);
   const childThreadID = childThread.id;
 

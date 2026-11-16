@@ -9,8 +9,9 @@
  *              task id, the state, and the fact that it finished. The text
  *              stays in the agent's own conversation, which the owner can
  *              open directly.
- *   summary  → the caller gets a bounded summary (SUMMARY_MAX_CHARS), enough
- *              to report status and an outcome, not the working.
+ *   summary  → the caller gets one line (SUMMARY_MAX_CHARS), enough to report
+ *              status and an outcome, not the working. The result of work
+ *              the caller asked for is the exception: RESULT_MAX_CHARS.
  *   shared   → the caller gets the full text.
  *
  * The rule that matters: every path that can carry that text goes through
@@ -32,12 +33,19 @@ export function normalizeVisibility(value: string | null | undefined): Visibilit
 }
 
 /**
- * How much of a result a `summary` caller gets. It was one 240-character
- * line, which cut a real answer to its first sentence; a summary now holds a
- * full short answer. Anything longer is cut and the full text stays in the
- * artifact the task points at.
+ * How much of another bot's chat, facts or working a `summary` caller gets:
+ * one short line.
  */
-export const SUMMARY_MAX_CHARS = 4_000;
+export const SUMMARY_MAX_CHARS = 240;
+
+/**
+ * A different thing: the deliverable of work the caller asked for (a
+ * delegated task's result, a handoff's answer). It goes back to the bot that
+ * asked in full up to this size, even from a `summary` bot, because cutting it
+ * to a line threw the work away. Anything longer is cut and the full text
+ * stays in the artifact the task points at. `private` is still a receipt.
+ */
+export const RESULT_MAX_CHARS = 4_000;
 
 export interface RedactedText {
   /** The text the caller may see, or null when nothing may cross. */
@@ -73,6 +81,7 @@ export function redactForCaller(
   ownerAgentID: string,
   callerAgentID: string | null | undefined,
   visibility: Visibility,
+  summaryMaxChars: number = SUMMARY_MAX_CHARS,
 ): RedactedText {
   const mode = normalizeVisibility(visibility);
   const body = text ?? "";
@@ -84,10 +93,23 @@ export function redactForCaller(
   }
   if (mode === "shared") return { text: body, redacted: false, mode };
   if (mode === "summary") {
-    const summary = summarizeText(body);
+    const summary = summarizeText(body, summaryMaxChars);
     return { text: summary, redacted: false, mode };
   }
   return { text: null, redacted: true, mode };
+}
+
+/**
+ * The same choke point for the result of work the caller asked for: a
+ * `summary` bot's answer comes back up to RESULT_MAX_CHARS, not one line.
+ */
+export function redactResultForCaller(
+  text: string,
+  ownerAgentID: string,
+  callerAgentID: string | null | undefined,
+  visibility: Visibility,
+): RedactedText {
+  return redactForCaller(text, ownerAgentID, callerAgentID, visibility, RESULT_MAX_CHARS);
 }
 
 /**
@@ -100,8 +122,9 @@ export function redactStoredForCaller(
   ownerAgentID: string,
   callerAgentID: string | null | undefined,
   visibility: Visibility,
+  summaryMaxChars: number = SUMMARY_MAX_CHARS,
 ): { value: string | null; redacted: boolean } {
   if (value === null || value === undefined || value === "") return { value: null, redacted: false };
-  const result = redactForCaller(value, ownerAgentID, callerAgentID, visibility);
+  const result = redactForCaller(value, ownerAgentID, callerAgentID, visibility, summaryMaxChars);
   return { value: result.text, redacted: result.redacted };
 }

@@ -10,9 +10,8 @@
 import type { Database } from "bun:sqlite";
 import { PEER_INTENTS, PeerIntentSchema, type PeerIntent, type ServerFrameBody } from "@agni/protocol";
 import type { ToolRegistry } from "./registry";
-import { assertTeammate, canonicalAgentID, resolvePersona } from "../agent/personas";
-import { getAgentMemory } from "../stores/agent-memories";
-import { DEFAULT_VISIBILITY, redactStoredForCaller } from "../agent/visibility";
+import { assertTeammate, resolvePersona } from "../agent/personas";
+import { DEFAULT_VISIBILITY, RESULT_MAX_CHARS, redactStoredForCaller } from "../agent/visibility";
 import {
   createDelegationTask,
   setDelegationJob,
@@ -107,7 +106,7 @@ export function registerDelegateTaskTool(registry: ToolRegistry, deps: DelegateT
       // The facts the brief names go with it, read as the caller (so a private
       // fact of another bot stays private). The child has only the brief.
       const facts = factIDs && factIDs.length > 0
-        ? readFacts(deps.db, readableFactIDs(deps.db, factIDs, deps.currentAgentID), deps.currentAgentID)
+        ? readFacts(deps.db, factIDs, deps.currentAgentID)
         : [];
       // Idempotency: the same goal already in flight for the same specialist
       // from this caller is returned, not queued twice. A model retry must not
@@ -229,7 +228,10 @@ function taskView(task: TaskRow, deps: DelegateTaskToolDeps): Record<string, unk
   // long answer is not cut to the row's summary. It is still redacted for
   // this caller, and still bounded, with a pointer to the rest.
   const artifact = task.delegate_state === "done" && task.artifact_id ? getArtifact(deps.db, task.artifact_id) : null;
-  const redacted = redactStoredForCaller(artifact?.content ?? task.result, owner, deps.currentAgentID, visibility);
+  // The result is the deliverable of work this caller asked for, so a
+  // `summary` bot's answer comes back in full up to RESULT_MAX_CHARS; the
+  // task's notes (its working) keep the short cap.
+  const redacted = redactStoredForCaller(artifact?.content ?? task.result, owner, deps.currentAgentID, visibility, RESULT_MAX_CHARS);
   const result = { value: clipResult(redacted.value, task.artifact_id), redacted: redacted.redacted };
   // The task's scratchpad crosses to the caller through the same filter.
   const noteText = listTaskNotes(deps.db, task.id).map((note) => `- ${note.text}`).join("\n");
@@ -252,20 +254,6 @@ function taskView(task: TaskRow, deps: DelegateTaskToolDeps): Record<string, unk
     jobID: task.job_id,
     updatedAt: task.updated_at,
   };
-}
-
-/**
- * The named fact ids this caller may read. A private fact belongs to its owner
- * alone (the same rule the query layer applies when facts are listed or
- * recalled); `readFacts` only applies the owning bot's visibility, which would
- * let a caller who knew a private fact's id put it in a brief.
- */
-function readableFactIDs(db: Database, ids: string[], callerAgentID: string): string[] {
-  const caller = canonicalAgentID(callerAgentID);
-  return ids.filter((id) => {
-    const row = getAgentMemory(db, id);
-    return Boolean(row) && (row!.visibility !== "private" || (row!.agent_id ?? "ea") === caller);
-  });
 }
 
 /**

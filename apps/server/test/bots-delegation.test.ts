@@ -20,11 +20,13 @@ import { registerCreateAgentTool } from "../src/tools/create-agent-tool";
 import { createAgentPersona } from "../src/agent/creation";
 import { renameAgent } from "../src/agent/identity";
 import { CHILD_FORWARDED_FRAMES, handoff } from "../src/agent/handoff";
-import { rootGuardrail } from "../src/agent/guardrails";
+import { enterDelegation, rootGuardrail } from "../src/agent/guardrails";
 import { resolveApprovalWaiter } from "../src/agent/approval-broker";
 import { fitToolResult } from "../src/agent/task-loop";
 import { DEFAULT_AGENT_TOOLS, PERSONAS, getPersona, personaInfo, registerPersona, resolvePersona, updatePersona, type Persona } from "../src/agent/personas";
-import { SUMMARY_MAX_CHARS, redactForCaller } from "../src/agent/visibility";
+import { RESULT_MAX_CHARS, SUMMARY_MAX_CHARS, redactForCaller, redactResultForCaller } from "../src/agent/visibility";
+import { registerExpandTool } from "../src/tools/expand-tool";
+import { createGroupChannel } from "../src/stores/channels";
 import { createThread, appendMessage } from "../src/stores/threads";
 import { ensureConversation, openSession } from "../src/stores/conversations";
 import { getJob } from "../src/stores/jobs";
@@ -219,14 +221,50 @@ describe("S1-18: new bots can read files; delegated results are not clipped to a
     expect(resolvePersona(db, "kid")?.tools).toContain("read_file");
   });
 
-  test("a summary-visibility result keeps up to 4,000 characters", () => {
-    expect(SUMMARY_MAX_CHARS).toBe(4_000);
+  test("two caps: another bot's chat and facts stay short, the work result goes back long", () => {
+    expect(SUMMARY_MAX_CHARS).toBe(240);
+    expect(RESULT_MAX_CHARS).toBe(4_000);
     const text = `start ${"word ".repeat(700)}end`; // about 3,500 characters
-    const seen = redactForCaller(text, "kid", "ea", "summary");
-    expect(seen.text).toBe(text.replace(/\s+/g, " ").trim());
-    const long = redactForCaller(`${"word ".repeat(2_000)}tail-marker`, "kid", "ea", "summary");
+    // Visibility "summary" of someone else's chat or facts: the short cap.
+    expect(redactForCaller(text, "kid", "ea", "summary").text!.length).toBeLessThanOrEqual(240);
+    // The deliverable of work the caller asked for: the whole short answer.
+    const result = redactResultForCaller(text, "kid", "ea", "summary");
+    expect(result.text).toBe(text.replace(/\s+/g, " ").trim());
+    const long = redactResultForCaller(`${"word ".repeat(2_000)}tail-marker`, "kid", "ea", "summary");
     expect(long.text!.length).toBeLessThanOrEqual(4_000);
     expect(long.text).not.toContain("tail-marker");
+    // Private is still a receipt, whatever the cap.
+    expect(redactResultForCaller(text, "kid", "ea", "private")).toMatchObject({ text: null, redacted: true });
+  });
+
+  test("a summary-visibility specialist's delegated result comes back long through task_status", async () => {
+    db = openDatabase(":memory:");
+    createAgentPersona(db, { name: "Kid", prompt: "p", visibility: "summary" }, []);
+    const registry = new ToolRegistry();
+    registerDelegateTaskTool(registry, { db, emit: () => undefined, currentAgentID: "ea" });
+    const queued = (await call(registry, "delegate_task", { toAgentID: "kid", goal: "Write it up" }, ctxAs("ea"))) as { taskID: string };
+    const full = Array.from({ length: 300 }, (_, i) => `point-${i}`).join(" ");
+    expect(full.length).toBeGreaterThan(2_000);
+    const artifact = saveArtifact(db, { taskID: queued.taskID, agentID: "kid", content: full });
+    setDelegationArtifact(db, queued.taskID, artifact.id);
+    setDelegationState(db, queued.taskID, "done", full.slice(0, 400));
+    const view = (await call(registry, "task_status", { taskID: queued.taskID }, ctxAs("ea"))) as { result: string };
+    expect(view.result).toContain("point-299");
+  });
+
+  test("a summary-visibility specialist's handoff answer comes back long", async () => {
+    db = openDatabase(":memory:");
+    createAgentPersona(db, { name: "Kid", prompt: "p", visibility: "summary" }, []);
+    const parent = createThread(db, "ea");
+    const answer = Array.from({ length: 300 }, (_, i) => `point-${i}`).join(" ");
+    const registry = new ToolRegistry();
+    registerHandoffTool(registry, {
+      db, router: fixedRouter(answer), settings: { firstTokenTimeoutMs: 1000, turnTimeoutMs: 5000 },
+      emit: () => undefined, signal: new AbortController().signal, threadID: parent.id,
+      channelID: "main", currentAgentID: "ea", guardrail: rootGuardrail("ea"),
+    });
+    const out = (await call(registry, "handoff", { toAgentID: "kid", task: "Write it up" }, ctxAs("ea", parent.id))) as { text: string };
+    expect(out.text).toContain("point-299");
   });
 
   test("task_status shows the long result and points at the full one when it is longer still", async () => {
@@ -314,9 +352,76 @@ describe("S1-19: handoff", () => {
     await handoff({
       db: db!, router, settings: { firstTokenTimeoutMs: 1000, turnTimeoutMs: 5000 },
       emit: () => undefined, signal: new AbortController().signal, threadID: parent.id, guardrail: rootGuardrail("ea"),
-    }, { toAgentID: "researcher", task: "What is my favourite fruit?", emit: () => undefined, signal: new AbortController().signal });
+    }, { toAgentID: "researcher", task: "What is my favourite fruit?", includeOwnChat: true, emit: () => undefined, signal: new AbortController().signal });
     return bodies.join("\n");
   };
+
+  test("by default (no owner-turn flag) a handoff carries no direct chat", async () => {
+    db = openDatabase(":memory:");
+    const parent = createThread(db, "ea");
+    const block = openSession(db, ensureConversation(db, "researcher"), "manual", null);
+    appendMessage(db, { threadID: block.id, role: "user", text: "My favourite fruit is PAPAYA." });
+    const bodies: string[] = [];
+    const router = routerOf(async (_url, init) => { bodies.push(bodyOf(init)); return textReply("ok"); });
+    await handoff({
+      db, router, settings: { firstTokenTimeoutMs: 1000, turnTimeoutMs: 5000 },
+      emit: () => undefined, signal: new AbortController().signal, threadID: parent.id, guardrail: rootGuardrail("ea"),
+    }, { toAgentID: "researcher", task: "Fruit?", emit: () => undefined, signal: new AbortController().signal });
+    expect(bodies.join("\n")).not.toContain("PAPAYA");
+  });
+
+  describe("only an owner's turn, and never a private bot", () => {
+    /** Run the handoff tool as a caller in the given situation; return what the target's model was sent. */
+    const viaTool = async (opts: {
+      target?: string; channelID?: string; peerInput?: boolean; depth2?: boolean; marker: string;
+    }): Promise<string> => {
+      const target = opts.target ?? "researcher";
+      const parent = createThread(db!, "ea");
+      const block = openSession(db!, ensureConversation(db!, target), "manual", null);
+      appendMessage(db!, { threadID: block.id, role: "user", text: `Remember ${opts.marker}.` });
+      const bodies: string[] = [];
+      const router = routerOf(async (_url, init) => { bodies.push(bodyOf(init)); return textReply("ok"); });
+      const guardrail = opts.depth2 ? enterDelegation(rootGuardrail("ea"), "analyst", null) : rootGuardrail("ea");
+      const registry = new ToolRegistry();
+      registerHandoffTool(registry, {
+        db: db!, router, settings: { firstTokenTimeoutMs: 1000, turnTimeoutMs: 5000 },
+        emit: () => undefined, signal: new AbortController().signal, threadID: parent.id,
+        channelID: "channelID" in opts ? opts.channelID : "main", currentAgentID: guardrail.currentAgentID, guardrail,
+      });
+      const ctx = { ...(ctxAs("ea", parent.id) as object), peerInput: opts.peerInput };
+      await call(registry, "handoff", { toAgentID: target, task: "What did I tell you?" }, ctx);
+      return bodies.join("\n");
+    };
+
+    test("an owner's turn in main or a DM carries it", async () => {
+      db = openDatabase(":memory:");
+      expect(await viaTool({ marker: "MARK-MAIN" })).toContain("MARK-MAIN");
+      expect(await viaTool({ marker: "MARK-DM", channelID: "dm:ea" })).toContain("MARK-DM");
+    });
+
+    test("a turn started from a peer or a wake (an injected research bot's call) gets none", async () => {
+      db = openDatabase(":memory:");
+      expect(await viaTool({ marker: "MARK-PEER", peerInput: true })).not.toContain("MARK-PEER");
+    });
+
+    test("a chain already past the owner's own turn gets none", async () => {
+      db = openDatabase(":memory:");
+      expect(await viaTool({ marker: "MARK-DEEP", depth2: true })).not.toContain("MARK-DEEP");
+    });
+
+    test("a group-originated turn and a turn with no owner channel get none", async () => {
+      db = openDatabase(":memory:");
+      const group = createGroupChannel(db, "team", ["ea", "researcher"]);
+      expect(await viaTool({ marker: "MARK-GROUP", channelID: group.id })).not.toContain("MARK-GROUP");
+      expect(await viaTool({ marker: "MARK-NONE", channelID: undefined })).not.toContain("MARK-NONE");
+    });
+
+    test("a private bot's chat is never carried, even on an owner's turn", async () => {
+      db = openDatabase(":memory:");
+      createAgentPersona(db, { name: "Vault", prompt: "p", visibility: "private" }, []);
+      expect(await viaTool({ target: "vault", marker: "MARK-VAULT" })).not.toContain("MARK-VAULT");
+    });
+  });
 
   test("the target bot sees its own recent direct chat, marked as its own", async () => {
     db = openDatabase(":memory:");
@@ -399,6 +504,38 @@ describe("S1-20: delegate_task sends the facts it names", () => {
   });
 });
 
+describe("a fact's own private flag holds for expand and get_fact", () => {
+  const secretOf = (owner: string) => putAgentMemory(db!, {
+    scope: "agent", agentID: owner, keySlug: "vault", type: "fact", content: "VAULT-SECRET-7", tags: [],
+    importance: 0.5, visibility: "private", source: "user",
+  });
+
+  test("another bot cannot read it by id; the owner can", async () => {
+    db = openDatabase(":memory:");
+    const secret = secretOf("analyst");
+    const asEa = new ToolRegistry();
+    registerExpandTool(asEa, { db, currentAgentID: "ea" });
+    const viaExpand = (await call(asEa, "expand", { kind: "memory", id: secret.id }, ctxAs("ea"))) as { text: string | null; redacted: boolean };
+    expect(viaExpand.text).toBeNull();
+    expect(viaExpand.redacted).toBe(true);
+    const viaGet = (await call(asEa, "get_fact", { id: secret.id }, ctxAs("ea"))) as { text: string | null; redacted: boolean };
+    expect(viaGet.text).toBeNull();
+    expect(viaGet.redacted).toBe(true);
+
+    const asOwner = new ToolRegistry();
+    registerExpandTool(asOwner, { db, currentAgentID: "analyst" });
+    expect(((await call(asOwner, "get_fact", { id: secret.id }, ctxAs("analyst"))) as { text: string }).text).toBe("VAULT-SECRET-7");
+  });
+
+  test("a fact that is not private is still readable by id", async () => {
+    db = openDatabase(":memory:");
+    const open = rememberFact(db, { fact: "Plain fact.", source: "user" });
+    const registry = new ToolRegistry();
+    registerExpandTool(registry, { db, currentAgentID: "researcher" });
+    expect(((await call(registry, "get_fact", { id: open.id }, ctxAs("researcher"))) as { text: string }).text).toBe("Plain fact.");
+  });
+});
+
 describe("S1-29: the name and role the owner sets reach the bot's prompt", () => {
   // The text the app's "+" button stores (apps/web/src/state/app-model.ts).
   const APP_PLACEHOLDER = `You are {name}, an agent {user} just created in the app. You have no job description yet.
@@ -454,16 +591,20 @@ Until then, answer what is asked, briefly.`;
 });
 
 describe("S1-37: tools that were registered but on no allowlist", () => {
-  test("the assistant can follow a pointer, read a delegated result, and answer a parked question", () => {
+  test("the assistant can follow a pointer and read a delegated result", () => {
     const ea = getPersona("ea")!;
-    for (const tool of ["expand", "read_artifact", "request_owner_input"]) expect(ea.tools).toContain(tool);
+    for (const tool of ["expand", "read_artifact"]) expect(ea.tools).toContain(tool);
     // get_fact duplicates expand(kind=memory); it stays off the list.
     expect(ea.tools).not.toContain("get_fact");
   });
 
-  test("a delegated specialist can park a question for the owner", () => {
+  test("request_owner_input is only where it is registered: the delegated specialists", () => {
     for (const id of ["researcher", "coder", "analyst"]) expect(getPersona(id)!.tools).toContain("request_owner_input");
-    expect(DEFAULT_AGENT_TOOLS).toContain("request_owner_input");
+    // It exists only in a delegated turn, so it is not on the assistant's or a new bot's list.
+    expect(getPersona("ea")!.tools).not.toContain("request_owner_input");
+    expect(DEFAULT_AGENT_TOOLS).not.toContain("request_owner_input");
+    // A new bot's tool count: the defaults, plus say and ask from the loop.
+    expect(DEFAULT_AGENT_TOOLS.length).toBe(11);
   });
 
   test("the defaults hold no gated or memory-writing tool", () => {

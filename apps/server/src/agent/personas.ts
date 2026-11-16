@@ -113,7 +113,7 @@ export const PERSONAS: Persona[] = [
     color: "#f0b95a",
     role: "front desk — replies fast, decides who should do the work, and synthesizes the answers",
     systemPromptTemplate: AGNI_PROMPT_TEMPLATE,
-    tools: ["memory_search", "memory_write", "transcript_search", "links_search", "link_save", "tasks_list", "task_create", "task_update", "grep", "glob", "read_file", "write_file", "web_search", "web_fetch", "deep_research", "bash", "skills_list", "skills_load", "skills_resource", "mail_search", "mail_read", "mail_send", "calendar_list", "calendar_create", "calendar_update", "drive_search", "drive_read", "mcp_*", "remember_fact", "recall_fact", "forget_fact", "expand", "handoff", "delegate_task", "delegate_wait", "task_status", "task_cancel", "read_artifact", "request_owner_input", "rename_agent", "create_agent", "share_thread", "job_schedule", "job_list", "job_cancel", "update_agent", "routine_create", "routine_list", "routine_pause", "routine_delete"],
+    tools: ["memory_search", "memory_write", "transcript_search", "links_search", "link_save", "tasks_list", "task_create", "task_update", "grep", "glob", "read_file", "write_file", "web_search", "web_fetch", "deep_research", "bash", "skills_list", "skills_load", "skills_resource", "mail_search", "mail_read", "mail_send", "calendar_list", "calendar_create", "calendar_update", "drive_search", "drive_read", "mcp_*", "remember_fact", "recall_fact", "forget_fact", "expand", "handoff", "delegate_task", "delegate_wait", "task_status", "task_cancel", "read_artifact", "rename_agent", "create_agent", "share_thread", "job_schedule", "job_list", "job_cancel", "update_agent", "routine_create", "routine_list", "routine_pause", "routine_delete"],
     visibility: "shared",
   },
   {
@@ -174,13 +174,14 @@ export function registerPersona(persona: Persona): void {
 /**
  * The toolset a new agent gets when the caller does not pick one.
  *
- * `read_file` is confined to the scratch tree by the tool itself (S1-18), and
- * `request_owner_input` only exists in a delegated turn, where it is how a
- * background task asks the owner a question. Neither is gated or writes
- * memory. A bot made by another bot only gets the part of this list that its
- * creator also holds.
+ * `read_file` is confined to the scratch tree by the tool itself (S1-18). It
+ * is not gated and writes no memory. `request_owner_input` is not here: it is
+ * registered only in a delegated turn, so it sits on the delegated
+ * specialists' lists, and a longer default list would push a new bot past the
+ * point where schemas are deferred. A bot made by another bot only gets the
+ * part of this list that its creator also holds.
  */
-export const DEFAULT_AGENT_TOOLS = ["memory_search", "recall_fact", "transcript_search", "web_search", "web_fetch", "read_file", "tasks_list", "job_schedule", "job_list", "job_cancel", "update_agent", "request_owner_input"];
+export const DEFAULT_AGENT_TOOLS = ["memory_search", "recall_fact", "transcript_search", "web_search", "web_fetch", "read_file", "tasks_list", "job_schedule", "job_list", "job_cancel", "update_agent"];
 
 /**
  * Tools every bot gets without being granted them: the turn loop adds `say`

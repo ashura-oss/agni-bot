@@ -20,7 +20,7 @@ import type { Router } from "../models/router";
 import type { GuardrailState } from "../agent/guardrails";
 import { handoff, type HandoffDeps, type HandoffRequest } from "../agent/handoff";
 import { assertTeammate, getPersona, resolvePersona } from "../agent/personas";
-import { DEFAULT_VISIBILITY, redactForCaller } from "../agent/visibility";
+import { DEFAULT_VISIBILITY, redactResultForCaller } from "../agent/visibility";
 import { appendChannelMessage, ensureDMChannel } from "../stores/channels";
 import { checkPeerRequest, fingerprintPeerRequest } from "../stores/peer-chains";
 import { stripPeerTags } from "../agent/peer-message";
@@ -152,6 +152,10 @@ export function registerHandoffTool(registry: ToolRegistry, deps: HandoffToolDep
         task,
         context: context || undefined,
         intent,
+        // The bot's own chat goes with the brief only on a chain that began
+        // with the owner's own message in the main chat or a direct chat:
+        // not a peer-started or wake turn, not a group, not a deeper link.
+        includeOwnChat: !ctx.peerInput && deps.guardrail.depth === 1 && isOwnerChannel(deps.channelID),
         emit: deps.emit,
         signal: deps.signal,
       };
@@ -177,7 +181,9 @@ export function registerHandoffTool(registry: ToolRegistry, deps: HandoffToolDep
       // context, so the one place visibility is applied. A private agent
       // gives the caller a receipt, not its answer.
       const visibility = resolvePersona(deps.db, toAgentID)?.visibility ?? DEFAULT_VISIBILITY;
-      const visible = redactForCaller(result.text, toAgentID, deps.currentAgentID, visibility);
+      // The answer is the deliverable of work this caller asked for: a
+      // `summary` bot's comes back in full up to RESULT_MAX_CHARS.
+      const visible = redactResultForCaller(result.text, toAgentID, deps.currentAgentID, visibility);
       return {
         childTurnID: result.childTurnID,
         agentID: result.agentID,
@@ -190,6 +196,11 @@ export function registerHandoffTool(registry: ToolRegistry, deps: HandoffToolDep
       };
     },
   });
+}
+
+/** The owner's own channels: the main chat and a direct chat with a bot. Not a group, not a job. */
+function isOwnerChannel(channelID: string | undefined): boolean {
+  return channelID === "main" || Boolean(channelID?.startsWith("dm:"));
 }
 
 /** Read the optional intent; absent means "request", invalid is an error. */
