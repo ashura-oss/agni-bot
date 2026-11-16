@@ -11,14 +11,21 @@
 import type { Database } from "bun:sqlite";
 import { appendMessage } from "../stores/threads";
 
+/**
+ * The wording is fixed server text, and careful about one thing: a request that
+ * was cut off may have done part of its work. The note must never lead the
+ * model to tell the owner it "never ran"; if asked, it looks at the real state.
+ */
+const CHECK_STATE = "If the owner asks what happened, I check the actual state first (read the file, look at the result) before I answer.";
+
 export const STOPPED_REQUEST_NOTE =
-  "[The owner pressed Stop on my previous request, so I did not finish it. That request is closed: I will not resume it, retry its actions, or ask for its approvals again unless the owner asks for it again in a new message.]";
+  `[The owner pressed Stop on my previous request, so I did not finish it. Some of its steps may already have run. That request is closed: I will not resume it, retry its actions, or ask for its approvals again unless the owner asks for it again in a new message. ${CHECK_STATE}]`;
 
 export const INTERRUPTED_REQUEST_NOTE =
-  "[My previous request was interrupted by a restart and was not completed. That request is closed: I will not resume it, re-run its tool calls, or ask for its approvals again unless the owner asks for it again in a new message.]";
+  `[My previous request was interrupted by a restart and was not completed. Some of its steps may already have run. That request is closed: I will not resume it, re-run its tool calls, or ask for its approvals again unless the owner asks for it again in a new message. ${CHECK_STATE}]`;
 
 export const REVOKED_REQUEST_NOTE =
-  "[My previous request came from a device that has since been revoked. That request is closed: I will not resume it, retry its actions, or ask for its approvals again.]";
+  `[My previous request came from a device that has since been revoked. Some of its steps may already have run. That request is closed: I will not resume it, retry its actions, or ask for its approvals again. ${CHECK_STATE}]`;
 
 const CLOSURE_NOTES: ReadonlySet<string> = new Set([STOPPED_REQUEST_NOTE, INTERRUPTED_REQUEST_NOTE, REVOKED_REQUEST_NOTE]);
 

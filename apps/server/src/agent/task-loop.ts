@@ -877,7 +877,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
     }
   }
 
-  if (run.channelID && run.groupContext === undefined) void compactChannelHistory(db, router, run.channelID, persona.id, peerInput);
+  if (run.channelID && run.groupContext === undefined) compactChannelHistory(db, router, run.channelID, persona.id, peerInput).catch((error) => log.warn("channel compaction failed", error));
   // Cards this turn raised and nobody answered are dead now: expire them so a
   // late click does nothing and a reconnect does not draw them again.
   expirePendingForTurn(db, turnID, stopReason === "cancelled" ? "cancelled" : "expired", run.emit);
