@@ -62,14 +62,19 @@
   --motion-enter: 520ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-/* The Tasks rules in app.css read --accent and --border, which no theme ever
-   defined: the phone button, the calendar's today circle, the check hover and
-   the detail sheet borders were drawn with an invalid value. They are meant to
-   be the accent and the hairline. Defined here, on the page that reads them
-   (not on .app), so the sidebar's own dormant rules stay as they are. The
-   values resolve where this rule applies, so the appearance system's inline
-   --ember and --hairline on .app still drive them. */
-.tasks-page {
+/* Names the older rules still read. They were never defined, so every `var()` that
+   used them was invalid and the property fell back to its initial value: the task
+   FAB, the check hover, the sidebar's selected icon and the detail sheet's borders
+   lost their colour, and the memory view lost its ink. Each is an alias of the token
+   with that meaning: accent is the ember, border is the hairline, text is the ink.
+   Declared on :root for a bare page, and again on .app, where the appearance system
+   sets --ember, --hairline and --ink inline, so the aliases follow the owner's
+   colours and the light and dark themes. New rules should read the tokens directly. */
+:root,
+.app {
   --accent: var(--ember);
   --border: var(--hairline);
+  --text: var(--ink);
+  --text-dim: var(--ink-secondary);
+  --ink-primary: var(--ink);
 }
