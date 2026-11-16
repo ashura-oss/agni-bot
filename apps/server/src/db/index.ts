@@ -4,7 +4,7 @@ import { dirname, isAbsolute, parse, relative, resolve } from "node:path";
 import { agniHome } from "../home";
 import { log } from "../log";
 import { isOwnerOnlyDirectory, secureDirectoryIfNeeded, secureFile, writePrivateFileSync } from "../util/private-file";
-import { MIGRATIONS } from "./migrations";
+import { MIGRATIONS, type Migration } from "./migrations";
 
 /**
  * How a database path is protected on Windows, where "private" is an ACL.
@@ -118,24 +118,30 @@ export function openDatabase(path: string): Database {
  * protected exactly as the server's own open is: the CLI can be the process
  * that makes the -wal and -shm files while the daemon is stopped.
  */
-export function openDatabaseForCLI(path: string): Database {
+export function openDatabaseForCLI(path: string, migrations: ReadonlyArray<Migration> = MIGRATIONS): Database {
   if (!existsSync(path)) throw new Error(`no database at ${path} — run \`agni setup\` (or \`agni migrate\`) first`);
   const protection = protectBeforeOpen(path, false);
   const db = new Database(path, { readwrite: true, create: false });
   db.exec("PRAGMA busy_timeout = 5000;");
   db.exec("PRAGMA foreign_keys = ON;");
-  const latest = MIGRATIONS.at(-1)?.id ?? 0;
   let current = 0;
+  const applied = new Set<number>();
   try {
-    current = db.query<{ id: number | null }, []>("SELECT max(id) AS id FROM schema_migrations").get()?.id ?? 0;
+    for (const row of db.query<{ id: number }, []>("SELECT id FROM schema_migrations").all()) {
+      applied.add(row.id);
+      current = Math.max(current, row.id);
+    }
   } catch {
     // No schema_migrations table: a database no server has ever opened.
   }
   protectAfterOpen(db, path, protection);
-  if (current < latest) {
+  // Every listed id must be applied, not just the highest: sprint branches add
+  // migrations in separate id ranges, so a database can hold 60 and lack 54.
+  const missing = migrations.map((migration) => migration.id).filter((id) => !applied.has(id));
+  if (missing.length > 0) {
     db.close();
     throw new Error(
-      `database ${path} is at schema ${current}, this build needs ${latest} — run \`agni setup\` (or \`agni migrate\`) first`,
+      `database ${path} is at schema ${current}, missing migration(s) ${missing.join(", ")} — run \`agni setup\` (or \`agni migrate\`) first`,
     );
   }
   return db;

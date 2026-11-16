@@ -52,6 +52,8 @@ import { startServer, type RunningServer } from "./ws/server";
 import { agniHome, loadHomeEnv, migrateHomeLayout } from "./home";
 import { browserOpenCommand } from "./util/open-url";
 import { secureDirectory, secureDirectoryIfNeeded, secureFile } from "./util/private-file";
+import { extraHelpLines, runExtraCommand } from "./cli/extra-commands";
+import { runStartupHooks } from "./startup";
 
 const [command = "help", ...args] = Bun.argv.slice(2);
 
@@ -76,7 +78,9 @@ else if (command === "devices") devices();
 else if (command === "revoke") revoke(args);
 else if (command === "help" || command === "--help" || command === "-h") usage();
 else if (command === "version" || command === "--version" || command === "-v") console.log(agniVersion());
-else {
+else if (await runExtraCommand(command, args)) {
+  // A command a sprint added in cli/s2-*.ts or cli/s3-*.ts ran.
+} else {
   console.error(`unknown command "${command}"\n`);
   usage(1);
 }
@@ -102,6 +106,8 @@ async function serve(): Promise<void> {
   const restored = loadRuntimeAgents(db);
   if (restored > 0) log.info(`agents: restored ${restored} agent(s) created at runtime`);
   const router = new Router(config.providers, new HealthTracker(), fetch, config.maxConcurrentTurns);
+  // Sprint hooks: the database is open, nothing is listening yet.
+  await runStartupHooks({ db, config });
 
   // A detached promise or callback that throws is a bug to log, not a reason
   // to drop every open connection and running turn.
@@ -614,6 +620,8 @@ function agniVersion(): string {
 }
 
 function usage(code = 0): void {
+  // Commands the sprints add in cli/s2-commands.ts and cli/s3-commands.ts list themselves here.
+  const extraHelp = extraHelpLines().map((line) => `${String.fromCharCode(10)}${line}`).join("");
   (code === 0 ? console.log : console.error)(`agni ${agniVersion()}
 
   setup              first run / upgrade: config.env, login service, open a paired browser
@@ -635,6 +643,6 @@ function usage(code = 0): void {
   job list [--all]   show queued and running jobs
   job rm <id>        cancel a job
   job run <id>       make a job due now
-  version            print the version`);
+  version            print the version${extraHelp}`);
   process.exit(code);
 }
