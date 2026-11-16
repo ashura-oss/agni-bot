@@ -111,7 +111,9 @@ export function findApprovalRule(db: Database, agentID: string, toolName: string
   const row = db
     .query("SELECT * FROM approval_rules WHERE agent_id = ? AND tool_name = ? AND target = ? AND revoked_at IS NULL")
     .get(agentID, toolName, target) as RuleRow | null;
-  return row ? toRule(row) : null;
+  // A rule that can no longer match (a scratch folder that moved away from it) is not a rule.
+  const rule = row ? toRule(row) : null;
+  return rule && canStillMatch(rule) ? rule : null;
 }
 
 /**

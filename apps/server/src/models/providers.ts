@@ -86,7 +86,7 @@ const SPECS: ProviderSpec[] = [
   },
   {
     id: "openrouter",
-    label: "OpenRouter (:free)",
+    label: "OpenRouter",
     baseUrl: "https://openrouter.ai/api/v1",
     envKey: "OPENROUTER_API_KEY",
     envBaseUrl: "OPENROUTER_BASE_URL",
@@ -203,6 +203,11 @@ export function validateCustomBaseUrl(raw: string): string | null {
   return value;
 }
 
+/** The name shown for a provider: OpenRouter says "(:free)" only while its configured model is one of the free ones. */
+function labelFor(spec: ProviderSpec, model: string): string {
+  return spec.id === "openrouter" && model.endsWith(":free") ? `${spec.label} (:free)` : spec.label;
+}
+
 export function loadProviders(env: Record<string, string | undefined>): ProviderConfig[] {
   const modelConfigPath = providerConfigPath(env);
   const config = readProviderConfigFile(modelConfigPath);
@@ -229,12 +234,13 @@ export function loadProviders(env: Record<string, string | undefined>): Provider
     }
     const apiKey = env[spec.envKey]?.trim();
     if (!apiKey) continue;
+    const model = (configuredModels[spec.id] || env[spec.envModel])?.trim() || spec.model;
     providers.push({
       id: spec.id,
-      label: spec.label,
+      label: labelFor(spec, model),
       baseUrl: (spec.envBaseUrl && env[spec.envBaseUrl]?.trim()) || spec.baseUrl,
       apiKey,
-      model: (configuredModels[spec.id] || env[spec.envModel])?.trim() || spec.model,
+      model,
     });
   }
   // Custom endpoints last: the free lanes come first, the owner's gateway is

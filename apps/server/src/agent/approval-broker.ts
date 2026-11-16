@@ -205,9 +205,9 @@ function shown(value: unknown, max = 400): string {
   return escapeUnsafe(clip(typeof value === "string" ? value : JSON.stringify(value) ?? "(not given)", max));
 }
 
-/** The arguments with every string cut at `max` characters, for the JSON view. */
+/** The arguments with every long string cut in the middle (start and end kept), for the JSON view. */
 function boundedArgs(value: unknown, max: number): unknown {
-  if (typeof value === "string") return value.length > max ? `${value.slice(0, max)}… (+${value.length - max} chars)` : value;
+  if (typeof value === "string") return clip(value, max);
   if (Array.isArray(value)) return value.map((item) => boundedArgs(item, max));
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, boundedArgs(item, max)]));
   return value;
