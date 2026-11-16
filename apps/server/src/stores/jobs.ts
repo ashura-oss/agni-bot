@@ -161,9 +161,10 @@ export function getJob(db: Database, id: string): JobRow | null {
 /** Resolve a full id or unique prefix, like `revoke` does for devices. */
 export function getJobByPrefix(db: Database, prefix: string): JobRow | null {
   if (prefix.length === 0) return null;
+  // The prefix is text, not a pattern: `%` and `_` in it must match only themselves. Compared by length, not LIKE.
   const rows = db
-    .query<JobRow, [string]>(`SELECT ${COLUMNS} FROM jobs WHERE id LIKE ? LIMIT 2`)
-    .all(`${prefix}%`);
+    .query<JobRow, [number, string]>(`SELECT ${COLUMNS} FROM jobs WHERE lower(substr(id, 1, ?)) = lower(?) LIMIT 2`)
+    .all(prefix.length, prefix);
   return rows.length === 1 ? rows[0] ?? null : null;
 }
 
