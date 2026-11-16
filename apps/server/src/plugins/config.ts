@@ -37,7 +37,7 @@
  */
 import { chmodSync, closeSync, copyFileSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
-import { entryName, rememberSecrets, vaultForReads, vaultForWrites } from "../credentials/vault-mode";
+import { entryName, forgetSecretSlots, rememberSecrets, rememberSecretsAt, vaultForReads, vaultForWrites } from "../credentials/vault-mode";
 import { log } from "../log";
 import { valueCarriesCredential } from "../secrets/classify";
 import { VaultError, type Vault } from "../secrets/types";
@@ -151,6 +151,11 @@ export function savePluginsFile(path: string, config: PluginsFile): void {
   }
   // Whatever mode, a secret being saved must never reach a log line or a frame: register it before anything else.
   registerPluginSecrets(config);
+  saveSecretsAndFile(path, config);
+  settlePluginSecrets(config);
+}
+
+function saveSecretsAndFile(path: string, config: PluginsFile): void {
   // Vault mode: secrets first (read back), then the file without them, then forget what is gone. A crash at any
   // point leaves every secret in the vault or in the old file, never in neither.
   const vault = vaultForWrites();
@@ -223,15 +228,38 @@ export function collectPluginSecrets(config: PluginsFile): Map<string, string> {
   return found;
 }
 
-/** Make `redact()` mask every secret in the config. Needs no vault and no valid ids, so it also works in file mode. */
-function registerPluginSecrets(config: PluginsFile): void {
-  for (const entry of Object.values(config.plugins)) {
+/** Slots of the secrets in plugins.json (see `rememberSecretsAt`). */
+const CONFIG_SLOT_PREFIX = "plugins.json:";
+
+/** Every secret in the config, by slot. Needs no vault and no valid ids, so it also works in file mode. */
+function pluginSecretSlots(config: PluginsFile): Map<string, string> {
+  const slots = new Map<string, string>();
+  for (const [id, entry] of Object.entries(config.plugins)) {
     const auth = entry?.auth;
     if (!auth) continue;
-    for (const field of SECRET_AUTH_FIELDS) rememberSecrets(nonEmpty(auth[field]) ? auth[field] : undefined);
-    if (urlIsSecret(auth.kind, auth.url)) rememberSecrets(auth.url);
+    for (const field of SECRET_AUTH_FIELDS) if (nonEmpty(auth[field])) slots.set(`${CONFIG_SLOT_PREFIX}${id}:${field}`, auth[field]);
+    if (urlIsSecret(auth.kind, auth.url)) slots.set(`${CONFIG_SLOT_PREFIX}${id}:url`, auth.url);
   }
-  for (const client of Object.values(config.oauthClients ?? {})) rememberSecrets(nonEmpty(client?.clientSecret) ? client.clientSecret : undefined);
+  for (const [provider, client] of Object.entries(config.oauthClients ?? {})) {
+    if (nonEmpty(client?.clientSecret)) slots.set(`${CONFIG_SLOT_PREFIX}oauth:${provider}`, client.clientSecret);
+  }
+  return slots;
+}
+
+/** Make `redact()` mask every secret in the config. Adds only: what a save replaces is let go by `settlePluginSecrets`. */
+function registerPluginSecrets(config: PluginsFile): void {
+  for (const value of pluginSecretSlots(config).values()) rememberSecrets(value);
+}
+
+/**
+ * After the config is saved: each secret's slot now holds exactly what was saved, so a token
+ * that was refreshed, or a plugin that was removed, stops being masked. Done after the write,
+ * not before: a save that fails leaves the old values in the file, and they must stay masked.
+ */
+function settlePluginSecrets(config: PluginsFile): void {
+  const slots = pluginSecretSlots(config);
+  for (const [slot, value] of slots) rememberSecretsAt(slot, value);
+  forgetSecretSlots(CONFIG_SLOT_PREFIX, new Set(slots.keys()));
 }
 
 /** A copy of the config with every secret `collectPluginSecrets` finds removed: what goes in the file in vault mode. */

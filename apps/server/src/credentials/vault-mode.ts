@@ -15,7 +15,7 @@
  * cycle (`secrets/classify.ts` imports `models/providers.ts`).
  */
 import { statSync, unlinkSync, writeFileSync } from "node:fs";
-import { registerSecret } from "../util/redact";
+import { registerSecret, unregisterSecret } from "../util/redact";
 import { secretsMode } from "../secrets/mode";
 import { tryGetVault } from "../secrets/state";
 import { VaultError, type Vault } from "../secrets/types";
@@ -96,4 +96,54 @@ export function eraseFile(path: string): boolean {
 /** Make `redact()` mask these values from now on. Empty values are not secrets. */
 export function rememberSecrets(...values: Array<string | undefined | null>): void {
   for (const value of values) if (value) registerSecret(value);
+}
+
+// --- secrets that are replaced ------------------------------------------------------
+//
+// A token that is refreshed replaces an earlier one. `rememberSecrets` only adds, so a
+// store that refreshes hourly would grow the registry (about fifty masked forms per value)
+// for as long as the server runs. A store registers a refreshable secret under a named
+// slot instead; setting the slot again lets go of the values it no longer holds.
+// Registering and letting go both go through the one slot, so they cannot disagree about
+// which parts of a token blob are registered.
+
+/** The values each slot registered. */
+const slotValues = new Map<string, readonly string[]>();
+/** How many slots hold each value, so a value two slots share is not unmasked when one lets go. */
+const slotHolders = new Map<string, number>();
+
+/**
+ * Register `values` under `slot`, replacing what the slot held before: values it no
+ * longer holds stop being masked (unless another slot holds them). With no values, the
+ * slot is emptied. New values are registered first, so a registry that refuses leaves the
+ * slot as it was.
+ */
+export function rememberSecretsAt(slot: string, ...values: Array<string | undefined | null>): void {
+  const next = [...new Set(values.filter((value): value is string => typeof value === "string" && value !== ""))];
+  const previous = slotValues.get(slot) ?? [];
+  for (const value of next) registerSecret(value);
+  for (const value of next) if (!previous.includes(value)) slotHolders.set(value, (slotHolders.get(value) ?? 0) + 1);
+  for (const value of previous) {
+    if (next.includes(value)) continue;
+    const holders = (slotHolders.get(value) ?? 1) - 1;
+    if (holders > 0) {
+      slotHolders.set(value, holders);
+    } else {
+      slotHolders.delete(value);
+      unregisterSecret(value);
+    }
+  }
+  if (next.length > 0) slotValues.set(slot, next);
+  else slotValues.delete(slot);
+}
+
+/** Empty every slot whose name starts with `prefix` and is not in `keep` (an account or plugin that is gone). */
+export function forgetSecretSlots(prefix: string, keep: ReadonlySet<string> = new Set()): void {
+  for (const slot of [...slotValues.keys()]) if (slot.startsWith(prefix) && !keep.has(slot)) rememberSecretsAt(slot);
+}
+
+/** Forget every slot without touching the registry: for the test preload, which clears the registry itself. */
+export function resetSecretSlots(): void {
+  slotValues.clear();
+  slotHolders.clear();
 }

@@ -13,7 +13,7 @@
  */
 import type { Database } from "bun:sqlite";
 import type { PluginAccount } from "@agni/protocol";
-import { entryName, rememberSecrets, vaultForReads, vaultForWrites } from "../credentials/vault-mode";
+import { entryName, rememberSecretsAt, vaultForReads, vaultForWrites } from "../credentials/vault-mode";
 import { VaultError } from "../secrets/types";
 import { newID, nowISO } from "../util/ids";
 
@@ -71,19 +71,24 @@ function holdsCredential(tokens: TokenBlob): boolean {
  * `tokens`. A blob with no credential in it (an MCP connect) is not worth a vault
  * entry and stays in the column. File mode: the column, as before.
  */
+/** The redaction slot of one connection's tokens: a refresh replaces them, it does not add to them. */
+const tokenSlot = (id: string): string => `plugin-connection:${id}`;
+
 function saveTokens(db: Database, id: string, tokens: TokenBlob): { tokens: string | null; token_ref: string | null } {
   const vault = vaultForWrites();
   if (!vault || !holdsCredential(tokens)) {
     // Any earlier vault copy of this row is now stale.
     const old = getConnection(db, id)?.token_ref;
     if (old) vault?.delete(old);
+    // File mode keeps these in the column: they are masked from here on, whichever mode wrote them.
+    rememberSecretsAt(tokenSlot(id), tokens.access_token, tokens.refresh_token);
     return { tokens: JSON.stringify(tokens), token_ref: null };
   }
   const name = entryName.connectionTokens(id);
   const blob = JSON.stringify(tokens);
   vault.set(name, blob);
   if (vault.get(name) !== blob) throw new VaultError("WRITE_FAILED", "The connection's tokens could not be read back from the vault, so they were not saved.");
-  rememberSecrets(tokens.access_token, tokens.refresh_token);
+  rememberSecretsAt(tokenSlot(id), tokens.access_token, tokens.refresh_token);
   return { tokens: null, token_ref: name };
 }
 
@@ -146,6 +151,7 @@ export function startPending(db: Database, patch: ConnectPatch): PluginConnectio
     ],
   );
   if (existing?.token_ref) tryDeleteVaultEntry(existing.token_ref);
+  rememberSecretsAt(tokenSlot(id)); // a re-connect wipes the old tokens
   return getConnection(db, id)!;
 }
 
@@ -181,6 +187,7 @@ export function deleteConnection(db: Database, id: string): boolean {
   const ref = getConnection(db, id)?.token_ref;
   const deleted = db.run("DELETE FROM plugin_connections WHERE id = ?", [id]).changes > 0;
   if (ref) tryDeleteVaultEntry(ref);
+  rememberSecretsAt(tokenSlot(id));
   return deleted;
 }
 
