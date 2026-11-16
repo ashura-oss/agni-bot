@@ -65,6 +65,9 @@ export { isPrimaryAgent, nextNewAgent } from "./roster";
 
 /** The product's own name: the tab title before the roster is known. Never a bot's name. */
 const APP_TITLE = "Agni";
+/** Typing frames: `true` at most this often while typing goes on; `false` after this much quiet. */
+const TYPING_REFRESH_MS = 3000;
+const TYPING_IDLE_MS = 1000;
 
 function notice(kind: NoticeKind, title: string, body: string, threadID: string | null = null): NoticeRow {
   return {
@@ -194,6 +197,9 @@ export class AppModel {
   private healthTimer: ReturnType<typeof setInterval> | null = null;
   private toastTimer: ReturnType<typeof setTimeout> | null = null;
   private typingTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The channel the last `user.typing: true` went to, until `false` is sent; and when. */
+  private typingChannel: string | null = null;
+  private typingSentAt = 0;
   private started = false;
 
   private readonly settingsStore: SettingsStore;
@@ -407,7 +413,9 @@ export class AppModel {
     this.isSettingsPresented = route.kind === "settings";
     this.settingsSection = route.kind === "settings" ? route.section : null;
     this.pendingAgentRoute = route.kind === "agent" ? route.id : null;
-    this.taskView = route.kind === "tasks" ? route.view : { kind: "today" };
+    // A task address says nothing about the list behind it: keep the view the owner was on.
+    if (route.kind === "tasks") this.taskView = route.view;
+    else if (route.kind !== "task") this.taskView = { kind: "today" };
     if (route.kind === "tasks" || route.kind === "task") {
       if (refresh) this.refreshTasks();
     } else if (route.kind === "group") {
@@ -959,17 +967,37 @@ export class AppModel {
     void connection.send({ type: "agent.profile", agentId: agentID, ...changes }).catch(() => undefined);
   }
 
+  /**
+   * Tell the server the owner is typing. Called on every keystroke, so it speaks only when something
+   * changes: `true` when typing starts and again at most every 3 s while it goes on, `false` once when
+   * it stops (a second of quiet, a cleared field, a send) and never twice in a row.
+   */
   updateTypingState(isTyping: boolean): void {
     if (this.typingTimer !== null) clearTimeout(this.typingTimer);
     this.typingTimer = null;
     const connection = this.connection;
+    if (!isTyping) {
+      const channelID = this.typingChannel;
+      this.typingChannel = null;
+      // Said `true` to a channel: say `false` to that same channel, even if the bot has changed since.
+      if (channelID === null || !connection || !isReady(this.connectionState)) return;
+      void connection.send({ type: "user.typing", channelId: channelID, isTyping: false }).catch(() => undefined);
+      return;
+    }
     if (!connection || !isReady(this.connectionState)) return;
     // The browser-local preference decides whether we tell the server at all.
-    if (isTyping && !this.preferences.typingIndicator) return;
+    if (!this.preferences.typingIndicator) return;
     const channelID = this.conversation.agentID === "ea" ? "main" : `dm:${this.conversation.agentID}`;
-    void connection.send({ type: "user.typing", channelId: channelID, isTyping }).catch(() => undefined);
-    if (!isTyping) return;
-    this.typingTimer = setTimeout(() => this.updateTypingState(false), 1000);
+    const now = Date.now();
+    if (this.typingChannel !== channelID || now - this.typingSentAt >= TYPING_REFRESH_MS) {
+      if (this.typingChannel !== null && this.typingChannel !== channelID) {
+        void connection.send({ type: "user.typing", channelId: this.typingChannel, isTyping: false }).catch(() => undefined);
+      }
+      this.typingChannel = channelID;
+      this.typingSentAt = now;
+      void connection.send({ type: "user.typing", channelId: channelID, isTyping: true }).catch(() => undefined);
+    }
+    this.typingTimer = setTimeout(() => this.updateTypingState(false), TYPING_IDLE_MS);
   }
 
   stopTurn(): void {
@@ -1051,9 +1079,13 @@ export class AppModel {
     // Picking an agent from anywhere — the roster, the switcher, the new-chat
     // field — means the conversation is the surface again.
     this.closeSidebar();
+    const leavingSettings = this.isSettingsPresented;
     this.isTasksPresented = false;
     this.isSettingsPresented = false;
-    if (updateRoute) this.goTo({ kind: "agent", id: agent.id });
+    this.settingsSection = null;
+    this.settingsReturn = null;
+    // Settings is its own history entry: the bot takes its place, so Back does not reopen Settings.
+    if (updateRoute) this.goTo({ kind: "agent", id: agent.id }, leavingSettings ? "replace" : "push");
     this.isNewChatPresented = false;
     if (agent.id === this.conversation.agentID && this.conversation.conversationID !== null) {
       this.reloadConversation();
@@ -1333,10 +1365,23 @@ export class AppModel {
     this.publish();
   }
 
-  /** The Tasks screen opened a task (`id`) or went back to its list (`null`): the address follows. */
+  /**
+   * The Tasks screen opened a task (`id`) or went back to its list (`null`): the address follows.
+   * A task opened inside the app adds a marked history entry, and closing it steps back over that
+   * entry, so Back never reopens a task that was just closed. A task that came from a link has no
+   * such entry behind it: closing replaces the address instead.
+   */
   openTaskRoute(id: string | null): void {
     this.isTasksPresented = true;
-    this.goTo(id ? { kind: "task", id } : { kind: "tasks", view: this.taskView });
+    if (id) {
+      this.goTo({ kind: "task", id }, "push", { agniTask: true });
+    } else if (this.route.kind === "task" && typeof window !== "undefined" && (window.history.state as { agniTask?: boolean } | null)?.agniTask === true) {
+      // We pushed this entry: step back over it, and the address bar returns to the list by itself.
+      this.route = { kind: "tasks", view: this.taskView };
+      window.history.back();
+    } else {
+      this.goTo({ kind: "tasks", view: this.taskView }, "replace");
+    }
     this.publish();
   }
 

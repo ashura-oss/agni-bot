@@ -90,7 +90,7 @@ describe("Tasks screen: open task from the address", () => {
     expect(window.location.pathname).toBe("/task/ghost");
   });
 
-  it("puts /task/<id> in the address when a detail opens and /tasks back when it closes", () => {
+  it("puts /task/<id> in the address when a detail opens and /tasks back when it closes", async () => {
     const { model } = openAt("/tasks");
     frame(model, rosterFrame);
     frame(model, listFrame(taskRow("tsk_1", "Write the report")));
@@ -101,7 +101,8 @@ describe("Tasks screen: open task from the address", () => {
     expect(sheet("Write the report")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Close details" }));
     expect(route).toHaveBeenLastCalledWith(null);
-    expect(window.location.pathname).toBe("/tasks");
+    // The task was opened in the app, so closing steps back over its history entry (a tick later).
+    await waitFor(() => expect(window.location.pathname).toBe("/tasks"));
     expect(sheet("Write the report")).not.toBeInTheDocument();
   });
 

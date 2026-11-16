@@ -205,14 +205,15 @@ describe("the address follows the screen", () => {
     expect(window.location.pathname).toBe("/agent/ea");
   });
 
-  it("puts the task views and the open task in the address", () => {
+  it("puts the task views and the open task in the address", async () => {
     const { model } = openAt("/agent/ea");
     show(model);
     act(() => model.toggleTasks());
     expect(window.location.pathname).toBe("/tasks");
     act(() => model.openTaskRoute("tsk_1"));
     expect(window.location.pathname).toBe("/task/tsk_1");
+    // Closing a task opened in the app steps back over its history entry, which settles a tick later.
     act(() => model.openTaskRoute(null));
-    expect(window.location.pathname).toBe("/tasks");
+    await waitFor(() => expect(window.location.pathname).toBe("/tasks"));
   });
 });
