@@ -95,6 +95,28 @@ describe("server frames", () => {
     expect(result.ok).toBe(true);
   });
 
+  test("round-trips approval.closed for an approval card and a form card", () => {
+    const approval = { type: "approval.closed", seq: 20, requestID: "apr_1", kind: "approval", reason: "decided" } as const;
+    const parsedApproval = parseServerFrame(JSON.parse(encodeFrame(approval)));
+    expect(parsedApproval.ok).toBe(true);
+    if (parsedApproval.ok) expect(parsedApproval.frame).toEqual(approval);
+
+    const form = { type: "approval.closed", seq: 21, requestID: "frm_1", kind: "form", reason: "expired" } as const;
+    const parsedForm = parseServerFrame(JSON.parse(encodeFrame(form)));
+    expect(parsedForm.ok).toBe(true);
+    if (parsedForm.ok) expect(parsedForm.frame).toEqual(form);
+
+    expect(parseServerFrame({ ...approval, reason: "cancelled" }).ok).toBe(true);
+  });
+
+  test("rejects approval.closed with a bad kind, reason, or missing seq", () => {
+    const frame = { type: "approval.closed", seq: 22, requestID: "apr_1", kind: "approval", reason: "decided" };
+    expect(parseServerFrame({ ...frame, kind: "secret" }).ok).toBe(false);
+    expect(parseServerFrame({ ...frame, reason: "timeout" }).ok).toBe(false);
+    expect(parseServerFrame({ ...frame, seq: undefined }).ok).toBe(false);
+    expect(parseServerFrame({ ...frame, requestID: undefined }).ok).toBe(false);
+  });
+
   test("rejects server frames without seq", () => {
     const result = parseServerFrame({ type: "presence", state: "online" });
     expect(result.ok).toBe(false);

@@ -132,6 +132,7 @@ accountLabel?, error?, connectedAt?}`.
 | `tool.update` | `{callID, preview?}` | |
 | `tool.end` | `{callID, ok, preview?}` | |
 | `approval.request` | `{requestID, action, preview, buttons}` | `buttons`: subset of `once \| always \| reject`. |
+| `approval.closed` | `{requestID, kind, reason}` | The card for an `approval.request` or `form.request` is no longer actionable; clients remove it. `requestID` is the `apr_...` id of the approval, or the id of the form. `kind`: `approval \| form`. `reason`: `decided` (an answer was recorded, here or on another device) `\| expired` (it timed out) `\| cancelled` (its turn ended or was stopped). Additive in v2 (no version bump); clients that predate it ignore it as an unknown frame. |
 | `secret.request` | `{requestID, purpose, command, kind, expiresAt, threadID?, conversationID?}` | A command needs the owner's password. The frame carries no secret; the owner types it into a secure field. Replayable on reconnect; expires after two minutes. |
 | `secret.cancel` | `{requestID, reason}` | The prompt was resolved, expired, cancelled, or its turn stopped. Replayable. |
 | `form.request` | `{requestID, question, options?, multiple?, kind?, email?}` | A question the agent put to the owner. `kind` is `choice` (a list of options) or `email` (a draft to approve: `email` carries `from`, `to`, `subject`, `body`). `multiple` means more than one option may be chosen. The owner answers on the `form.answer` frame — or types instead of choosing, which dismisses the question and steers the work with their message. |

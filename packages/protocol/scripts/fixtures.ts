@@ -241,6 +241,7 @@ const SERVER_FRAMES: ServerFrame[] = [
   { type: "channel.created", seq: 72, channel: { id: "chn_01hq", name: "Launch", type: "group", agentIds: ["ea", "researcher"], createdAt: "2026-10-31T09:00:00.000Z" } },
   { type: "channel.list.ok", seq: 73, channels: [{ id: "chn_01hq", name: "Launch", type: "group", agentIds: ["ea", "researcher"], createdAt: "2026-10-31T09:00:00.000Z" }] },
   { type: "channel.history.ok", seq: 74, channelId: "chn_01hq", messages: [{ id: "chm_01hq", role: "user", text: "plan the launch", createdAt: "2026-10-31T09:01:00.000Z" }] },
+  { type: "approval.closed", seq: 75, requestID: "apr_01hq", kind: "approval", reason: "decided" },
 ];
 
 /** Every frame must survive its own schema before it is a fixture. */

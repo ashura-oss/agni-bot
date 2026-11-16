@@ -705,6 +705,7 @@ public enum ServerFrame: Sendable, Equatable {
   case toolUpdate(ToolUpdate)
   case toolEnd(ToolEnd)
   case approvalRequest(ApprovalRequest)
+  case approvalClosed(ApprovalClosed)
   case formRequest(FormRequest)
   case notify(Notify)
   case agentsUpdate(AgentsUpdate)
@@ -757,6 +758,7 @@ public enum ServerFrame: Sendable, Equatable {
     case .toolUpdate(let f): f.seq
     case .toolEnd(let f): f.seq
     case .approvalRequest(let f): f.seq
+    case .approvalClosed(let f): f.seq
     case .formRequest(let f): f.seq
     case .notify(let f): f.seq
     case .agentsUpdate(let f): f.seq
@@ -805,6 +807,7 @@ public enum ServerFrame: Sendable, Equatable {
     case .toolUpdate: "tool.update"
     case .toolEnd: "tool.end"
     case .approvalRequest: "approval.request"
+    case .approvalClosed: "approval.closed"
     case .formRequest: "form.request"
     case .notify: "notify"
     case .agentsUpdate: "agents.update"
@@ -912,6 +915,16 @@ public enum ServerFrame: Sendable, Equatable {
     public var buttons: [String]
 
     public var decisions: [Decision] { buttons.map(Decision.init(wire:)) }
+  }
+
+  /// An approval or form card is no longer actionable; clients remove it.
+  /// `kind` is "approval" or "form"; `reason` is "decided", "expired" or
+  /// "cancelled". Plain strings, so a value added later still decodes.
+  public struct ApprovalClosed: Sendable, Equatable, Decodable {
+    public var seq: Int
+    public var requestID: String
+    public var kind: String
+    public var reason: String
   }
 
   public struct FormRequest: Sendable, Equatable, Decodable {
@@ -1122,6 +1135,7 @@ public enum ServerFrame: Sendable, Equatable {
     case "tool.update": self = .toolUpdate(try Decode.frame(ToolUpdate.self, object))
     case "tool.end": self = .toolEnd(try Decode.frame(ToolEnd.self, object))
     case "approval.request": self = .approvalRequest(try Decode.frame(ApprovalRequest.self, object))
+    case "approval.closed": self = .approvalClosed(try Decode.frame(ApprovalClosed.self, object))
     case "form.request": self = .formRequest(try Decode.frame(FormRequest.self, object))
     case "notify": self = .notify(try Decode.frame(Notify.self, object))
     case "agents.update": self = .agentsUpdate(try Decode.frame(AgentsUpdate.self, object))
