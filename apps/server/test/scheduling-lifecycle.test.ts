@@ -18,9 +18,10 @@ import { ToolRegistry } from "../src/tools/registry";
 import { registerDelegateTaskTool } from "../src/tools/delegate-task-tool";
 import { createJobTools, scheduleJob } from "../src/tools/jobs-tool";
 import { JobRunner } from "../src/jobs/runner";
-import { registerTurnJob } from "../src/jobs/turn";
+import { parentAlreadyRead, registerTurnJob } from "../src/jobs/turn";
 import { registerTaskReminderJob, scheduleTaskReminder } from "../src/jobs/task-reminders";
 import { resolveApprovalWaiter } from "../src/agent/approval-broker";
+import { cancelThreadTurn, fitToolResult } from "../src/agent/task-loop";
 import { cancelDelegation, createTask, getTask, setDelegationState } from "../src/stores/tasks";
 import { claimDueJob, enqueueJob, getJob, listJobs, parseJobPayload, wakeJob } from "../src/stores/jobs";
 import { createThread, createTurn } from "../src/stores/threads";
@@ -240,6 +241,56 @@ describe("S1-21: a result the parent already read is not announced again", () =>
     expect(script.calls()).toBe(2);
   });
 
+  test("parentAlreadyRead reads the task from the tool call's own arguments and result", async () => {
+    db = openDatabase(":memory:");
+    const database = db;
+    const parent = createThread(database, "ea");
+    createTurn(database, { id: "trn_parent", threadID: parent.id, agentID: "ea" });
+    const waited = await delegate(database, parent.id, "Wait for me");
+    const polled = await delegate(database, parent.id, "Poll me");
+    const unrelated = await delegate(database, parent.id, "Not read");
+    setDelegationState(database, waited.taskID, "done", "Found it");
+    setDelegationState(database, polled.taskID, "done", "Found it too");
+
+    // The real tools, run the way the loop runs them, stored the way the loop stores them.
+    const registry = new ToolRegistry();
+    registerDelegateTaskTool(registry, {
+      db: database, emit: () => undefined, currentAgentID: "ea", channelID: "main",
+      parentTurnID: "trn_parent", parentThreadID: parent.id,
+    });
+    const ctx = { threadID: parent.id, turnID: "trn_parent", signal: new AbortController().signal };
+    let n = 0;
+    for (const [name, taskID] of [["delegate_wait", waited.taskID], ["task_status", polled.taskID]] as const) {
+      const tool = registry.get(name) as unknown as { handler: (args: Record<string, unknown>, ctx: unknown) => Promise<unknown> };
+      const args = { taskID, ...(name === "delegate_wait" ? { timeoutMs: 1000 } : {}) };
+      const result = await tool.handler(args, ctx);
+      n += 1;
+      database.run(
+        "INSERT INTO tool_calls (id, thread_id, turn_id, call_id, tool_name, args, result, ok, error, created_at) VALUES (?, ?, 'trn_parent', ?, ?, ?, ?, 1, NULL, ?)",
+        [`tcl_${n}`, parent.id, `call_${n}`, name, JSON.stringify(args), fitToolResult(result), new Date().toISOString()],
+      );
+    }
+
+    expect(parentAlreadyRead(database, parent.id, waited.taskID)).toBe(true);
+    expect(parentAlreadyRead(database, parent.id, polled.taskID)).toBe(true);
+    expect(parentAlreadyRead(database, parent.id, unrelated.taskID)).toBe(false);
+    // Another thread's reading does not count.
+    expect(parentAlreadyRead(database, createThread(database, "ea").id, waited.taskID)).toBe(false);
+  });
+
+  test("a wait that timed out before the result existed does not count as read", async () => {
+    db = openDatabase(":memory:");
+    const database = db;
+    const parent = createThread(database, "ea");
+    createTurn(database, { id: "trn_parent", threadID: parent.id, agentID: "ea" });
+    const queued = await delegate(database, parent.id);
+    database.run(
+      "INSERT INTO tool_calls (id, thread_id, turn_id, call_id, tool_name, args, result, ok, error, created_at) VALUES ('tcl_x', ?, 'trn_parent', 'call_x', 'delegate_wait', ?, ?, 1, NULL, ?)",
+      [parent.id, JSON.stringify({ taskID: queued.taskID }), JSON.stringify({ taskID: queued.taskID, state: "running", terminal: false, waitTimedOut: true }), new Date().toISOString()],
+    );
+    expect(parentAlreadyRead(database, parent.id, queued.taskID)).toBe(false);
+  });
+
   test("a finished delegation closes the task", async () => {
     db = openDatabase(":memory:");
     const parent = createThread(db, "ea");
@@ -265,43 +316,64 @@ describe("S1-21: a result the parent already read is not announced again", () =>
 });
 
 describe("S1-13: a background job that needed approval is never reported done", () => {
+  // mail_send is a deferred tool for the assistant: the model loads it first, then calls it.
+  const load = { tool: "load_tools", args: { names: ["mail_send"] } } as const;
   const mail = { tool: "mail_send", args: { account: "owner@example.com", to: "a@example.com", subject: "Hi", body: "Hello" } } as const;
+  const job = (database: Database) => enqueueJob(database, { kind: "turn", payload: { text: "Email the owner's report.", agentID: "ea", inputRole: "system" } });
+
+  /** What the owner's client does: record the decision on the card, then answer the waiting turn. */
+  function ownerDecides(database: Database, frame: ServerFrameBody): void {
+    if (frame.type !== "approval.request") return;
+    setTimeout(() => {
+      database.run("UPDATE approvals SET status = 'decided', decision = 'reject' WHERE id = ?", [frame.requestID]);
+      resolveApprovalWaiter(frame.requestID, "reject");
+    }, 5);
+  }
 
   test("a denied approval ends the job as not done, even when the model carries on", async () => {
     db = openDatabase(":memory:");
+    const database = db;
     const frames: ServerFrameBody[] = [];
-    const script = scriptedRouter([mail, { text: "Done, the email is on its way." }]);
-    const emit = (frame: ServerFrameBody): void => {
-      frames.push(frame);
-      if (frame.type === "approval.request") setTimeout(() => resolveApprovalWaiter(frame.requestID, "reject"), 5);
-    };
-    const runner = new JobRunner(db, emit, { retryDelayMs: 1 });
-    registerTurnJob(runner, { db, router: script.router, settings, emit });
-    const job = enqueueJob(db, { kind: "turn", payload: { text: "Email the owner's report.", agentID: "ea", inputRole: "system" } });
+    const script = scriptedRouter([load, mail, { text: "Done, the email is on its way." }]);
+    const emit = (frame: ServerFrameBody): void => { frames.push(frame); ownerDecides(database, frame); };
+    const runner = new JobRunner(database, emit, { retryDelayMs: 1 });
+    registerTurnJob(runner, { db: database, router: script.router, settings, emit });
+    const queued = job(database);
 
     await runner.tick();
 
-    const row = getJob(db, job.id)!;
+    const row = getJob(database, queued.id)!;
     expect(row.state).toBe("failed");
     expect(row.result).toMatch(/not done/i);
-    expect(row.result).toMatch(/approval/i);
+    expect(row.result).toMatch(/denied/i);
     expect(row.result).toContain("mail_send");
     expect(frames.some((frame) => frame.type === "notify" && /Done, the email/.test(frame.body))).toBe(false);
   });
 
-  test("an approval nobody answers fails the job once, naming the approval, without retries", async () => {
+  test("an approval that ends with no decision fails the job once, naming the approval, without retries", async () => {
     db = openDatabase(":memory:");
-    const script = scriptedRouter([mail, { text: "unreachable" }]);
-    const runner = new JobRunner(db, () => undefined, { retryDelayMs: 1 });
-    registerTurnJob(runner, { db, router: script.router, settings: { firstTokenTimeoutMs: 1000, turnTimeoutMs: 150 }, emit: () => undefined });
-    const job = enqueueJob(db, { kind: "turn", payload: { text: "Email the owner's report.", agentID: "ea", inputRole: "system" } });
+    const database = db;
+    const script = scriptedRouter([load, mail, { text: "unreachable" }]);
+    // Nobody answers: the turn is stopped while the card is open. This does not depend on how
+    // long the daemon waits for an owner, only on the turn ending with the card undecided.
+    const emit = (frame: ServerFrameBody): void => {
+      if (frame.type !== "approval.request") return;
+      setTimeout(() => {
+        const threadID = database.query<{ thread_id: string }, [string]>("SELECT thread_id FROM approvals WHERE id = ?").get(frame.requestID)!.thread_id;
+        cancelThreadTurn(threadID);
+      }, 20);
+    };
+    const runner = new JobRunner(database, emit, { retryDelayMs: 1 });
+    registerTurnJob(runner, { db: database, router: script.router, settings, emit });
+    const queued = job(database);
 
     await runner.tick();
 
-    const row = getJob(db, job.id)!;
+    const row = getJob(database, queued.id)!;
     expect(row.state).toBe("failed");
     expect(row.attempts).toBe(1);
-    expect(row.result).toMatch(/approval/i);
+    expect(row.result).toMatch(/not done/i);
+    expect(row.result).toMatch(/not given/i);
     expect(row.result).toContain("mail_send");
   });
 });

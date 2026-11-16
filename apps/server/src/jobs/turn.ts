@@ -295,37 +295,55 @@ function giveUpIfSideEffects(db: Database, threadID: string, since: string, mess
 /**
  * Did the parent thread already read this task's result? `delegate_wait` and
  * `task_status` both hand the terminal result back inside the parent's own turn.
+ * The task comes from the call's own arguments; the state from its result,
+ * which the loop may have wrapped as `{ truncated, result }` when it was long.
  */
-function parentAlreadyRead(db: Database, parentThreadID: string, taskID: string): boolean {
+export function parentAlreadyRead(db: Database, parentThreadID: string, taskID: string): boolean {
   const rows = db
-    .query<{ result: string | null }, [string]>(
-      `SELECT result FROM tool_calls
+    .query<{ args: string; result: string | null }, [string]>(
+      `SELECT args, result FROM tool_calls
        WHERE thread_id = ? AND tool_name IN ('delegate_wait', 'task_status') AND ok = 1
        ORDER BY created_at DESC LIMIT 200`,
     )
     .all(parentThreadID);
   return rows.some((row) => {
-    const result = row.result ?? "";
-    return result.includes(`"taskID":${JSON.stringify(taskID)}`) && /"state":"(?:done|failed)"/.test(result);
+    const asked = parseObject(row.args);
+    if (asked?.taskID !== taskID) return false;
+    const parsed = parseObject(row.result);
+    const view = parsed && typeof parsed.result === "object" && parsed.truncated === true ? parseObject(parsed.result) : parsed;
+    // A result cut mid-text no longer parses; its state is still in the part that was kept.
+    const state = view ? view.state : /"state":"(\w+)"/.exec(row.result ?? "")?.[1];
+    return state === "done" || state === "failed";
   });
+}
+
+function parseObject(raw: unknown): Record<string, unknown> | null {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw as Record<string, unknown>;
+  if (typeof raw !== "string") return null;
+  try {
+    const value: unknown = JSON.parse(raw);
+    return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
  * S1-13: why a background run could not do its work for want of approval, or
- * null. Reads the gated calls the loop refused this run: the owner denied them,
- * or nobody answered before the turn ended (approval_rejected covers both).
+ * null. Reads the gated calls the loop refused this run: the owner denied them
+ * (the card's decision is "reject"), or nobody decided before the turn ended.
  */
 function blockedByApproval(db: Database, threadID: string, since: string): string | null {
   const row = db
-    .query<{ tool_name: string; result: string | null }, [string, string]>(
-      `SELECT tool_name, result FROM tool_calls
-       WHERE thread_id = ? AND created_at >= ? AND error = 'approval_rejected'
-       ORDER BY created_at LIMIT 1`,
+    .query<{ tool_name: string; decision: string | null }, [string, string]>(
+      `SELECT tc.tool_name, a.decision FROM tool_calls tc
+       LEFT JOIN approvals a ON a.turn_id = tc.turn_id AND a.call_id = tc.call_id
+       WHERE tc.thread_id = ? AND tc.created_at >= ? AND tc.error = 'approval_rejected'
+       ORDER BY tc.created_at LIMIT 1`,
     )
     .get(threadID, since);
   if (!row) return null;
-  const denied = (row.result ?? "").includes("denied");
-  return denied
+  return row.decision === "reject"
     ? `the owner denied approval for ${row.tool_name}, so it did not run`
     : `approval for ${row.tool_name} was not given before the run ended, so it did not run`;
 }

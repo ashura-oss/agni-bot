@@ -47,6 +47,10 @@ export function registerTaskReminderJob(runner: JobRunner, deps: { db: Database;
     if (task.repeat_rule !== "none") {
       // Catch-up after downtime fires once, then lands on the next future occurrence.
       let steps = 0;
+      // A reminder scheduled before the anchor existed carries no day. Its date may already have
+      // been clamped (a Feb 28 that began as Jan 31), and nothing else stored keeps the original:
+      // due_at was clamped the same way, so it cannot recover it. It keeps the day it has now,
+      // and an edit of the reminder (which re-anchors it) is the way back to the 31st.
       const reminderDay = payload.reminderDay ?? new Date(payload.reminderAt).getDate();
       const dueDay = payload.dueDay ?? (task.due_at ? new Date(task.due_at).getDate() : undefined);
       let reminder = advance(new Date(payload.reminderAt),task.repeat_rule,reminderDay);
