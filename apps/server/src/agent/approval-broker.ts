@@ -223,9 +223,7 @@ function describeAction(toolName: string, args: Record<string, unknown>): string
 
 function previewAction(toolName: string, args: Record<string, unknown>): string {
   if (toolName === "bash") return clip(String(args.command ?? ""), 4_000);
-  if (toolName === "mail_send") return `${describeAction(toolName, args)}
-
-${clip(String(args.body ?? ""), 4_000)}`;
+  if (toolName === "mail_send") return [...audienceLines(args), describeAction(toolName, args), "", clip(String(args.body ?? ""), 4_000)].join("\n");
   if (toolName === "write_file" && typeof args.path === "string") {
     // The path the write really lands on: a relative path means under scratch,
     // and a link is followed. This is also what "always allow" would remember.
@@ -234,7 +232,35 @@ ${clip(String(args.body ?? ""), 4_000)}`;
 
 Resolved path: ${real ?? "(cannot be resolved)"}`;
   }
-  return describeAction(toolName, args);
+  return fullCall(toolName, args);
+}
+
+/** How much of a call's arguments the card shows: enough that padding cannot push anything out of sight. */
+const PREVIEW_ARGS_CHARS = 4_000;
+
+/**
+ * A card for a tool that has no preview of its own: the whole call, not a cut
+ * of its first and last 200 characters. Who the call reaches (recipients and
+ * attendees) comes first, in plain lines, because an argument list long enough
+ * to be cut would otherwise be able to hide them. A cut list also names every
+ * argument and its size.
+ */
+function fullCall(toolName: string, args: Record<string, unknown>): string {
+  const json = JSON.stringify(args, null, 2) ?? "{}";
+  const sizes = Object.entries(args).map(([name, value]) => `${name} (${(typeof value === "string" ? value : JSON.stringify(value) ?? "").length} chars)`);
+  const body = json.length > PREVIEW_ARGS_CHARS ? `${clip(json, PREVIEW_ARGS_CHARS)}\n\nArguments given: ${sizes.join(", ")}` : json;
+  return [...audienceLines(args), `${toolName} with these arguments:`, "", body].join("\n");
+}
+
+/** The people a call reaches, one line per kind, ahead of everything else. */
+function audienceLines(args: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  for (const [key, label] of [["to", "To"], ["cc", "Cc"], ["bcc", "Bcc"], ["attendees", "Attendees"]] as const) {
+    const value = args[key];
+    const names = Array.isArray(value) ? value.map((item) => (typeof item === "string" ? item : JSON.stringify(item))) : typeof value === "string" && value ? [value] : [];
+    if (names.length > 0) out.push(`${label}: ${names.join(", ")}`);
+  }
+  return out;
 }
 
 /** Cap long text without hiding its end: the dangerous part is often the tail. */
