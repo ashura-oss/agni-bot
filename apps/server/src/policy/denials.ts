@@ -8,8 +8,9 @@
  * record is a (resource, operation) pair under the run's root, so it applies
  * to the bots the run hands work to as well, and lapses when the run ends.
  *
- * Operations that hurt (delete, change, send, run) cover one another; a "no"
- * to reading covers reading only, and a "no" to deleting does not stop a read.
+ * Operations that hurt (delete, change, send, run) cover one another. A "no"
+ * to reading covers every operation (a copy or a move reads its source); a
+ * "no" to deleting does not stop a read.
  */
 import type { Database } from "bun:sqlite";
 import { newID, nowISO } from "../util/ids";
@@ -45,9 +46,12 @@ export function denialScope(run: Pick<RunContext, "rootJob" | "rootTurnID">): st
 
 const HARMFUL: ReadonlySet<Operation> = new Set(["delete", "change", "send", "run"]);
 
-/** Does a "no" to `denied` cover an attempt at `attempted`? */
+/**
+ * Does a "no" to `denied` cover an attempt at `attempted`? A "no" to reading the file covers every operation: `cp` and `mv`
+ * read their source, so a copy of a file the owner would not let the bot read is a read of it by another route.
+ */
 function covers(denied: Operation, attempted: Operation): boolean {
-  if (denied === attempted) return true;
+  if (denied === attempted || denied === "read") return true;
   return HARMFUL.has(denied) && HARMFUL.has(attempted);
 }
 

@@ -4,8 +4,8 @@
  * moving it, copying it or going through the shell, and the same goes for an address.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { ApprovalBroker, type Decision } from "../src/agent/approval-broker";
 import { gateToolCall, type GateResult } from "../src/agent/tool-gate";
 import { findDenial, recordDenial } from "../src/policy/denials";
@@ -190,5 +190,37 @@ describe("the record itself", () => {
     // A command on the folder reaches the file inside it.
     expect(findDenial(rig.db, rig.run, "delete", [{ kind: "path", value: "/x" }])).not.toBeNull();
     expect(findDenial(rig.db, rig.another({ turnID: "other", rootTurnID: "other" }), "change", [{ kind: "path", value: "/x/a.txt" }])).toBeNull();
+  });
+});
+
+describe("a denied read covers every route that reads the file", () => {
+  /** A file outside scratch, so reading it asks. Spelled for Git Bash (`/c/...` on Windows). */
+  function outsideWord(): string {
+    const folder = join(rig.scratch, "..", "outside");
+    mkdirSync(folder, { recursive: true });
+    const real = resolve(folder, "id_rsa");
+    writeFileSync(real, "secret");
+    return process.platform === "win32" ? real.replace(/^([A-Za-z]):/, (_, drive: string) => `/${drive.toLowerCase()}`).replaceAll("\\", "/") : real;
+  }
+
+  let routes = 0;
+  test("cp and mv read their source: after a no to `cat`, both are refused with no card", async () => {
+    const word = outsideWord();
+    for (const command of [`cp ${word} notes.txt`, `mv ${word} notes.txt`, `cp -r ${word} notes.txt`]) {
+      const id = `trn_read_${++routes}`;
+      const run = rig.another({ turnID: id, rootTurnID: id });
+      answers.push("reject");
+      await ask(run, "bash", { command: `cat ${word}` });
+      const before = cards;
+      const result = await ask(run, "bash", { command });
+      expect({ command, refused: refused(result), asked: cards - before }).toEqual({ command, refused: true, asked: 0 });
+    }
+  });
+
+  test("a no to deleting is still not a no to reading", async () => {
+    const word = outsideWord();
+    answers.push("reject");
+    await ask(rig.run, "bash", { command: `rm ${word}` });
+    expect(refused(await ask(rig.run, "bash", { command: `cat ${word}` }))).toBe(false);
   });
 });
