@@ -61,18 +61,25 @@ export function enqueueJob(
   return row;
 }
 
-/** Atomically pick the oldest due job and mark it running. Paused jobs wait. */
+/**
+ * The note a paused job carries from "Run now" until it is claimed: it lets
+ * that one run through, and nothing else. `enabled` is never touched, so the
+ * job is paused again as soon as the run is over.
+ */
+export const RUN_NOW_NOTE = "run now (paused job, one run)";
+
+/** Atomically pick the oldest due job and mark it running. Paused jobs wait, except for one Run now. */
 export function claimDueJob(db: Database, now = nowISO(), excludeKinds: readonly string[] = []): JobRow | null {
   return db.transaction((): JobRow | null => {
     const row = db
-      .query<JobRow, [string, string]>(
+      .query<JobRow, [string, string, string]>(
         `SELECT ${COLUMNS} FROM jobs
-         WHERE state = 'queued' AND enabled = 1 AND run_at <= ?
+         WHERE state = 'queued' AND (enabled = 1 OR result = ?) AND run_at <= ?
            AND kind NOT IN (SELECT value FROM json_each(?))
          ORDER BY run_at ASC, rowid ASC
          LIMIT 1`,
       )
-      .get(now, JSON.stringify(excludeKinds));
+      .get(RUN_NOW_NOTE, now, JSON.stringify(excludeKinds));
     if (!row) return null;
     db.run("UPDATE jobs SET state = 'running', attempts = attempts + 1, updated_at = ? WHERE id = ?", [
       nowISO(),
@@ -122,8 +129,8 @@ export type WakeOutcome = "woken" | "running" | "not_found";
 
 /**
  * Make a job (any state) due now — the manual "run it" escape hatch. Running
- * it implies you want it: a paused job is resumed, since a claim would skip it
- * otherwise.
+ * it once is all that is asked: a paused job is run one time and stays paused
+ * (`enabled` is not changed; resuming is the owner's other button).
  *
  * A job that is already running is left alone. Queueing it again would let
  * the next tick claim a second copy beside the first (routines and turns run
@@ -131,8 +138,8 @@ export type WakeOutcome = "woken" | "running" | "not_found";
  */
 export function wakeJob(db: Database, id: string): WakeOutcome {
   const result = db.run(
-    "UPDATE jobs SET state = 'queued', enabled = 1, run_at = ?, attempts = 0, result = NULL, updated_at = ? WHERE id = ? AND state != 'running'",
-    [nowISO(), nowISO(), id],
+    "UPDATE jobs SET state = 'queued', run_at = ?, attempts = 0, result = CASE WHEN enabled = 1 THEN NULL ELSE ? END, updated_at = ? WHERE id = ? AND state != 'running'",
+    [nowISO(), RUN_NOW_NOTE, nowISO(), id],
   );
   if (result.changes > 0) return "woken";
   return getJob(db, id) ? "running" : "not_found";

@@ -1535,8 +1535,8 @@ function handleJobSet(
       break;
     }
     case "run": {
-      // "Run now" resumes a paused job: a claim would skip it otherwise.
-      // Run now does not reset the failure streak: only resume does.
+      // "Run now" runs the job once. A paused job stays paused afterwards:
+      // resuming is the other button, and the one that resets the failure streak.
       const woken = wakeJob(deps.db, job.id);
       if (woken === "running") {
         // Nothing was queued: say so, rather than answer as if it had been.

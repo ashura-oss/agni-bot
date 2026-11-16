@@ -249,8 +249,9 @@ function describeAction(toolName: string, args: Record<string, unknown>): string
     case "bash": return `run shell: ${shown(String(args.command ?? ""), 400)}`;
     case "write_file": {
       const path = typeof args.path === "string" ? args.path : "";
-      const replaces = path !== "" && args.append !== true && !isOutsideScratch(path, scratchDir()) && writeTargetExists(path);
-      return `${replaces ? "overwrite existing file" : "write file"}: ${shown(path)}`;
+      const exists = path !== "" && !isOutsideScratch(path, scratchDir()) && writeTargetExists(path);
+      const label = !exists ? "write file" : args.append === true ? "append to existing file" : "overwrite existing file";
+      return `${label}: ${shown(path)}`;
     }
     case "read_file": return `read file: ${shown(args.path)}`;
     case "memory_write": return `save memory: ${entry(String(args.text ?? ""), 80)}`;
