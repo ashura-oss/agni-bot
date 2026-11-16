@@ -21,7 +21,7 @@ import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { basename, join, win32 } from "node:path";
 import { log } from "../log";
-import { currentUserSid, restrictToOwnerOnWindows, restrictToOwnerOnWindowsAsync, windowsSystemTool } from "./windows-acl";
+import { currentUserSid, isOwnerOnlySddl, restrictToOwnerOnWindows, restrictToOwnerOnWindowsAsync, windowsSystemTool } from "./windows-acl";
 
 /** The path could not be made private. The message is safe to show the owner. */
 export class PrivateFileError extends Error {
@@ -222,19 +222,39 @@ export function isOwnerOnlyDirectory(dir: string): boolean {
       return false;
     }
   }
+  return windowsPathIsOwnerOnly(dir, true);
+}
+
+/**
+ * The file twin of `isOwnerOnlyDirectory`: on Windows a protected ACL with one
+ * full-control entry for the current user; on macOS and Linux owned by the
+ * current user with no group or other access. Any error counts as "not private".
+ */
+export function isOwnerOnlyFile(path: string): boolean {
+  if (process.platform !== "win32") {
+    try {
+      const info = posixFs.statSync(path);
+      const uid = posixFs.getuid?.();
+      return (uid === undefined || info.uid === uid) && (info.mode & 0o077) === 0;
+    } catch {
+      return false;
+    }
+  }
+  return windowsPathIsOwnerOnly(path, false);
+}
+
+/** Read the path's ACL with `icacls /save` and judge it with `isOwnerOnlySddl` (which fails closed). */
+function windowsPathIsOwnerOnly(path: string, isDirectory: boolean): boolean {
   let scratch: string | undefined;
   try {
     // A missing or unwritable temp folder is a warning, not a crash: the
-    // directory then counts as "not secured" and the caller applies the ACL.
+    // path then counts as "not secured" and the caller applies the ACL.
     scratch = mkdtempSync(join(tmpdir(), "agni-acl-"));
     const out = join(scratch, "acl.txt");
-    execFileSync(windowsSystemTool("icacls"), [win32.resolve(dir), "/save", out, "/q"], { stdio: "pipe", windowsHide: true });
-    const sddl = readFileSync(out, "utf16le").match(/^D:(.*)$/m)?.[1]?.trim() ?? "";
-    const flags = sddl.slice(0, sddl.indexOf("("));
-    const entries = sddl.match(/\([^)]*\)/g) ?? [];
-    return flags.includes("P") && entries.length === 1 && entries[0] === `(A;OICI;FA;;;${currentUserSid()})`;
+    execFileSync(windowsSystemTool("icacls"), [win32.resolve(path), "/save", out, "/q"], { stdio: "pipe", windowsHide: true });
+    return isOwnerOnlySddl(readFileSync(out, "utf16le"), currentUserSid(), isDirectory);
   } catch (error) {
-    if (scratch === undefined) log.warn(`could not check the access rules on ${dir}: the temporary folder is not usable (${reason(error)})`);
+    if (scratch === undefined) log.warn(`could not check the access rules on ${path}: the temporary folder is not usable (${reason(error)})`);
     return false;
   } finally {
     if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true });
