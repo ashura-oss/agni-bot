@@ -14,5 +14,7 @@ export type AbortReason = (typeof ABORT_REASONS)[number];
 /** The reason a signal was aborted with, when it is one of ours. */
 export function abortReasonOf(signal: AbortSignal | undefined): AbortReason | undefined {
   const reason: unknown = signal?.reason;
+  // `AbortSignal.timeout` (a routine's own time limit) aborts with a TimeoutError.
+  if (reason instanceof Error && reason.name === "TimeoutError") return "timeout";
   return ABORT_REASONS.find((known) => known === reason);
 }

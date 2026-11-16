@@ -73,10 +73,22 @@ describe("the note matches the reason the turn was aborted", () => {
   test("owner_stop writes the Stop note", async () => { expect(await abortedWith("owner_stop")).toEqual([STOPPED_REQUEST_NOTE]); });
   test("shutdown writes the interrupted note", async () => { expect(await abortedWith("shutdown")).toEqual([INTERRUPTED_REQUEST_NOTE]); });
   test("device_revoked writes the revoked-device note", async () => { expect(await abortedWith("device_revoked")).toEqual([REVOKED_REQUEST_NOTE]); });
-  test("an abort with no reason is treated as the owner's Stop", async () => { expect(await abortedWith(undefined)).toEqual([STOPPED_REQUEST_NOTE]); });
+  test("an abort with no reason at all is not claimed to be the owner's Stop: it writes the interrupted note", async () => { expect(await abortedWith(undefined)).toEqual([INTERRUPTED_REQUEST_NOTE]); });
+  test("a run's own time limit (AbortSignal.timeout) writes no closure note", async () => {
+    db = openDatabase(":memory:");
+    const thread = createThread(db, "ea");
+    const router = new Router([provider], new HealthTracker(), ((_url: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+    })) as unknown as typeof fetch);
+    await runTaskTurn(db, router, { firstTokenTimeoutMs: 5_000, turnTimeoutMs: 10_000 }, {
+      threadID: thread.id, text: "do the long thing", persona: { id: "ea", name: "Agni", color: "#f0b95a", role: "r", systemPromptTemplate: "x", systemPrompt: "x", tools: ["tasks_list"] },
+      emit: () => undefined, signal: AbortSignal.timeout(30),
+    });
+    expect(db.query("SELECT count(*) AS n FROM messages WHERE thread_id = ? AND role = 'system'").get(thread.id)).toEqual({ n: 0 });
+  });
 });
 
-describe("a routine turn is untrusted input that still streams", () => {
+describe("a routine turn is untrusted input that does not stream", () => {
   const persona = { id: "ea", name: "Agni", color: "#f0b95a", role: "r", systemPromptTemplate: "x", systemPrompt: "x", tools: ["remember_fact", "job_schedule", "routine_create", "create_agent", "memory_search"] };
   const call = (name: string, args: unknown) => new Response(new ReadableStream<Uint8Array>({
     start(controller) {
@@ -88,7 +100,7 @@ describe("a routine turn is untrusted input that still streams", () => {
     start(controller) { controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\ndata: [DONE]\n\n`)); controller.close(); },
   }), { status: 200 });
 
-  test("tool calls that peer input may not make are refused for a routine-style turn, and tokens still stream", async () => {
+  test("tool calls that peer input may not make are refused for a routine-style turn, in words that fit a routine, and nothing streams", async () => {
     db = openDatabase(":memory:");
     const thread = createThread(db, "ea");
     let step = 0;
@@ -105,9 +117,13 @@ describe("a routine turn is untrusted input that still streams", () => {
     } as never);
     const results = db.query<{ tool_name: string; result: string }, []>("SELECT tool_name, result FROM tool_calls ORDER BY created_at").all();
     expect(results.map((row) => row.tool_name)).toEqual(["remember_fact", "routine_create"]);
-    for (const row of results) expect(row.result).toContain("another agent's message");
+    for (const row of results) {
+      expect(row.result).toContain("unattended routine run");
+      expect(row.result).not.toContain("another agent's message");
+    }
     expect(db.query("SELECT count(*) AS n FROM agent_memories").get()).toEqual({ n: 0 });
-    expect(frames.some((frame) => frame.type === "token")).toBe(true);
+    // The reply ends with the saved-state block: nothing of it may reach an open chat while it is written.
+    expect(frames.some((frame) => frame.type === "token")).toBe(false);
     // The instruction is hidden from the owner's history.
     expect(db.query<{ role: string }, []>("SELECT role FROM messages WHERE text LIKE 'prompt%'").all().map((row) => row.role)).toEqual(["system"]);
   });

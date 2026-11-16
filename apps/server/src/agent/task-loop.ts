@@ -107,19 +107,19 @@ export interface TaskTurnRun {
    */
   inputRole?: "user" | "system";
   /**
-   * Log the request as a system row so the owner's history does not show it,
-   * without changing how the turn is trusted: unlike `inputRole: "system"` this
-   * is still the owner's own routine, so it streams, retrieves and anchors as a
-   * turn the owner started does.
+   * Log the request as a system row so the owner's history does not show it.
+   * Only the log row changes: the turn's role, and how it is trusted, do not
+   * (see `untrustedInput` for that).
    */
   hideInput?: boolean;
   /**
    * The input carries data the owner did not write (a routine's saved state,
    * results fetched on an earlier run). The turn is gated like peer input:
    * tools that peer input may not use are refused, posts are marked
-   * peer-influenced, and nothing is compacted from it. Unlike peer input it
-   * streams to the owner and may use `queryText` for the topic anchor and
-   * retrieval.
+   * peer-influenced, nothing is compacted from it, and nothing streams (a
+   * routine's reply ends with its saved-state block, which an open chat must
+   * not show). Unlike peer input it may use `queryText` for the topic anchor
+   * and retrieval.
    */
   untrustedInput?: boolean;
   /** With `untrustedInput`: the part of the input that is the owner's own words, the only text that may shape the anchor and retrieval. */
@@ -615,7 +615,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   // Every step streams live. A step that ends in tool calls was narration,
   // which stays in the model's context: `reset` clears it from the bubble.
   const emitToken = (delta: string, reset?: true): void => {
-    if (!peerSourced) run.emit({ type: "token", turnID, threadID, delta, ...(reset ? { reset } : {}) });
+    if (!peerInput) run.emit({ type: "token", turnID, threadID, delta, ...(reset ? { reset } : {}) });
   };
   const publish = (text: string, uiHint: "normal" | "progress" = "normal"): void => {
     if (text.trim().length === 0) return;
@@ -724,6 +724,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
         isUnloaded: (name) => deferred.includes(name) && !loadedTools.has(name),
         hold: () => timer.hold(),
         ownerWaitMs: settings.ownerWaitMs ?? OWNER_WAIT_CEILING_MS,
+        unattended: Boolean(run.untrustedInput) && !peerSourced,
       };
       // Several read-only lookups in one step start together; the loop below
       // still consumes them in order, so guards and message order are unchanged.
@@ -883,8 +884,10 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   finishTurn(db, { id: turnID, stopReason, ...usage });
   // A request the owner stopped is closed for the model too; one their next message took over from is not.
   if (stopReason === "cancelled" && cancelReason !== SUPERSEDED) {
+    // Only an explicit Stop is the owner's; an abort nobody labelled is "interrupted", never "Stop".
     const why = abortReasonOf(run.signal);
-    closeRequest(db, { threadID, turnID, reason: why === "shutdown" ? "interrupted" : why === "device_revoked" ? "revoked" : "stopped" });
+    const ownerStopped = why === "owner_stop" || cancelReason === "the owner asked to stop";
+    if (why !== "timeout") closeRequest(db, { threadID, turnID, reason: why === "device_revoked" ? "revoked" : ownerStopped ? "stopped" : "interrupted" });
   }
   touchThread(db, threadID);
   // A turn waiting for the owner's answer is not a failed turn: the session
@@ -1099,6 +1102,8 @@ interface ToolHooks {
   hold: () => () => void;
   /** The longest the owner is waited for before the card expires. */
   ownerWaitMs: number;
+  /** An unattended routine run: refusals that blame "another agent's message" say what this is instead. */
+  unattended?: boolean;
 }
 
 async function executeTool(  db: Database, threadID: string, turnID: string, call: ToolCall, allowlist: string[],
@@ -1217,6 +1222,7 @@ async function executeTool(  db: Database, threadID: string, turnID: string, cal
       new Promise<never>((_, reject) => combined.addEventListener("abort", () => reject(new Error("tool timed out or was cancelled")), { once: true })),
     ]);
     let safeResult = result;
+    if (hooks.unattended) safeResult = unattendedWording(result);
     if (allowedDomains && call.function.name === "web_search" && typeof result === "object" && result !== null && Array.isArray((result as { results?: unknown }).results)) {
       safeResult = { ...(result as Record<string, unknown>), results: (result as { results: unknown[] }).results.filter((item) => {
         if (typeof item !== "object" || item === null || typeof (item as { url?: unknown }).url !== "string") return false;
@@ -1239,6 +1245,17 @@ async function executeTool(  db: Database, threadID: string, turnID: string, cal
     clearTimeout(ownerWaitCeiling);
     releaseOwnerWait?.();
   }
+}
+
+/**
+ * The tools refuse peer-influenced turns with words about "another agent's message". An unattended
+ * routine run is refused for the same reason but is not that, so the refusal says what it is.
+ */
+function unattendedWording(result: unknown): unknown {
+  if (typeof result !== "object" || result === null || typeof (result as { error?: unknown }).error !== "string") return result;
+  const error = (result as { error: string }).error;
+  const reworded = error.replace("this turn started from another agent's message", "this is an unattended routine run");
+  return reworded === error ? result : { ...(result as Record<string, unknown>), error: reworded };
 }
 
 function parseSessionMessages(raw: string): ChatMessage[] {

@@ -107,11 +107,11 @@ export async function executeRoutine(deps: RoutineRunDeps, routine: Routine): Pr
       text: buildRoutinePrompt(routine),
       // The instruction (and the saved state in it) is the daemon's, not something the owner
       // typed: it is logged as a system row, so history never shows it as the owner's
-      // message. The routine keeps the trust it always had; only the log row differs.
+      // message.
       hideInput: true,
       // The saved state in the instruction is data from earlier runs, which can carry text an
       // attacker planted: the turn is gated like peer input, and only the routine's own prompt
-      // may shape its topic anchor and retrieval. It still streams to the owner.
+      // may shape its topic anchor and retrieval. Nothing streams: the reply ends with the state block.
       untrustedInput: true,
       queryText: routine.prompt,
       persona,
@@ -163,14 +163,16 @@ export async function executeRoutine(deps: RoutineRunDeps, routine: Routine): Pr
   return record(deps, run);
 }
 
-/** Remove the state block from the replies this turn stored, so a reload shows only what the routine had to say. */
+/**
+ * What a routine's replies look like once stored: the state block is cut so a reload shows only what
+ * the routine had to say, and a reply that is NOTHING_TO_REPORT is not stored at all.
+ */
 function hideRoutineState(db: Database, turnID: string): void {
   const rows = db.query<{ id: string; text: string }, [string]>("SELECT id, text FROM messages WHERE turn_id = ? AND role = 'assistant'").all(turnID);
   for (const row of rows) {
     const visible = stripRoutineState(row.text);
-    if (visible === row.text.trim()) continue;
-    if (visible) db.run("UPDATE messages SET text = ? WHERE id = ?", [visible, row.id]);
-    else db.run("DELETE FROM messages WHERE id = ?", [row.id]);
+    if (!visible || /^\s*NOTHING_TO_REPORT\b/.test(visible)) { db.run("DELETE FROM messages WHERE id = ?", [row.id]); continue; }
+    if (visible !== row.text.trim()) db.run("UPDATE messages SET text = ? WHERE id = ?", [visible, row.id]);
   }
 }
 
