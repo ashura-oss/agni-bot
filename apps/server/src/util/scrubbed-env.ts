@@ -1,13 +1,13 @@
-import { loadCustomProviders, loadProviders } from "../models/providers";
+import { loadCustomProviders, loadProviders, providerKeyEnvNames } from "../models/providers";
 
 /**
  * Names of environment variables that hold a secret. The server's environment
  * carries the provider keys (loaded from config.env), and a command the model
  * writes, such as `env` or `echo $OPENROUTER_API_KEY`, would read them.
  *
- * Every provider key variable in `models/providers.ts` ends in `_API_KEY`, so
- * the suffixes below cover the catalog; `test/shell-env.test.ts` reads that
- * file and fails if a provider's variable ever stops being covered. Custom
+ * The catalog's own key variables come from `providerKeyEnvNames()`, so a new
+ * provider is covered whatever its variable is called; the suffixes below stay
+ * as the net for everything else (a key the owner exported by hand). Custom
  * endpoints name their own variable (default `AGNI_CUSTOM_KEY_<n>`): the
  * prefix is matched here and any other name comes from the provider config.
  */
@@ -31,7 +31,7 @@ const MIN_SECRET_VALUE_LENGTH = 8;
  * broken file never makes the scrub weaker than its default.
  */
 export function scrubbedShellEnv(env: Record<string, string | undefined> = process.env): Record<string, string> {
-  const secretNames = new Set<string>();
+  const secretNames = new Set<string>(providerKeyEnvNames().map((name) => name.toUpperCase()));
   const secretValues = new Set<string>();
   try {
     for (const entry of loadCustomProviders(env)) secretNames.add(entry.envKey.toUpperCase());

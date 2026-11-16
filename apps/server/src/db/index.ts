@@ -1,12 +1,36 @@
 import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, isAbsolute, parse, relative, resolve } from "node:path";
+import { agniHome } from "../home";
 import { log } from "../log";
+import { secureDirectoryIfNeeded } from "../util/private-file";
 import { MIGRATIONS } from "./migrations";
+
+/**
+ * A database the owner placed outside AGNI_HOME (`AGNI_DB_PATH`) is not covered
+ * by the home's owner-only folder, so on Windows its own folder gets the same.
+ * A failure warns and the server carries on. Only the path the owner named is
+ * treated this way: a database opened at any other path (a test, a tool) never
+ * changes a folder's access rules. A drive root is never touched either, and
+ * neither is anything inside the home, which the server secures itself.
+ */
+function secureConfiguredDatabaseFolder(path: string): void {
+  const configured = process.env.AGNI_DB_PATH?.trim();
+  if (!configured || resolve(configured) !== resolve(path)) return;
+  const folder = dirname(resolve(path));
+  if (parse(folder).root === folder) return;
+  const fromHome = relative(agniHome(), folder);
+  if (fromHome === "" || (!fromHome.startsWith("..") && !isAbsolute(fromHome))) return;
+  secureDirectoryIfNeeded(folder, "warn");
+}
 
 /** Open (creating if needed), apply WAL mode and migrations, return the handle. */
 export function openDatabase(path: string): Database {
-  if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+  if (path !== ":memory:") {
+    mkdirSync(dirname(path), { recursive: true });
+    // Before the file exists, so the database and its WAL files inherit it.
+    secureConfiguredDatabaseFolder(path);
+  }
   const db = new Database(path, { create: true });
   // A CLI and the daemon share this file; wait for the other writer instead of failing with SQLITE_BUSY.
   db.exec("PRAGMA busy_timeout = 5000;");
