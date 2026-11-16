@@ -1338,7 +1338,9 @@ function handleThreadExport(
 
 function handleMsgCancel(deps: DispatchDeps, session: Session, frame: Extract<ClientFrame, { type: "msg.cancel" }>): void {
   if (!requireAuth(deps, session)) return;
-  if (!cancelTurn(frame.turnID)) log.debug(`cancel for unknown/complete turn ${frame.turnID}`);
+  // Nothing is running under that ID (it finished, never existed, or the server restarted):
+  // say so, so the asker is not left waiting on a Stop that did nothing.
+  if (!cancelTurn(frame.turnID)) sendError(deps, session, "not_found", `no running turn ${frame.turnID}`);
 }
 
 function handleApproveReply(
