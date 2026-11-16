@@ -5,10 +5,16 @@ import { editTask, getTask, setTaskReminderJob } from "../stores/tasks";
 import type { JobRunner } from "./runner";
 import { defaultPersona } from "../agent/personas";
 
-interface ReminderPayload { taskID: string; reminderAt: string }
+/**
+ * `reminderDay` and `dueDay` are the day of the month a monthly repeat keeps
+ * returning to. A month too short clamps the date (Jan 31 gives Feb 28), but the
+ * next advance starts from the original day again, not from the clamped one.
+ */
+interface ReminderPayload { taskID: string; reminderAt: string; reminderDay?: number; dueDay?: number }
+interface RepeatAnchor { reminderDay?: number; dueDay?: number }
 
 /** Persist one durable job per live task reminder, including after daemon restarts. */
-export function scheduleTaskReminder(db: Database, taskID: string): void {
+export function scheduleTaskReminder(db: Database, taskID: string, anchor: RepeatAnchor = {}): void {
   const task = getTask(db, taskID);
   if (!task) return;
   if (task.reminder_job_id) {
@@ -19,7 +25,8 @@ export function scheduleTaskReminder(db: Database, taskID: string): void {
     setTaskReminderJob(db,taskID,null);
     return;
   }
-  const job = enqueueJob(db,{kind:"task.reminder",payload:{taskID,reminderAt:task.reminder_at} satisfies ReminderPayload,runAt:task.reminder_at});
+  const payload: ReminderPayload = {taskID,reminderAt:task.reminder_at,...(anchor.reminderDay?{reminderDay:anchor.reminderDay}:{}),...(anchor.dueDay?{dueDay:anchor.dueDay}:{})};
+  const job = enqueueJob(db,{kind:"task.reminder",payload,runAt:task.reminder_at});
   setTaskReminderJob(db,taskID,job.id);
 }
 
@@ -40,25 +47,32 @@ export function registerTaskReminderJob(runner: JobRunner, deps: { db: Database;
     if (task.repeat_rule !== "none") {
       // Catch-up after downtime fires once, then lands on the next future occurrence.
       let steps = 0;
-      let reminder = advance(new Date(payload.reminderAt),task.repeat_rule);
-      while (reminder.getTime() <= Date.now() && steps++ < 5000) reminder = advance(reminder,task.repeat_rule);
+      // A reminder scheduled before the anchor existed carries no day. Its date may already have
+      // been clamped (a Feb 28 that began as Jan 31), and nothing else stored keeps the original:
+      // due_at was clamped the same way, so it cannot recover it. It keeps the day it has now,
+      // and an edit of the reminder (which re-anchors it) is the way back to the 31st.
+      const reminderDay = payload.reminderDay ?? new Date(payload.reminderAt).getDate();
+      const dueDay = payload.dueDay ?? (task.due_at ? new Date(task.due_at).getDate() : undefined);
+      let reminder = advance(new Date(payload.reminderAt),task.repeat_rule,reminderDay);
+      while (reminder.getTime() <= Date.now() && steps++ < 5000) reminder = advance(reminder,task.repeat_rule,reminderDay);
       const nextReminder = reminder.toISOString();
-      let due = task.due_at ? advance(new Date(task.due_at),task.repeat_rule) : null;
-      for (let i = 0; due && i < steps; i += 1) due = advance(due,task.repeat_rule);
+      let due = task.due_at ? advance(new Date(task.due_at),task.repeat_rule,dueDay) : null;
+      for (let i = 0; due && i < steps; i += 1) due = advance(due,task.repeat_rule,dueDay);
       const nextDue = due ? due.toISOString() : null;
       editTask(deps.db,task.id,{reminderAt:nextReminder,dueAt:nextDue},"scheduler");
-      scheduleTaskReminder(deps.db,task.id);
+      scheduleTaskReminder(deps.db,task.id,{reminderDay,...(dueDay?{dueDay}:{})});
     } else setTaskReminderJob(deps.db,task.id,null);
     return { result:`reminded about ${task.title}` };
   });
 }
 
-function advance(date: Date, rule: "daily" | "weekly" | "monthly"): Date {
+/** One repeat step. `anchorDay` is the day of the month a monthly repeat returns to. */
+function advance(date: Date, rule: "daily" | "weekly" | "monthly", anchorDay = date.getDate()): Date {
   const next = new Date(date);
   if (rule === "daily") next.setDate(next.getDate() + 1);
   else if (rule === "weekly") next.setDate(next.getDate() + 7);
   else {
-    const day = next.getDate();
+    const day = anchorDay;
     next.setDate(1);
     next.setMonth(next.getMonth() + 1);
     const lastDay = new Date(next.getFullYear(),next.getMonth()+1,0).getDate();

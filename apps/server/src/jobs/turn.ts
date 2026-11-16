@@ -14,12 +14,13 @@
 import type { Database } from "bun:sqlite";
 import type { ServerFrameBody } from "@agni/protocol";
 import { runTaskTurn, isThreadActive, type TaskTurnSettings } from "../agent/task-loop";
-import { defaultResolvedPersona, getPersona, resolvePersona, type ResolvedPersona } from "../agent/personas";
+import { canonicalAgentID, defaultResolvedPersona, getPersona, resolvePersona, type ResolvedPersona } from "../agent/personas";
 import { DEFAULT_VISIBILITY, redactForCaller } from "../agent/visibility";
 import { rootGuardrail } from "../agent/guardrails";
 import { ApprovalBroker } from "../agent/approval-broker";
 import type { Router } from "../models/router";
 import { getThread } from "../stores/threads";
+import { ensureDMChannel } from "../stores/channels";
 import { backgroundSession, ensureConversation, getConversation, type ConversationRow } from "../stores/conversations";
 import { appendJobResult, enqueueJob, findQueuedJobByPayloadKey, parseJobPayload, type JobRow } from "../stores/jobs";
 import {
@@ -30,6 +31,7 @@ import {
   setDelegationState,
   setDelegationThread,
   taskInfo,
+  trackRunningDelegation,
   briefChainID,
 } from "../stores/tasks";
 import { saveArtifact } from "../stores/artifacts";
@@ -132,7 +134,13 @@ export function registerTurnJob(runner: JobRunner, deps: TurnJobDeps): void {
         const delay = Math.min(WAKE_RETRY_MS * 2 ** (deferrals - 1), WAKE_RETRY_MAX_MS);
         return { result: "deferred: the parent thread is busy", nextRunAt: new Date(Date.now() + delay).toISOString() };
       }
-      payload.text = buildWakeText(payload.results);
+      // S1-21: a result the parent already read through delegate_wait or
+      // task_status was reported in that turn. Announcing it again would make
+      // the owner hear the same answer twice.
+      const unread = parentThreadID ? payload.results.filter((item) => !parentAlreadyRead(deps.db, parentThreadID, item.taskID)) : payload.results;
+      if (unread.length === 0) return { result: "skipped: the parent already read this result" };
+      payload.results = unread;
+      payload.text = buildWakeText(unread);
     }
 
     const text = payload.text?.trim();
@@ -183,8 +191,19 @@ export function registerTurnJob(runner: JobRunner, deps: TurnJobDeps): void {
     try {
       result = await runTurn(deps, payload, persona, threadID, conversation, text, job.attempts > 1);
     } catch (error) {
+      // S1-12: a cancelled task ends here, whatever the aborted turn threw.
+      if (delegationTaskID && isDelegationCancelled(deps.db, delegationTaskID)) return { result: "cancelled" };
       throw giveUpIfSideEffects(deps.db, threadID, startedAt, error instanceof Error ? error.message : String(error)) ?? error;
     }
+
+    // S1-12: the owner cancelled while the child ran. The cancelled state, not
+    // this turn's outcome, is the task's truth: no result, no wake, no notify.
+    if (delegationTaskID && isDelegationCancelled(deps.db, delegationTaskID)) return { result: "cancelled" };
+
+    // S1-13: a scheduled run whose gated action was denied or never approved did
+    // not do that work. Never record it as done, whatever the model then said.
+    const blocked = payload.wakeKey || delegationTaskID ? null : blockedByApproval(deps.db, threadID, startedAt);
+    if (blocked && result.stopReason !== "needs_input") throw new JobGiveUp(`not done: ${blocked}`);
 
     if (result.stopReason === "needs_input") {
       // DEL-006: the task asked the owner a question and is waiting. This is
@@ -262,7 +281,7 @@ function giveUpIfSideEffects(db: Database, threadID: string, since: string, mess
     .query<{ tool_name: string; args: string }, [string, string]>(
       `SELECT tool_name, args FROM tool_calls
        WHERE thread_id = ? AND created_at >= ?
-         AND (error IS NULL OR error NOT IN ('approval_rejected', 'tool_not_allowed', 'domain_not_allowed'))`,
+         AND (error IS NULL OR error NOT IN ('approval_rejected', 'approval_expired', 'tool_not_allowed', 'domain_not_allowed'))`,
     )
     .all(threadID, since);
   const acted = calls.find((call) => {
@@ -271,6 +290,68 @@ function giveUpIfSideEffects(db: Database, threadID: string, since: string, mess
     return NON_IDEMPOTENT_TOOLS.has(call.tool_name) || gatePolicy.requiresApproval(call.tool_name, args);
   });
   return acted ? new JobGiveUp(`${message}; not retried because it already ran ${acted.tool_name}`) : null;
+}
+
+/**
+ * Did the parent thread already read this task's result? `delegate_wait` and
+ * `task_status` both hand the terminal result back inside the parent's own turn.
+ * The task comes from the call's own arguments; the state from its result,
+ * which the loop may have wrapped as `{ truncated, result }` when it was long.
+ */
+export function parentAlreadyRead(db: Database, parentThreadID: string, taskID: string): boolean {
+  const rows = db
+    .query<{ args: string; result: string | null }, [string]>(
+      `SELECT args, result FROM tool_calls
+       WHERE thread_id = ? AND tool_name IN ('delegate_wait', 'task_status') AND ok = 1
+       ORDER BY created_at DESC LIMIT 200`,
+    )
+    .all(parentThreadID);
+  return rows.some((row) => {
+    const asked = parseObject(row.args);
+    if (asked?.taskID !== taskID) return false;
+    const parsed = parseObject(row.result);
+    const view = parsed && typeof parsed.result === "object" && parsed.truncated === true ? parseObject(parsed.result) : parsed;
+    // A result cut mid-text no longer parses; its state is still in the part that was kept.
+    const state = view ? view.state : /"state":"(\w+)"/.exec(row.result ?? "")?.[1];
+    return state === "done" || state === "failed";
+  });
+}
+
+function parseObject(raw: unknown): Record<string, unknown> | null {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw as Record<string, unknown>;
+  if (typeof raw !== "string") return null;
+  try {
+    const value: unknown = JSON.parse(raw);
+    return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * S1-13: why a background run could not do its work for want of approval, or
+ * null. Reads the gated calls the loop refused this run: the owner denied them
+ * (the card's decision is "reject"), or nobody decided before the turn ended or
+ * the card expired (`approval_expired`).
+ */
+function blockedByApproval(db: Database, threadID: string, since: string): string | null {
+  const row = db
+    .query<{ tool_name: string; decision: string | null; error: string }, [string, string]>(
+      `SELECT tc.tool_name, a.decision, tc.error FROM tool_calls tc
+       LEFT JOIN approvals a ON a.turn_id = tc.turn_id AND a.call_id = tc.call_id
+       WHERE tc.thread_id = ? AND tc.created_at >= ? AND tc.error IN ('approval_rejected', 'approval_expired')
+       ORDER BY tc.created_at LIMIT 1`,
+    )
+    .get(threadID, since);
+  if (!row) return null;
+  if (row.decision === "reject") return `the owner denied approval for ${row.tool_name}, so it did not run`;
+  if (row.error === "approval_expired") return `approval for ${row.tool_name} expired, nobody answered, so it did not run`;
+  return `approval for ${row.tool_name} was not given before the run ended, so it did not run`;
+}
+
+/** The owner's own channel with this agent: where a background reply belongs. */
+function agentChannelID(db: Database, agentID: string): string {
+  return canonicalAgentID(agentID) === "ea" ? "main" : ensureDMChannel(db, agentID).id;
 }
 
 /** Background turns started today by this agent (wakes excluded: they follow a counted delegation). */
@@ -419,35 +500,44 @@ async function runTurn(
   text: string,
   retry = false,
 ): Promise<{ turnID: string; text: string; stopReason: string }> {
-  const signal = new AbortController().signal;
+  const controller = new AbortController();
   const delegationTaskID = payload.delegationTaskID?.trim() || null;
   const task = delegationTaskID ? getTask(deps.db, delegationTaskID) : null;
-  const result = await runTaskTurn(deps.db, deps.router, deps.settings, {
-    threadID,
-    text,
-    persona,
-    emit: deps.emit,
-    signal,
-    conversationID: conversation?.id,
-    carrySummary: conversation?.summary ?? null,
-    // H23: the depth travels in the payload, so a delegated job does not restart at 1.
-    guardrail: { ...rootGuardrail(persona.id, payload.chainID), depth: Math.max(1, Math.trunc(payload.depth ?? 1)) },
-    facts: payload.facts,
-    ...(payload.channelID ? { channelID: payload.channelID } : {}),
-    ...(payload.inputRole ? { inputRole: payload.inputRole } : {}),
-    ...(retry ? { reuseInput: true } : {}),
-    ...(payload.peer ? { peer: payload.peer } : {}),
-    ...(payload.wakeKey && payload.results ? { inputText: buildWakeLogText(payload.results) } : {}),
-    ...(delegationTaskID && task
-      ? {
-          delegation: {
-            taskID: delegationTaskID,
-            ownerAgentID: persona.id,
-            parentAgentID: task.parent_agent_id,
-            parentChannelID: task.parent_channel_id,
-          },
-        }
-      : {}),
-  });
-  return { turnID: result.turnID, text: result.text, stopReason: result.stopReason };
+  // S1-12: cancelling the task aborts this turn instead of waiting for it to end.
+  const untrack = delegationTaskID ? trackRunningDelegation(deps.db, delegationTaskID, controller) : () => undefined;
+  // S1-23: a background reply is posted to the owner's chat with the agent. A
+  // delegated child keeps its answer in its own thread; the parent is woken for it.
+  const channelID = payload.channelID || (delegationTaskID || payload.peer ? undefined : agentChannelID(deps.db, persona.id));
+  try {
+    const result = await runTaskTurn(deps.db, deps.router, deps.settings, {
+      threadID,
+      text,
+      persona,
+      emit: deps.emit,
+      signal: controller.signal,
+      conversationID: conversation?.id,
+      carrySummary: conversation?.summary ?? null,
+      // H23: the depth travels in the payload, so a delegated job does not restart at 1.
+      guardrail: { ...rootGuardrail(persona.id, payload.chainID), depth: Math.max(1, Math.trunc(payload.depth ?? 1)) },
+      facts: payload.facts,
+      ...(channelID ? { channelID } : {}),
+      ...(payload.inputRole ? { inputRole: payload.inputRole } : {}),
+      ...(retry ? { reuseInput: true } : {}),
+      ...(payload.peer ? { peer: payload.peer } : {}),
+      ...(payload.wakeKey && payload.results ? { inputText: buildWakeLogText(payload.results) } : {}),
+      ...(delegationTaskID && task
+        ? {
+            delegation: {
+              taskID: delegationTaskID,
+              ownerAgentID: persona.id,
+              parentAgentID: task.parent_agent_id,
+              parentChannelID: task.parent_channel_id,
+            },
+          }
+        : {}),
+    });
+    return { turnID: result.turnID, text: result.text, stopReason: result.stopReason };
+  } finally {
+    untrack();
+  }
 }

@@ -75,7 +75,11 @@ describe("job store", () => {
     // A retry keeps its attempt count; a manual wake starts fresh.
     requeueJob(db, first.id, nowISO());
     expect(claimDueJob(db)?.attempts).toBe(2);
-    wakeJob(db, first.id);
+    // A running job is not woken into a second copy; once it has finished, a wake starts it fresh.
+    expect(wakeJob(db, first.id)).toBe("running");
+    expect(claimDueJob(db)).toBeNull();
+    finishJob(db, first.id, "done");
+    expect(wakeJob(db, first.id)).toBe("woken");
     expect(claimDueJob(db)?.attempts).toBe(1);
 
     expect(getJobByPrefix(db, later.id.slice(0, 12))?.id).toBe(later.id);
