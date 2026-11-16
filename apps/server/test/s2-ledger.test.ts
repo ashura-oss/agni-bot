@@ -5,7 +5,8 @@ import { streamChat } from "../src/models/client";
 import { HealthTracker } from "../src/models/health";
 import { resetPriceWarnings } from "../src/models/prices";
 import type { ProviderConfig } from "../src/models/providers";
-import { Router } from "../src/models/router";
+import { Router, setRouteGate } from "../src/models/router";
+import { configureBudget } from "../src/policy/budget";
 import { recordModelUsage, setUsageRecorder, type ModelUsageEvent } from "../src/models/usage-hook";
 import { startupS2Ledger } from "../src/startup/s2-ledger";
 import { dayTotals, recordUsage } from "../src/stores/usage";
@@ -25,7 +26,8 @@ function sse(usage: Record<string, unknown> | undefined, content = "hi"): Respon
 }
 
 const asFetch = (fn: () => Response): typeof fetch => (async () => fn()) as unknown as typeof fetch;
-const options = { messages: [{ role: "user" as const, content: "hi" }], firstTokenTimeoutMs: 1000, onDelta: () => {} };
+// The router gate (installed by startupS2Ledger) refuses a call that names no bot and no kind.
+const options = { messages: [{ role: "user" as const, content: "hi" }], firstTokenTimeoutMs: 1000, onDelta: () => {}, agentID: "agent_x", kind: "turn" as const };
 const deepseek: ProviderConfig = { id: "openrouter", label: "OpenRouter", baseUrl: "https://or.test/v1", apiKey: "k", model: "deepseek/deepseek-v4.1-flash-1017" };
 
 interface LedgerRow {
@@ -42,6 +44,8 @@ beforeEach(() => {
 });
 afterEach(() => {
   setUsageRecorder(() => {});
+  setRouteGate(null);
+  configureBudget(null);
   db.close();
 });
 
@@ -127,9 +131,9 @@ describe("ledger recorder (startupS2Ledger)", () => {
     expect(row!.purpose).toBeNull();
   });
 
-  test("an unpriced model is recorded with cost null (never 0)", async () => {
+  test("an unpriced model with no token counts is recorded with cost null (never 0)", async () => {
     await install();
-    recordModelUsage({ provider: "openrouter", model: "nobody/unknown", inputTokens: 10, outputTokens: 1, latencyMs: 5 });
+    recordModelUsage({ provider: "openrouter", model: "nobody/unknown", latencyMs: 5 });
     expect(rows(db)[0]!.cost_usd).toBeNull();
   });
 
@@ -170,11 +174,12 @@ describe("ledger recorder (startupS2Ledger)", () => {
     expect(rows(db)).toHaveLength(0);
   });
 
-  test("a ledger write that fails does not fail the model call", async () => {
+  test("a ledger write that fails does not fail the call it belongs to, but stops the next one", async () => {
     await install();
-    db.exec("DROP TABLE usage_ledger");
-    const router = new Router([deepseek], new HealthTracker(), asFetch(() => sse({ prompt_tokens: 1, completion_tokens: 1 })));
+    const breaking = (async () => { db.exec("DROP TABLE usage_ledger"); return sse({ prompt_tokens: 1, completion_tokens: 1 }); }) as unknown as typeof fetch;
+    const router = new Router([deepseek], new HealthTracker(), breaking);
     expect((await router.route(options)).text).toBe("hi");
+    await expect(router.route(options)).rejects.toMatchObject({ reason: "budget_unreadable" });
   });
 
   test("until the per-turn recordUsage is removed, the old row is the only difference: one extra row with no kind and no cost", async () => {
@@ -239,7 +244,7 @@ describe("cost the provider reports (OpenRouter usage.cost)", () => {
 
   test("an unpriced model with no reported cost has cost null and no source", async () => {
     await install();
-    recordModelUsage({ provider: "openrouter", model: "nobody/unknown", inputTokens: 10, outputTokens: 1, latencyMs: 5 });
+    recordModelUsage({ provider: "openrouter", model: "nobody/unknown", latencyMs: 5 });
     const row = rows(db)[0]! as unknown as { cost_usd: number | null; cost_source: string | null };
     expect(row.cost_usd).toBeNull();
     expect(row.cost_source).toBeNull();

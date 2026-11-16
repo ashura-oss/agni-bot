@@ -61,8 +61,12 @@ export interface LedgerCall {
   cachedInputTokens?: number;
   latencyMs?: number;
   costUsd: number | null;
-  /** "reported": the provider's own figure; "table": estimated from `models/prices.ts`; null when the cost is unknown. */
-  costSource?: "reported" | "table" | null;
+  /**
+   * "reported": the provider's own figure; "table": worked out from `models/prices.ts`; "fallback": the
+   * conservative price for a model with no entry; "estimate": tokens the router estimated for a call that
+   * failed part-way; null when the cost is unknown.
+   */
+  costSource?: "reported" | "table" | "fallback" | "estimate" | null;
   agentID?: string;
   jobID?: string;
   rootJobID?: string;
@@ -180,4 +184,13 @@ export function unpricedCallsSince(db: Database, sinceISO: string): number {
   return db
     .query<{ n: number }, [string]>("SELECT COUNT(*) AS n FROM usage_ledger WHERE created_at >= ? AND call_kind IS NOT NULL AND cost_usd IS NULL")
     .get(sinceISO)?.n ?? 0;
+}
+
+/** Calls recorded by the per-call ledger whose cost is unknown (no usage was reported and no price covers it), since `sinceISO`. */
+export function unknownCostCallsSince(db: Database, sinceISO: string, filter: SpendFilter = {}): number {
+  const where = ["created_at >= ?", "call_kind IS NOT NULL", "cost_usd IS NULL"];
+  const params: string[] = [sinceISO];
+  if (filter.agentID !== undefined) { where.push("agent_id = ?"); params.push(filter.agentID); }
+  if (filter.rootJobID !== undefined) { where.push("root_job_id = ?"); params.push(filter.rootJobID); }
+  return db.query<{ n: number }, string[]>(`SELECT COUNT(*) AS n FROM usage_ledger WHERE ${where.join(" AND ")}`).get(...params)?.n ?? 0;
 }

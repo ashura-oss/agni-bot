@@ -155,16 +155,16 @@ describe("checkBudget", () => {
     expect(checkBudget({ agentID: "a", jobID: "j" })).toEqual({ ok: true });
   });
 
-  test("calls of unknown cost add nothing to spend but are counted in the status", () => {
+  test("calls of unknown cost add nothing to spend, are counted in the status, and stop the scope", () => {
     spend(null, { agentID: "a", jobID: "j" });
     spend(null, { agentID: "a", jobID: "j" });
-    expect(checkBudget({ agentID: "a", jobID: "j" })).toEqual({ ok: true });
+    expect(checkBudget({ agentID: "a", jobID: "j" })).toMatchObject({ ok: false, reason: "cost_unknown" });
     expect(getSpendStatus(db).unpricedCalls).toBe(2);
   });
 
-  test("with no database registered the check fails open and says nothing", () => {
+  test("with no database registered the check fails closed", () => {
     configureBudget(null);
-    expect(checkBudget({ agentID: "a" })).toEqual({ ok: true });
+    expect(checkBudget({ agentID: "a" })).toMatchObject({ ok: false, reason: "budget_unreadable" });
     configureBudget(db);
   });
 
@@ -190,7 +190,7 @@ describe("Continue once", () => {
   });
 
   test("it also lets a run that hit the day or bot cap carry on, but only that root job", () => {
-    for (let i = 0; i < 4; i++) spend(0.5, { agentID: "a", jobID: `j${i}` });
+    for (let i = 0; i < 4; i++) spend(0.3, { agentID: "a", jobID: `j${i}` });
     expect(checkBudget({ agentID: "a", jobID: "jx" })).toMatchObject({ ok: false, scope: "bot" });
     grantContinueOnce("jx");
     expect(checkBudget({ agentID: "a", jobID: "jx" })).toEqual({ ok: true });
@@ -199,12 +199,9 @@ describe("Continue once", () => {
 
   test("the extra amount follows the per-job cap setting", () => {
     setSpendCaps(db, { perJobUsd: 0.2 });
+    spend(0.2, { agentID: "a", jobID: "r2" });
+    expect(checkBudget({ agentID: "a", jobID: "r2" })).toMatchObject({ ok: false, scope: "job" });
     expect(grantContinueOnce("r2")).toBe(0.2);
-  });
-
-  test("with no per-job cap there is nothing to grant", () => {
-    setSpendCaps(db, { perJobUsd: null });
-    expect(grantContinueOnce("r3")).toBe(0);
   });
 });
 

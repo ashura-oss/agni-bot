@@ -24,6 +24,8 @@ import type { ModelUsageEvent } from "./usage-hook";
  */
 export interface PricedUsageEvent extends ModelUsageEvent {
   reportedCostUsd?: number;
+  /** The tokens are the router's estimate of a call that failed part-way, not the provider's count. */
+  estimated?: boolean;
 }
 
 /** A higher price that applies once the prompt reaches `minPromptTokens` (whole request). */
@@ -115,25 +117,62 @@ export function resetPriceWarnings(): void {
 }
 
 /**
- * Cost of one call in US dollars, or null when it cannot be known: the model
- * has no price here, or the provider reported no token counts at all.
+ * What an unpriced model is charged when its token counts are known: well above
+ * the whole working set (the dearest there is $0.50 per million out), so caps
+ * still advance and err on the side of stopping early. Dollars per million tokens.
  */
-export function computeCostUsd(input: CostInput, warn: (message: string) => void = (m) => log.warn(m)): number | null {
+export const FALLBACK_PRICE = { inputPerM: 1, cachedInputPerM: 1, outputPerM: 4 } as const;
+
+/** How the cost of a call was worked out: from the table, or from the fallback price for an unpriced model. */
+export interface PricedCall {
+  costUsd: number | null;
+  source: "table" | "fallback" | null;
+}
+
+/**
+ * Rough token count of a text, never low for Chinese: one token per non-ASCII
+ * character, one per four ASCII characters. Used only where the provider did
+ * not say (a stream that failed part-way).
+ */
+export function estimateTokens(text: string): number {
+  let ascii = 0;
+  let other = 0;
+  for (const char of text) (char.codePointAt(0)! < 128 ? ascii++ : other++);
+  return Math.ceil(ascii / 4) + other;
+}
+
+/**
+ * Price one call. An unpriced model with token counts is charged `FALLBACK_PRICE`
+ * (and warned about once); with no token counts and no price the cost is
+ * unknown (null). A free or local model costs 0 whatever the counts.
+ */
+export function priceCall(input: CostInput, warn: (message: string) => void = (m) => log.warn(m)): PricedCall {
   const price = findPrice(input.provider, input.model);
+  const known = input.inputTokens !== undefined || input.outputTokens !== undefined;
+  if (price && price.inputPerM === 0 && price.cachedInputPerM === 0 && price.outputPerM === 0 && !price.tiers) {
+    return { costUsd: 0, source: "table" };
+  }
   if (!price) {
-    const key = `${input.provider}\u0000${input.model}`;
+    const key = `${input.provider}|${input.model}`;
     if (!warned.has(key)) {
       warned.add(key);
-      warn(`no price for model "${input.model}" on provider "${input.provider}": its cost is recorded as unknown and spend caps cannot count it`);
+      warn(`no price for model "${input.model}" on provider "${input.provider}": charged the fallback price of $${FALLBACK_PRICE.inputPerM} in / $${FALLBACK_PRICE.outputPerM} out per million tokens`);
     }
-    return null;
   }
-  if (input.inputTokens === undefined && input.outputTokens === undefined) return null;
+  if (!known) return { costUsd: null, source: null };
   const prompt = Math.max(0, input.inputTokens ?? 0);
   const output = Math.max(0, input.outputTokens ?? 0);
   const cached = Math.min(prompt, Math.max(0, input.cachedInputTokens ?? 0));
-  const rate = rateFor(price, prompt);
-  return ((prompt - cached) * rate.inputPerM + cached * rate.cachedInputPerM + output * rate.outputPerM) / 1e6;
+  const rate = price ? rateFor(price, prompt) : FALLBACK_PRICE;
+  return {
+    costUsd: ((prompt - cached) * rate.inputPerM + cached * rate.cachedInputPerM + output * rate.outputPerM) / 1e6,
+    source: price ? "table" : "fallback",
+  };
+}
+
+/** Cost of one call in US dollars, or null when the token counts are unknown and the model is not free. */
+export function computeCostUsd(input: CostInput, warn?: (message: string) => void): number | null {
+  return priceCall(input, warn).costUsd;
 }
 
 function rateFor(price: ModelPrice, promptTokens: number): Pick<ModelPrice, "inputPerM" | "cachedInputPerM" | "outputPerM"> {

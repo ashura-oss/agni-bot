@@ -68,10 +68,10 @@ describe("computeCostUsd", () => {
     expect(long).toBeCloseTo(40_000 * 0.1 / 1e6 + 1_000 * 0.4 / 1e6, 12);
   });
 
-  test("an unknown model is null, never zero, and warns once", () => {
+  test("an unknown model is charged the fallback price, never zero, and warns once", () => {
     const warnings: string[] = [];
     const cost = computeCostUsd({ provider: "openrouter", model: "nobody/never-heard-of-it", inputTokens: 10, outputTokens: 10 }, (m) => warnings.push(m));
-    expect(cost).toBeNull();
+    expect(cost).toBeCloseTo((10 * 1 + 10 * 4) / 1e6, 12);
     computeCostUsd({ provider: "openrouter", model: "nobody/never-heard-of-it", inputTokens: 10, outputTokens: 10 }, (m) => warnings.push(m));
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("nobody/never-heard-of-it");
