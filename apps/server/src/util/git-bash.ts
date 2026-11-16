@@ -391,12 +391,23 @@ function rightsMask(rights: string): number | null {
   return mask;
 }
 
+/** Flags a DACL may carry (protected, auto-inherit required, auto-inherited). Anything else is not understood. */
+const DACL_FLAGS = ["P", "AR", "AI"];
+/** Flags an access entry may carry: inheritance and the like, in pairs (`OICIIOID`). */
+const ACE_FLAGS = new Set(["CI", "OI", "NP", "IO", "ID", "SA", "FA"]);
+
 /**
  * True when the SDDL's DACL lets a trustee other than the owner, SYSTEM,
  * Administrators, TrustedInstaller or a service account change the object
  * (write, append, delete, change permissions, take ownership). Deny entries
- * and read-only grants never count. Fails closed: no DACL (everyone has full
- * access), a malformed entry or an unknown right all count as writable.
+ * and read-only grants never count.
+ *
+ * Fails closed: what cannot be read in full is not trusted. A NULL DACL
+ * (`D:NO_ACCESS_CONTROL`, everyone has full access), an empty DACL, text that
+ * is not flags and entries, an unknown flag, an entry that is not a plain
+ * allow or deny (conditional, callback, object, audit or label entries), an
+ * entry with the wrong number of fields or a missing trustee, and an unknown
+ * right all count as writable.
  */
 export function sddlWritableByOthers(sddl: string, ownerSid: string): boolean {
   const start = sddl.indexOf("D:");
@@ -409,16 +420,23 @@ export function sddlWritableByOthers(sddl: string, ownerSid: string): boolean {
     else if (char === ")") depth--;
     else if (depth === 0 && char === "S" && sddl[index + 1] === ":") { end = index; break; }
   }
-  const aces = sddl.slice(start + 2, end).match(/\([^)]*\)/g) ?? [];
-  for (const ace of aces) {
+  if (depth !== 0) return true;
+  let body = sddl.slice(start + 2, end);
+  if (body.includes("NO_ACCESS_CONTROL")) return true;
+  for (let flag = DACL_FLAGS.find((known) => body.startsWith(known)); flag !== undefined; flag = DACL_FLAGS.find((known) => body.startsWith(known))) body = body.slice(flag.length);
+  if (!/^(?:\([^()]*\))+$/.test(body)) return true;
+  for (const ace of body.match(/\([^()]*\)/g) ?? []) {
     const fields = ace.slice(1, -1).split(";");
-    if (fields.length < 6) return true;
-    const type = fields[0] ?? "";
-    if (type === "D" || type === "OD" || type === "XD" || type === "ZD") continue;
-    if (type !== "A" && type !== "OA" && type !== "XA" && type !== "ZA") return true;
-    const trustee = (fields[5] ?? "").trim();
+    if (fields.length !== 6) return true;
+    const [type, flags = "", rights = "", objectGuid = "", inheritedGuid = "", rawTrustee = ""] = fields;
+    if (type !== "A" && type !== "D") return true;
+    if (flags.length % 2 !== 0 || !(flags.match(/../g) ?? []).every((flag) => ACE_FLAGS.has(flag))) return true;
+    if (objectGuid !== "" || inheritedGuid !== "") return true;
+    const trustee = rawTrustee.trim();
+    if (trustee === "") return true;
+    if (type === "D") continue;
     if (trustee === ownerSid || TRUSTED_TRUSTEES.has(trustee) || trustee.startsWith(SERVICE_SID_PREFIX)) continue;
-    const mask = rightsMask(fields[2] ?? "");
+    const mask = rightsMask(rights);
     if (mask === null || (mask & WRITE_BITS) !== 0) return true;
   }
   return false;

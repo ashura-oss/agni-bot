@@ -117,7 +117,7 @@ describe("sddlWritableByOthers", () => {
     expect(sddlWritableByOthers(`D:(A;;ZZ;;;BU)`, OWN)).toBe(true);
     expect(sddlWritableByOthers("", OWN)).toBe(true);
     expect(sddlWritableByOthers("garbage", OWN)).toBe(true);
-    expect(sddlWritableByOthers("D:", OWN)).toBe(false); // an empty DACL grants nothing
+    expect(sddlWritableByOthers("D:", OWN)).toBe(true); // an empty DACL is not a list that was read: not trusted
   });
 });
 
