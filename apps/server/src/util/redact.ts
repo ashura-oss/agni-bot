@@ -37,8 +37,10 @@ export const MIN_SECRET_LENGTH = 8;
 /**
  * A defensive cap so a bug that registers per-request values cannot grow without bound.
  * Reaching it throws: a secret that cannot be registered is a secret that would go out unmasked.
+ * Sized for a real home (provider keys, plugin credentials, OAuth tokens, a device token per
+ * paired device); values that leave the vault are unregistered, so refreshing does not fill it.
  */
-export const MAX_SECRETS = 2_000;
+export const MAX_SECRETS = 10_000;
 
 /** variants of each registered secret, by secret. */
 const registry = new Map<string, readonly string[]>();

@@ -6,7 +6,7 @@
  */
 import { readFileSync, statSync } from "node:fs";
 import { writePrivateFileSync, PrivateFileError } from "../util/private-file";
-import { registerSecret as register } from "../util/redact";
+import { registerSecret as register, unregisterSecret } from "../util/redact";
 import { decodeVault, encodeVault, parseHeader, type StoredEntry, type VaultHeader } from "./format";
 import { withFileLock } from "./lock";
 import { VAULT_MAX_VALUE_BYTES, VAULT_NAME_PATTERN, VaultError, type Vault, type VaultEntryInfo } from "./types";
@@ -56,10 +56,27 @@ export class FileVault implements Vault {
     if (parsed.header.vaultId !== this.header.vaultId) {
       throw new VaultError("AUTH_FAILED", "vault.bin was replaced by a different vault while Agni was running.");
     }
+    const previous = this.heldValues();
     this.entries = decodeVault(bytes, this.key, parsed);
     this.stamp = this.stampOfFile();
     this.checkedAt = Date.now();
     for (const entry of this.entries.values()) registerSecret(entry.value);
+    // Another process changed or removed a value: this one stops masking the old text too.
+    this.forgetDropped(previous);
+  }
+
+  private heldValues(): Set<string> {
+    return new Set([...this.entries.values()].map((entry) => entry.value));
+  }
+
+  /**
+   * Stop masking values that were in `previous` and no entry holds now. Without
+   * this, a token refreshed every hour adds a registered secret (and its dozens
+   * of masked forms) every hour for as long as the server runs.
+   */
+  private forgetDropped(previous: Set<string>): void {
+    const now = this.heldValues();
+    for (const value of previous) if (value !== "" && !now.has(value)) unregisterSecret(value);
   }
 
   private stampOfFile(): string {
@@ -126,6 +143,7 @@ export class FileVault implements Vault {
   private mutate(change: (entries: Map<string, StoredEntry>) => boolean): void {
     withFileLock(lockPathOf(this.path), () => {
       this.load();
+      const previous = this.heldValues();
       if (!change(this.entries)) return;
       try {
         writePrivateFileSync(this.path, encodeVault(this.header, this.key, this.entries));
@@ -135,6 +153,7 @@ export class FileVault implements Vault {
         throw new VaultError("WRITE_FAILED", why, { cause: error });
       }
       this.stamp = this.stampOfFile();
+      this.forgetDropped(previous);
     });
   }
 }
