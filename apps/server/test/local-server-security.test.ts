@@ -16,7 +16,7 @@ import { startHarness, type Harness } from "./ws-harness";
 let harness: Harness | undefined;
 const dirs: string[] = [];
 const saved: Record<string, string | undefined> = {};
-const ENV_KEYS = ["AGNI_ALLOWED_ORIGINS", "AGNI_SHARE_DIR", "AGNI_WEB_DIR"];
+const ENV_KEYS = ["AGNI_DEV", "AGNI_ALLOWED_ORIGINS", "AGNI_SHARE_DIR", "AGNI_WEB_DIR"];
 
 beforeEach(() => {
   for (const key of ENV_KEYS) saved[key] = process.env[key];
@@ -87,13 +87,20 @@ describe("Host header check (S1: DNS rebinding)", () => {
 });
 
 describe("Origin allowlist on the socket and pairing", () => {
-  test("another loopback port is refused until it is configured; the Vite dev port is allowed by default", async () => {
+  test("another loopback port, the Vite dev port included, is refused until it is configured", async () => {
     harness = await startHarness();
     expect((await upgrade(harness.base, { origin: "http://127.0.0.1:5174" })).status).toBe(403);
     expect(await opens(harness.base, { origin: `http://127.0.0.1:${harness.server.port}` })).toBe(true);
     expect((await upgrade(harness.base, { origin: "https://evil.example" })).status).toBe(403);
-    // The Vite dev proxy sends Origin and Host 127.0.0.1:5173.
+    // Without AGNI_DEV, whatever serves port 5173 is just another local program.
+    expect((await upgrade(harness.base, { origin: "http://127.0.0.1:5173", host: "127.0.0.1:5173" })).status).toBe(403);
+  });
+
+  test("AGNI_DEV=1 trusts the Vite dev server (Origin and Host 127.0.0.1:5173)", async () => {
+    process.env.AGNI_DEV = "1";
+    harness = await startHarness();
     expect(await opens(harness.base, { origin: "http://127.0.0.1:5173", host: "127.0.0.1:5173" })).toBe(true);
+    expect((await upgrade(harness.base, { origin: "http://127.0.0.1:5174" })).status).toBe(403);
   });
 
   test("AGNI_ALLOWED_ORIGINS adds exactly the origins it names", async () => {

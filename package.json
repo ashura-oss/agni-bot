@@ -12,7 +12,7 @@
     "web": "bun run --filter @agni/web dev",
     "web:build": "bun run --filter @agni/web build",
     "web:preview": "bun run --filter @agni/web preview",
-    "dev": "bun --watch apps/server/src/index.ts serve",
+    "dev": "AGNI_DEV=1 bun --watch apps/server/src/index.ts serve",
     "serve": "bun apps/server/src/index.ts serve",
     "daemon": "bun apps/server/src/index.ts daemon",
     "job": "bun apps/server/src/index.ts job",

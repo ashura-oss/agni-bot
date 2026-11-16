@@ -63,16 +63,23 @@ describe("origin allowlist", () => {
   });
 });
 
-describe("Vite dev server defaults (loopback bind only)", () => {
-  test("a loopback bind accepts the Vite dev origins and hosts without configuration", () => {
+describe("Vite dev server (AGNI_DEV only)", () => {
+  test("a normal loopback run refuses the Vite dev origins and hosts", () => {
     const policy = local();
-    for (const origin of ["http://127.0.0.1:5173", "http://localhost:5173"]) expect(policy.originAllowed(origin)).toBe(true);
-    for (const host of ["127.0.0.1:5173", "localhost:5173"]) expect(policy.hostAllowed(host)).toBe(true);
+    for (const origin of ["http://127.0.0.1:5173", "http://localhost:5173"]) expect(policy.originAllowed(origin)).toBe(false);
+    for (const host of ["127.0.0.1:5173", "localhost:5173"]) expect(policy.hostAllowed(host)).toBe(false);
   });
 
-  test("a Tailscale or wildcard bind does not", () => {
+  test("a dev run on loopback accepts them", () => {
+    const policy = local({ devServer: true });
+    for (const origin of ["http://127.0.0.1:5173", "http://localhost:5173"]) expect(policy.originAllowed(origin)).toBe(true);
+    for (const host of ["127.0.0.1:5173", "localhost:5173"]) expect(policy.hostAllowed(host)).toBe(true);
+    expect(policy.originAllowed("http://127.0.0.1:5174")).toBe(false);
+  });
+
+  test("a dev flag does not widen a Tailscale or wildcard bind", () => {
     for (const host of ["100.64.0.5", "0.0.0.0"]) {
-      const policy = createOriginPolicy({ host, port: () => 8787 });
+      const policy = createOriginPolicy({ host, port: () => 8787, devServer: true });
       expect(policy.originAllowed("http://127.0.0.1:5173")).toBe(false);
       expect(policy.hostAllowed("127.0.0.1:5173")).toBe(false);
     }

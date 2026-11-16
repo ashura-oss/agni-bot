@@ -25,6 +25,12 @@ export interface OriginPolicyOptions {
   publicOrigin?: string | undefined;
   /** Extra web origins (`AGNI_ALLOWED_ORIGINS`), already parsed. */
   extraOrigins?: readonly string[] | undefined;
+  /**
+   * A developer run (`AGNI_DEV=1`): trust the Vite dev server on a loopback
+   * bind. Off in a normal install, where whatever else serves port 5173 on
+   * this machine must not be able to ride the owner's session.
+   */
+  devServer?: boolean | undefined;
 }
 
 export interface OriginPolicy {
@@ -45,7 +51,7 @@ const LOOPBACK_BINDS = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 const WILDCARD_BINDS = new Set(["0.0.0.0", "::", "[::]", "*"]);
 const LOOPBACK_NAMES = ["127.0.0.1", "localhost", "[::1]"];
 
-/** The Vite dev server (`bun run web`); its proxy forwards this Origin and Host unchanged. */
+/** The Vite dev server (`bun run web`, with `AGNI_DEV=1`); its proxy forwards this Origin and Host unchanged. */
 const VITE_DEV_ORIGINS = ["http://127.0.0.1:5173", "http://localhost:5173"];
 
 const isLoopbackBind = (host: string): boolean => LOOPBACK_BINDS.has(host.toLowerCase()) || host.startsWith("127.");
@@ -96,8 +102,8 @@ export function createOriginPolicy(options: OriginPolicyOptions): OriginPolicy {
     const bind = options.host.toLowerCase();
     const names = new Set<string>();
     if (isLoopbackBind(bind) || WILDCARD_BINDS.has(bind)) for (const name of LOOPBACK_NAMES) names.add(name);
-    // Only a loopback bind is a developer's machine: it also answers its Vite dev server.
-    if (isLoopbackBind(bind)) for (const origin of VITE_DEV_ORIGINS) add(origin);
+    // Only a developer run on a loopback bind also answers its Vite dev server.
+    if (options.devServer && isLoopbackBind(bind)) for (const origin of VITE_DEV_ORIGINS) add(origin);
     if (!WILDCARD_BINDS.has(bind)) names.add(bind.includes(":") && !bind.startsWith("[") ? `[${bind}]` : bind);
     for (const name of names) add(`http://${name}:${port}`);
     add(options.publicOrigin);

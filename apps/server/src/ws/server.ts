@@ -173,6 +173,7 @@ export function startServer(config: Config, db: Database, router: Router, starte
     port: () => boundPort,
     publicOrigin: config.publicOrigin,
     extraOrigins,
+    devServer: Bun.env.AGNI_DEV === "1",
   });
   const originProblem = originConfigProblem({ host: config.host, port: config.port, publicOrigin: config.publicOrigin, extraOrigins });
   if (originProblem) log[originProblem.level](originProblem.message);
