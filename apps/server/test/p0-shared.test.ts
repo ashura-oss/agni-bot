@@ -13,7 +13,8 @@ import { recordModelUsage, setUsageRecorder, type ModelUsageEvent } from "../src
 import { audit, setAuditSink, type AuditEvent, type AuditSink } from "../src/policy/audit-sink";
 import type { ToolMeta } from "../src/policy/tool-meta";
 import { startupS2 } from "../src/startup/s2";
-import { startupS2Audit } from "../src/startup/s2-audit";
+import { startupS2Audit, stopPauseWatcher } from "../src/startup/s2-audit";
+import { unbindPauseStore } from "../src/policy/pause";
 import { startupS2Ledger } from "../src/startup/s2-ledger";
 import { startupS3Vault } from "../src/startup/s3-vault";
 import { startupS3 } from "../src/startup/s3";
@@ -22,13 +23,15 @@ import { registerSecret, redact } from "../src/util/redact";
 
 const noopSink: AuditSink = { record() {} };
 afterEach(() => {
+  stopPauseWatcher();
+  unbindPauseStore();
   setAuditSink(noopSink);
   setUsageRecorder(() => {});
 });
 
 describe("P0 extra CLI commands", () => {
-  test("both sprint tables ship empty", () => {
-    expect(s2Commands).toEqual({ commands: {}, help: [] });
+  test("sprint 3's table ships empty; sprint 2's lists the commands its tasks added", () => {
+    expect(Object.keys(s2Commands.commands)).toEqual(expect.arrayContaining(["audit", "pause", "resume"]));
     expect(s3Commands).toEqual({ commands: {}, help: [] });
   });
 
@@ -43,7 +46,7 @@ describe("P0 extra CLI commands", () => {
     const a: CommandTable = { commands: {}, help: ["  one   first"] };
     const b: CommandTable = { commands: {}, help: ["  two   second", "  three third"] };
     expect(extraHelpLines([a, b])).toEqual(["  one   first", "  two   second", "  three third"]);
-    expect(extraHelpLines()).toEqual([]);
+    expect(extraHelpLines().some((line) => line.includes("audit verify"))).toBe(true);
   });
 
   test("mergeCommandTables spreads commands, concatenates help, and throws on a duplicate name", () => {

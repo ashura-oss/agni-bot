@@ -14,6 +14,8 @@ interface RunningTurn {
   threadID: string;
   /** The paired device that started the turn; revoking it stops the turn. */
   deviceID: string | undefined;
+  /** The bot the turn belongs to; turning that bot off stops the turn. */
+  agentID: string | undefined;
 }
 
 const running = new Map<string, RunningTurn>();
@@ -25,8 +27,8 @@ function notifyIfIdle(): void {
 }
 
 /** Remember a turn's controller until the turn ends. */
-export function registerTurn(turnID: string, threadID: string, controller: AbortController, deviceID?: string): void {
-  running.set(turnID, { controller, threadID, deviceID });
+export function registerTurn(turnID: string, threadID: string, controller: AbortController, deviceID?: string, agentID?: string): void {
+  running.set(turnID, { controller, threadID, deviceID, agentID });
 }
 
 /** Forget a finished turn. A no-op when the entry already belongs to someone else. */
@@ -52,6 +54,37 @@ export function cancelTurnsForDevice(deviceID: string): number {
     cancelled += 1;
   }
   return cancelled;
+}
+
+/**
+ * Why a turn is stopped by the pause switch. These join `AbortReason` (agent/abort-reason.ts) once that
+ * file lists them; until then the loop reads them as an interruption, not an owner Stop.
+ *
+ *   paused     the owner paused all bots
+ *   agent_off  the owner turned this turn's bot off
+ */
+export type PauseAbortReason = "paused" | "agent_off";
+
+/**
+ * Abort the running turns a pause covers: every turn, or only the turns of one bot. Returns how many were
+ * stopped. A turn registered without a bot is stopped only by a pause of everything.
+ */
+export function cancelTurnsForPause(reason: PauseAbortReason, agentID?: string): number {
+  let stopped = 0;
+  for (const turn of running.values()) {
+    if (agentID !== undefined && turn.agentID !== agentID) continue;
+    if (turn.controller.signal.aborted) continue;
+    turn.controller.abort(reason);
+    stopped += 1;
+  }
+  return stopped;
+}
+
+/** How many registered turns belong to this bot (for the "turn off Ava?" count). */
+export function runningTurnCountForAgent(agentID: string): number {
+  let count = 0;
+  for (const turn of running.values()) if (turn.agentID === agentID && !turn.controller.signal.aborted) count += 1;
+  return count;
 }
 
 /** The devices that have a turn running, so a sweep can check them against revocations. */
