@@ -9,6 +9,7 @@
  * allowed origin, so another site can neither read nor ride the session.
  */
 import type { Database } from "bun:sqlite";
+import { purgeRevokedQueues } from "../ws/dispatch";
 import { cancelTurnsForDevice } from "../ws/turn-registry";
 import { mintToken, redeemPairCode, requestToken, revokeDevice, SESSION_COOKIE, verifyToken } from "./tokens";
 
@@ -53,7 +54,9 @@ export async function authRequest(
   const device = token ? await verifyToken(db, token) : null;
   if (device) {
     revokeDevice(db, device.id);
-    // Turns outlive their sockets: logging out must stop what this device started.
+    // Turns outlive their sockets: logging out must stop what this device started,
+    // and its queued messages must not run once the turn ends.
+    purgeRevokedQueues(db);
     cancelTurnsForDevice(device.id);
   }
   return reply({ paired: false }, 200, cookie("", 0));

@@ -19,7 +19,7 @@ import type { Router, ProviderStatus } from "../models/router";
 import { dayTotals, type DayTotals } from "../stores/usage";
 import { purgeExpiredShares } from "../share/document";
 import { shareRequest } from "../share/http";
-import { dispatch, errorFrame, newSession, resumeQueuedMessages, type DispatchDeps, type Session } from "./dispatch";
+import { dispatch, errorFrame, purgeRevokedQueues, newSession, resumeQueuedMessages, type DispatchDeps, type Session } from "./dispatch";
 import { isDeviceRevoked, requestToken, verifyToken } from "../auth/tokens";
 import { authRequest } from "../auth/web";
 import { createOriginPolicy, originConfigProblem, parseOriginList } from "../auth/origin";
@@ -146,6 +146,8 @@ export function startServer(config: Config, db: Database, router: Router, starte
       socket.close(4003, "revoked");
     }
     // A turn outlives its socket, so revocation has to find it by device, not by connection.
+    // Queued messages first, so the turn that ends below cannot start a revoked device's text.
+    purgeRevokedQueues(db);
     for (const deviceID of runningTurnDeviceIDs()) {
       if (isDeviceRevoked(db, deviceID)) cancelTurnsForDevice(deviceID);
     }

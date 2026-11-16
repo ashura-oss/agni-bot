@@ -162,6 +162,7 @@ export async function dispatch(deps: DispatchDeps, session: Session, raw: string
   if (session.held && frame.type !== "resync" && frame.type !== "hello") releaseHeld(deps, session);
   // M1: a revoked device loses its open sessions too, not just new handshakes.
   if (session.device && isDeviceRevoked(deps.db, session.device.id)) {
+    purgeRevokedQueues(deps.db);
     cancelTurnsForDevice(session.device.id);
     session.authed = false;
     sendError(deps, session, "unauthorized", "this device was revoked");
@@ -553,10 +554,36 @@ function dispatchUserMessage(
   }));
 }
 
+/**
+ * A revoked device's words must not run, nor ride a turn credited to another
+ * device. Drops every queued message whose device is revoked, from every
+ * thread, and forgets its on-disk copy. Returns how many.
+ */
+export function purgeRevokedQueues(db: Database): number {
+  const queues = threadQueues.get(db);
+  if (!queues) return 0;
+  let dropped = 0;
+  for (const [threadID, queue] of queues) {
+    const keep = queue.filter((message) => {
+      const revoked = message.session.device !== undefined && isDeviceRevoked(db, message.session.device.id);
+      if (revoked) {
+        forgetOwnerMessages(db, message.rowIDs);
+        dropped += 1;
+      }
+      return !revoked;
+    });
+    if (keep.length === 0) queues.delete(threadID);
+    else queues.set(threadID, keep);
+  }
+  return dropped;
+}
+
 /** After a turn ends, start the next message waiting on that thread. */
 function drainThreadQueue(deps: DispatchDeps, threadID: string): void {
   // Shutting down: what is queued stays on disk (queued_messages) for the next boot.
   if (isServerStopping(deps.db)) return;
+  // Before anything merges: a revoked device's message is dropped here, not run.
+  purgeRevokedQueues(deps.db);
   const queues = threadQueues.get(deps.db);
   const queue = queues?.get(threadID);
   if (!queues || !queue || queue.length === 0) return;

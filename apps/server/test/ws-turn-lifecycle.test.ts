@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { isTurnRunning } from "../src/ws/turn-registry";
-import { revokeDevice } from "../src/auth/tokens";
-import { gatedFetch, startHarness, waitFor, type Harness, type TestClient } from "./ws-harness";
+import { mintToken, revokeDevice } from "../src/auth/tokens";
+import { TestClient as Client, gatedFetch, sseResponse, startHarness, waitFor, type Harness, type TestClient } from "./ws-harness";
 
 /**
  * S1-01 / S1-02: a turn belongs to the server, not to the socket that started
@@ -196,5 +196,54 @@ describe("revoking a device stops the turns it started", () => {
       2000,
       "logged-out device's turn to be cancelled",
     );
+  });
+});
+
+describe("a revoked device's queued messages never run", () => {
+  const logout = (token: string) => fetch(`${harness!.base}/auth/logout`, { method: "POST", headers: { authorization: `Bearer ${token}`, origin: harness!.base } });
+
+  test("two messages queued by a device that is then revoked are dropped, not run", async () => {
+    harness = await startHarness({ fetch: gatedFetch(new Promise<void>(() => undefined)), config: { firstTokenTimeoutMs: 20_000, turnTimeoutMs: 20_000 } });
+    const client = await harness.connect();
+    await skipOnboarding(client);
+    client.send({ type: "msg.send", channelId: "main", text: "first" });
+    await client.next("turn.start");
+    client.send({ type: "msg.send", channelId: "main", text: "queued one" });
+    client.send({ type: "msg.send", channelId: "main", text: "queued two" });
+    await client.next("status.update", { match: (frame) => String(frame.text).startsWith("Queued behind") });
+
+    expect((await logout(harness.token)).status).toBe(200);
+    await Bun.sleep(300);
+    expect(harness.db.query("SELECT count(*) AS n FROM turns").get()).toEqual({ n: 1 });
+    expect(harness.db.query("SELECT count(*) AS n FROM channel_messages WHERE text LIKE 'queued%'").get()).toEqual({ n: 0 });
+    expect(harness.db.query("SELECT count(*) AS n FROM queued_messages").get()).toEqual({ n: 0 });
+  });
+
+  test("a mixed queue keeps only the good device's text, and a merge does not carry the revoked device's words", async () => {
+    const bodies: string[] = [];
+    const hang = gatedFetch(new Promise<void>(() => undefined));
+    let calls = 0;
+    const fetchMock = ((url: string, init?: RequestInit) => {
+      bodies.push(String(init?.body ?? ""));
+      return ++calls === 1 ? hang(url, init) : Promise.resolve(sseResponse("ok"));
+    }) as unknown as typeof fetch;
+    harness = await startHarness({ fetch: fetchMock, config: { firstTokenTimeoutMs: 20_000, turnTimeoutMs: 20_000 } });
+    const bad = await harness.connect({ device: "bad" });
+    await skipOnboarding(bad);
+    const good = await Client.connect(harness.url, (await mintToken(harness.db, "good")).token, { device: "good" });
+    harness.clients.push(good);
+
+    good.send({ type: "msg.send", channelId: "main", text: "first" });
+    const started = await good.next("turn.start");
+    bad.send({ type: "msg.send", channelId: "main", text: "REVOKEDWORDS" });
+    good.send({ type: "msg.send", channelId: "main", text: "goodwords" });
+    await bad.next("status.update", { match: (frame) => String(frame.text).startsWith("Queued behind") });
+
+    expect((await logout(harness.token)).status).toBe(200);
+    good.send({ type: "msg.cancel", turnID: started.turnID });
+    await waitFor(() => bodies.some((body) => body.includes("goodwords")), 3000, "the good device's message to run");
+    await Bun.sleep(200);
+    expect(bodies.some((body) => body.includes("REVOKEDWORDS"))).toBe(false);
+    expect(harness.db.query("SELECT count(*) AS n FROM channel_messages WHERE text LIKE '%REVOKEDWORDS%' AND text LIKE '%goodwords%'").get()).toEqual({ n: 0 });
   });
 });
