@@ -13,6 +13,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { READ_ONLY_PROGRAMS, proveShell } from "../policy/shell-proof";
 import { childEnv } from "../util/child-env";
 import { gitBashReady, gitInstall } from "../util/git-bash";
 import { privateTempDir } from "../util/private-temp";
@@ -111,18 +112,12 @@ export function isDestructive(command: string): boolean {
   return DESTRUCTIVE_PATTERNS.some((pattern) => pattern.test(command));
 }
 
-/** Programs that only read. `env` is out: the daemon's env holds provider keys. */
-const READ_ONLY_PROGRAMS = new Set(["ls", "cat", "head", "tail", "wc", "pwd", "echo", "date", "whoami", "uname", "which", "file", "stat", "du", "df"]);
-/** Plain words only: no quotes, `$`, `~`, globs, redirection, pipes, or separators. */
-const SAFE_WORD = /^[A-Za-z0-9._,:@%+\/-]+$/;
-const SAFE_FLAG = /^--?[A-Za-z0-9-]+$/;
-/** `date +FORMAT`: the word starts with "+" and then only plain characters. */
-const DATE_FORMAT = /^\+[A-Za-z0-9%._,:@+\/-]*$/;
-
 /**
- * True only for one simple command whose program is read-only and whose
- * every operand really lives in scratch (relative to `cwd`, symlinks
- * followed). Anything else needs the owner's click.
+ * True only for one simple command whose program is read-only and which the shell proof can read
+ * (policy/shell-proof.ts: plain words, only the options the allowlist names, no `..` segment and no link
+ * in any operand), and whose every file operand really lives in scratch (relative to `cwd`). Anything else
+ * needs the owner's click. The program list and the word rules are the proof's, in one place: `env` is out
+ * of the list because the daemon's env holds provider keys, and `date` is read-only only without `-s`.
  */
 export function isReadOnlyCommand(command: string, cwd?: string): boolean {
   // The same directory the command would run in: a relative cwd is under scratch.
@@ -130,11 +125,10 @@ export function isReadOnlyCommand(command: string, cwd?: string): boolean {
   if (isOutsideScratch(dir)) return false;
   const words = command.trim().split(/[ \t]+/);
   if (!READ_ONLY_PROGRAMS.has(words[0] ?? "")) return false;
-  // `date` can set the clock (-s, --set) and read files (-f, -r), and other options change nothing
-  // worth a free pass: only the bare command and one `+FORMAT` word are read-only.
-  if (words[0] === "date") return words.length === 1 || (words.length === 2 && DATE_FORMAT.test(words[1] ?? ""));
-  return words.slice(1).every((word) =>
-    word.startsWith("-") ? SAFE_FLAG.test(word) : SAFE_WORD.test(word) && !isOutsideScratch(resolve(dir, word)));
+  // The proof reads `date -u`; the free pass is for the bare command and a `+FORMAT` only.
+  if (words[0] === "date" && words.slice(1).some((word) => !word.startsWith("+"))) return false;
+  const proof = proveShell(command, dir);
+  return proof.proven && proof.paths.every((path) => !isOutsideScratch(path));
 }
 
 interface SecretEnv {

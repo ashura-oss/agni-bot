@@ -47,9 +47,14 @@ interface ProgramSpec {
   countFlag?: boolean;
   /** Are the other words files? False for a program whose words are text or nothing. */
   paths: boolean;
+  /** Free of a card in a clean run although its operation is not `read`: it prints its words and touches no file (`echo`). */
+  freeText?: true;
 }
 
-/** The programs a proven command may be. The read-only ones are those `isReadOnlyCommand` (tools/bash.ts) frees, so the two agree. */
+/**
+ * The programs a proven command may be. The read-only ones are the programs `isReadOnlyCommand` (tools/bash.ts) frees: it
+ * takes its program list from here (`READ_ONLY_PROGRAMS`) and frees only what `proveShell` proves, so the two cannot disagree.
+ */
 const PROGRAMS: Readonly<Record<string, ProgramSpec>> = {
   ls: { operation: "read", flags: "aAlhdFRtrSi1sp", paths: true },
   cat: { operation: "read", flags: "nbsAETv", paths: true },
@@ -65,7 +70,7 @@ const PROGRAMS: Readonly<Record<string, ProgramSpec>> = {
   uname: { operation: "read", flags: "asnrvmo", paths: false },
   whoami: { operation: "read", flags: "", paths: false },
   date: { operation: "read", flags: "u", paths: false },
-  echo: { operation: "run", flags: "neE", paths: false },
+  echo: { operation: "run", flags: "neE", paths: false, freeText: true },
   mkdir: { operation: "change", flags: "pv", paths: true },
   touch: { operation: "change", flags: "acm", paths: true },
   cp: { operation: "change", flags: "rRfinvpau", paths: true },
@@ -73,9 +78,14 @@ const PROGRAMS: Readonly<Record<string, ProgramSpec>> = {
   rm: { operation: "delete", flags: "rRfivd", paths: true },
 };
 
+/** The programs that run without a card in a clean run, when what they are given is proven (`isReadOnlyCommand`, tools/bash.ts). */
+export const READ_ONLY_PROGRAMS: ReadonlySet<string> = new Set(
+  Object.entries(PROGRAMS).filter(([, spec]) => spec.operation === "read" || spec.freeText === true).map(([name]) => name),
+);
+
 /** A word of a proven command: letters, digits and `. _ , : @ + / -` only. */
 const PLAIN_WORD = /^[A-Za-z0-9._,:@+/-]+$/;
-/** `date +FORMAT`. */
+/** `date +FORMAT`: a plus, then plain characters and `%`. The one pattern for it; the read-only gate asks `proveShell`. */
 const DATE_FORMAT = /^\+[A-Za-z0-9%._,:@+/-]*$/;
 const WHOLE_NUMBER = /^\d+$/;
 const LONG_PATH_PREFIX = /^\/\/\?\/(?=[A-Za-z]:)/;
@@ -118,7 +128,7 @@ export function proveShell(command: string, cwd: string, platform: NodeJS.Platfo
     }
     if (word === "--") { optionsEnded = true; continue; }
     if (spec.countFlag && /^-\d+$/.test(word)) continue;
-    if (!/^-[A-Za-z][A-Za-z0-9]*$/.test(word)) return unresolved("an option the allowlist does not name");
+    if (!/^-[A-Za-z0-9]+$/.test(word)) return unresolved("an option the allowlist does not name");
     for (let at = 1; at < word.length; at += 1) {
       const letter = word[at] as string;
       if (spec.numeric?.includes(letter)) {
