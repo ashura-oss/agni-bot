@@ -71,7 +71,7 @@ never reason about thread ids.
 | `thread.list` | `{limit?}` | Recent threads, newest first (default 20, max 200). |
 | `thread.history` | `{threadID, limit?}` | Durable messages, last N chronological (default 50, max 500). |
 | `job.list` | `{limit?}` | Tasks and routines, newest/next due first. |
-| `job.set` | `{jobID, action}` | `action`: `pause \| resume \| run`. |
+| `job.set` | `{jobID, action}` | `action`: `pause \| resume \| run`. Answered by a fresh `job.list.ok`; `run` on a job that is already running queues nothing and answers an `error` with code `already_running` instead. |
 | `job.delete` | `{jobID}` | Deletes a task unless it is running; replies with a refreshed `job.list.ok`. |
 | `approval.rules.list` | `{}` | The standing "Always allow" rules, newest first. Answered by `approval.rules.list.ok`. Additive in v2. |
 | `approval.rule.revoke` | `{id}` | Revokes one rule; it never matches again. Answered by `approval.rule.revoke.ok`, or by an `error` with code `not_found` when the id is unknown or already revoked. Additive in v2. |
@@ -190,7 +190,7 @@ bubble. A client that ignores `reset` still shows the right answer: the sealing
 
 `bad_frame`, `unauthorized`, `version_mismatch`, `unknown_thread`, `unknown_conversation`,
 `unknown_agent`, `unknown_request`, `unknown_job`, `unknown_task`,
-`bad_task_action`, `capture_failed`, `job_running`, `no_provider`, `provider_failed`,
+`bad_task_action`, `capture_failed`, `job_running`, `already_running`, `no_provider`, `provider_failed`,
 `unknown_provider`, `invalid_key`, `provider_exists`, `provider_storage`, `provider_auth`,
 `unknown_plugin`, `unknown_connection`, `plugin_not_configured`, `plugin_unavailable`,
 `plugin_connect_failed`, `unknown_background`, `resync_gap`, `not_found`, `internal`.

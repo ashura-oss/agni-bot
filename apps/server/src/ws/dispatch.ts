@@ -44,6 +44,7 @@ import {
   enqueueJob,
   setJobEnabled,
   wakeJob,
+  describeWake,
   type JobRow,
 } from "../stores/jobs";
 import { appendMessage, createThread, createTurn, finishTurn, getThread, listThreadsWithPreview, recentMessages, titleThreadFromFirstMessage, touchThread, type ThreadRow } from "../stores/threads";
@@ -1518,7 +1519,11 @@ function handleJobSet(
     case "run": {
       // "Run now" resumes a paused job: a claim would skip it otherwise.
       // Run now does not reset the failure streak: only resume does.
-      wakeJob(deps.db, job.id);
+      const woken = wakeJob(deps.db, job.id);
+      if (woken === "running") {
+        // Nothing was queued: say so, rather than answer as if it had been.
+        return sendError(deps, session, "already_running", describeWake(job.id, woken).message);
+      }
       break;
     }
   }

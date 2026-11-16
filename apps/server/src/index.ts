@@ -46,7 +46,7 @@ import { scheduleTagger } from "./jobs/tagger";
 import { log } from "./log";
 import { HealthTracker } from "./models/health";
 import { Router } from "./models/router";
-import { deleteJob, enqueueJob, getJobByPrefix, listJobs, requeueStuckJobs, setJobEnabled, wakeJob } from "./stores/jobs";
+import { deleteJob, describeWake, enqueueJob, getJobByPrefix, listJobs, requeueStuckJobs, setJobEnabled, wakeJob } from "./stores/jobs";
 import { formatDuration, parseDurationMs, parseWhen } from "./util/time";
 import { startServer, type RunningServer } from "./ws/server";
 import { agniHome, loadHomeEnv, migrateHomeLayout } from "./home";
@@ -410,8 +410,12 @@ function jobRun(db: ReturnType<typeof openDatabase>, args: string[]): void {
     console.error(`no unique job matching "${target}"`);
     process.exit(1);
   }
-  wakeJob(db, job.id);
-  console.log(`${job.id} is due now — the daemon picks it up on its next poll`);
+  const result = describeWake(job.id, wakeJob(db, job.id));
+  if (!result.ok) {
+    console.error(result.message);
+    process.exit(1);
+  }
+  console.log(result.message);
 }
 
 function safePayload(payload: string | null): string {

@@ -118,6 +118,18 @@ export function wakeJob(db: Database, id: string): WakeOutcome {
   return getJob(db, id) ? "running" : "not_found";
 }
 
+/** What to tell the person who asked to run a job now: whether it worked, in words. */
+export function describeWake(id: string, outcome: WakeOutcome): { ok: boolean; message: string } {
+  switch (outcome) {
+    case "woken":
+      return { ok: true, message: `${id} is due now — the daemon picks it up on its next poll` };
+    case "running":
+      return { ok: false, message: `${id} is already running — it was not queued again; run it again after it finishes` };
+    case "not_found":
+      return { ok: false, message: `no job ${id}` };
+  }
+}
+
 export function getJob(db: Database, id: string): JobRow | null {
   return db.query<JobRow, [string]>(`SELECT ${COLUMNS} FROM jobs WHERE id = ?`).get(id) ?? null;
 }
