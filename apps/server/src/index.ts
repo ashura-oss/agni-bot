@@ -49,7 +49,7 @@ import { formatDuration, parseDurationMs, parseWhen } from "./util/time";
 import { startServer, type HealthReport, type RunningServer } from "./ws/server";
 import { agniHome, loadHomeEnv, migrateHomeLayout } from "./home";
 import { browserOpenCommand } from "./util/open-url";
-import { secureDirectory, secureFile } from "./util/private-file";
+import { secureDirectory, secureDirectoryIfNeeded, secureFile } from "./util/private-file";
 
 const [command = "help", ...args] = Bun.argv.slice(2);
 
@@ -86,7 +86,8 @@ async function serve(): Promise<void> {
   // and logs beneath it. Warn rather than refuse to start: every secret write
   // (provider keys, VAPID key) is protected and fail-closed on its own.
   mkdirSync(agniHome(), { recursive: true, mode: 0o700 });
-  secureDirectory(agniHome(), "warn");
+  // Skipped when the ACL is already in place, so a restart does not re-walk the home tree.
+  secureDirectoryIfNeeded(agniHome(), "warn");
   const config = loadConfig();
   const db = openDatabase(config.dbPath);
   setOwnerName(config.userFirstName);

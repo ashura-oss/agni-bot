@@ -14,12 +14,14 @@
  *    hold ACLs; refusing to save a chat attachment there would be worse than
  *    saving it with a warning.
  */
-import { chmodSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { chmod, mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { basename } from "node:path";
+import { tmpdir } from "node:os";
+import { basename, join, win32 } from "node:path";
 import { log } from "../log";
-import { restrictToOwnerOnWindows, restrictToOwnerOnWindowsAsync } from "./windows-acl";
+import { currentUserSid, restrictToOwnerOnWindows, restrictToOwnerOnWindowsAsync, windowsSystemTool } from "./windows-acl";
 
 /** The path could not be made private. The message is safe to show the owner. */
 export class PrivateFileError extends Error {
@@ -105,6 +107,41 @@ export function secureDirectory(dir: string, onFailure: "throw" | "warn"): void 
     if (onFailure === "throw") throw cannotSecureDirectory(dir, error);
     log.warn(`${dir} could not be restricted to your account; continuing without it: ${reason(error)}`);
   }
+}
+
+/**
+ * True when `dir` already has exactly what `secureDirectory` sets: inheritance
+ * cut and a single entry granting the current user full control, inherited by
+ * files and folders created later (OI, CI). Reads the directory's own ACL
+ * (`icacls /save`, locale independent); it does not walk the tree. Any error
+ * reading it counts as "not secured". Non-Windows: true (nothing to do).
+ */
+export function isOwnerOnlyDirectory(dir: string): boolean {
+  if (process.platform !== "win32") return true;
+  const scratch = mkdtempSync(join(tmpdir(), "agni-acl-"));
+  try {
+    const out = join(scratch, "acl.txt");
+    execFileSync(windowsSystemTool("icacls"), [win32.resolve(dir), "/save", out, "/q"], { stdio: "pipe", windowsHide: true });
+    const sddl = readFileSync(out, "utf16le").match(/^D:(.*)$/m)?.[1]?.trim() ?? "";
+    const flags = sddl.slice(0, sddl.indexOf("("));
+    const entries = sddl.match(/\([^)]*\)/g) ?? [];
+    return flags.includes("P") && entries.length === 1 && entries[0] === `(A;OICI;FA;;;${currentUserSid()})`;
+  } catch {
+    return false;
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
+ * `secureDirectory`, but only when the directory is not already owner-only, so
+ * a server that restarts often does not re-walk a large home every time.
+ * Returns true when it applied the ACL (or tried to), false when it was already in place.
+ */
+export function secureDirectoryIfNeeded(dir: string, onFailure: "throw" | "warn"): boolean {
+  if (isOwnerOnlyDirectory(dir)) return false;
+  secureDirectory(dir, onFailure);
+  return true;
 }
 
 /** One attempt per directory per process; concurrent callers wait for the same one. */

@@ -22,8 +22,8 @@ import { HealthTracker } from "../src/models/health";
 import { addProviderCredential, setProviderModel } from "../src/models/provider-settings";
 import { Router } from "../src/models/router";
 import { loadVapid } from "../src/push/web-push";
-import { PrivateFileError, secureDirectory, secureFile, writePrivateFile, writePrivateFileSync } from "../src/util/private-file";
-import { windowsSystemTool } from "../src/util/windows-acl";
+import { PrivateFileError, secureDirectory, isOwnerOnlyDirectory, secureDirectoryIfNeeded, secureFile, writePrivateFile, writePrivateFileSync } from "../src/util/private-file";
+import { currentUserSid, windowsSystemTool } from "../src/util/windows-acl";
 import { aclEntries, expectOwnerOnlyAcl, expectPrivate, withFailingAcl, withFailingAclAsync } from "./acl-helper";
 
 const windowsOnly = process.platform !== "win32";
@@ -284,5 +284,65 @@ describe("writePrivateFile", () => {
     expect(readFileSync(path, "utf8")).toBe("two");
     expectPrivate(path, 0o600);
     expect(readdirSync(dir)).toEqual(["secret.txt"]);
+  });
+});
+
+describe("secureDirectoryIfNeeded (AGNI_HOME at every serve start)", () => {
+  test("an already owner-only directory is left alone; an exposed one is secured", () => {
+    const home = exposedChild();
+    expect(secureDirectoryIfNeeded(home, "throw")).toBe(true);
+    expectPrivate(home, 0o700);
+    if (process.platform === "win32") expect(secureDirectoryIfNeeded(home, "throw")).toBe(false);
+  });
+
+  test.skipIf(windowsOnly)("it re-applies the ACL when something loosened it, and when inheritance to new files was lost", () => {
+    const home = exposedChild();
+    secureDirectory(home, "throw");
+    // Something re-enabled inheritance from the exposed parent.
+    execFileSync(windowsSystemTool("icacls"), [home, "/inheritance:e"], { stdio: "pipe", windowsHide: true });
+    expect(isOwnerOnlyDirectory(home)).toBe(false);
+    expect(secureDirectoryIfNeeded(home, "throw")).toBe(true);
+    expectOwnerOnlyAcl(home);
+    // Owner-only but not inherited by new files: not good enough.
+    const sid = currentUserSid();
+    execFileSync(windowsSystemTool("icacls"), [home, "/inheritance:r", "/grant:r", `*${sid}:F`], { stdio: "pipe", windowsHide: true });
+    expect(secureDirectoryIfNeeded(home, "throw")).toBe(true);
+    writeFileSync(join(home, "new.txt"), "x");
+    expectOwnerOnlyAcl(join(home, "new.txt"));
+  });
+
+  test.skipIf(windowsOnly)("when the ACL cannot even be read it tries to secure, and warn mode carries on", async () => {
+    const home = exposedChild();
+    const { lines } = await captureWarnings(() => withFailingAcl(() => secureDirectoryIfNeeded(home, "warn")));
+    expect(lines.some((line) => line.includes("WARN") && line.includes(home))).toBe(true);
+  });
+});
+
+describe("PDF worker environment", () => {
+  test("the worker that parses an untrusted PDF gets no provider key", async () => {
+    const dir = exposedChild();
+    const dbPath = join(dir, "agni.sqlite");
+    const db = openDatabase(dbPath);
+    const { device } = await mintToken(db, "pdf-env");
+    remember("OPENROUTER_API_KEY"); remember("AGNI_HOME");
+    process.env.OPENROUTER_API_KEY = "fake-pdf-test-key-0123456789";
+    process.env.AGNI_HOME = dir;
+    const seen: Array<Record<string, string | undefined> | undefined> = [];
+    const realSpawn = Bun.spawn;
+    (Bun as { spawn: unknown }).spawn = ((...args: unknown[]) => {
+      seen.push((args[1] as { env?: Record<string, string | undefined> } | undefined)?.env);
+      return (realSpawn as (...a: unknown[]) => unknown)(...args);
+    }) as unknown;
+    try {
+      const body = "%PDF-1.4\n%%EOF\n";
+      await saveAttachment(db, dbPath, device.id, new File([body], "x.pdf", { type: "application/pdf" })).catch(() => {});
+    } finally {
+      (Bun as { spawn: unknown }).spawn = realSpawn;
+      db.close();
+    }
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toBeDefined();
+    expect(seen[0]!.OPENROUTER_API_KEY).toBeUndefined();
+    expect(seen[0]!.PATH ?? seen[0]!.Path).toBeDefined();
   });
 });
