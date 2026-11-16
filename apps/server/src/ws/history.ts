@@ -160,7 +160,10 @@ export function buildConversationHistory(db: Database, conversationID: string, l
     for (const index of candidates) {
       const gap = Math.abs(Date.parse(messages[index]!.createdAt) - Date.parse(row.created_at));
       if (!(gap < DUPLICATE_WINDOW_MS)) continue;
-      const sameTurn = row.turn_id !== null && turnOfThreadRow[index] === row.turn_id;
+      // Two rows that both name a turn and name different ones are two messages, however close and alike.
+      const threadTurn = turnOfThreadRow[index];
+      if (row.turn_id !== null && threadTurn !== null && threadTurn !== undefined && threadTurn !== row.turn_id) continue;
+      const sameTurn = row.turn_id !== null && threadTurn === row.turn_id;
       if (!best || (sameTurn && !best.sameTurn) || (sameTurn === best.sameTurn && gap < best.gap)) best = { index, sameTurn, gap };
     }
     if (best) {

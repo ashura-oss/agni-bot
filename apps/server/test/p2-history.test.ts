@@ -80,3 +80,23 @@ describe("a repeated identical question", () => {
     expect(history.map((message) => message.text)).toEqual(["thread only", "channel only"]);
   });
 });
+
+describe("rows from different turns are never one message", () => {
+  test("identical text, both rows name a turn, the turns differ: two messages, even a few ms apart", () => {
+    const { conversationID, threadID } = seed();
+    createTurn(db!, { id: "trn_1", threadID, agentID: "ea" });
+    createTurn(db!, { id: "trn_2", threadID, agentID: "ea" });
+    threadRow(threadID, "msg_thread", "trn_1", "user", "same words", 0);
+    channelRow("chm_channel", "trn_2", "user", "device_a", "same words", 4);
+    const history = buildConversationHistory(db!, conversationID, 200);
+    expect(history.map((message) => message.id).sort()).toEqual(["chm_channel", "msg_thread"]);
+  });
+
+  test("when one side has no turn id, the nearest in time still pairs them", () => {
+    const { conversationID, threadID } = seed();
+    createTurn(db!, { id: "trn_1", threadID, agentID: "ea" });
+    threadRow(threadID, "msg_thread", "trn_1", "user", "same words", 0);
+    channelRow("chm_channel", null, "user", "device_a", "same words", 4);
+    expect(buildConversationHistory(db!, conversationID, 200)).toHaveLength(1);
+  });
+});
