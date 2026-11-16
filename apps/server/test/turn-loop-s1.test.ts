@@ -364,6 +364,39 @@ describe("S1-14 compaction cuts at a step boundary and keeps the current request
   });
 });
 
+describe("S1-14 a long single turn is still compacted", () => {
+  const chars = (messages: ChatMessage[]): number => messages.reduce((total, m) => total + m.content.length + JSON.stringify(m.toolCalls ?? []).length, 0);
+
+  test("old steps after the current user message are folded into the summary, pairs intact, request kept verbatim", () => {
+    const request = "THE CURRENT REQUEST ZETA-4471";
+    let messages: ChatMessage[] = [{ role: "user", content: request }];
+    let summary: string | null = null;
+    let everything = request.length;
+    for (let n = 1; n <= 12; n += 1) {
+      const narration = `Step ${n} notes: ${"the shelves are being audited. ".repeat(190)}`;
+      everything += narration.length + 40;
+      messages.push(
+        { role: "assistant", content: narration, toolCalls: [
+          { id: `c${n}a`, type: "function", function: { name: "memory_search", arguments: "{}" } },
+          { id: `c${n}b`, type: "function", function: { name: "memory_search", arguments: "{\"query\":\"x\"}" } },
+        ] },
+        { role: "tool", toolCallID: `c${n}a`, content: "{}" },
+        { role: "tool", toolCallID: `c${n}b`, content: "{}" },
+      );
+      ({ messages, summary } = taskLoop.compact(messages, summary));
+      expect(messages.filter((m) => m.role === "user").map((m) => m.content)).toEqual([request]);
+      expect(messages[0]!.role).not.toBe("tool");
+      const calls = new Set(messages.flatMap((m) => m.toolCalls?.map((call) => call.id) ?? []));
+      for (const m of messages) if (m.role === "tool") expect(calls.has(m.toolCallID!)).toBe(true);
+      // The step just taken is always still there.
+      expect(calls.has(`c${n}a`)).toBe(true);
+    }
+    expect(chars(messages)).toBeLessThan(everything / 2);
+    expect(summary ?? "").not.toContain("THE CURRENT REQUEST");
+    expect(summary ?? "").toContain("Step ");
+  });
+});
+
 describe("S1-27 long messages are cut with a notice", () => {
   test("a user message over 48,000 characters is cut there and says how much was kept", () => {
     const long = "a".repeat(60_000);

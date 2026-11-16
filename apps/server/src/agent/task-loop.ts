@@ -1213,21 +1213,41 @@ export function compact(messages: ChatMessage[], previousSummary: string | null)
   }));
   const size = (): number => normalized.reduce((total, message) => total + message.content.length + JSON.stringify(message.toolCalls ?? []).length, 0);
   if (size() <= MAX_PROMPT_CHARS) return { messages: normalized, summary: previousSummary };
-  // Keep the last few messages, but never cut after the request this turn is
-  // answering (it stays verbatim, not in the "untrusted" summary), and never
-  // inside a step: a tool result goes with the assistant message that called it.
+  // The request this turn is answering stays verbatim, never in the
+  // "untrusted" summary. Everything else may be folded into the summary, but
+  // only whole steps: a tool result always goes with the assistant message
+  // that called it.
   const current = normalized.findLastIndex((message) => message.role === "user");
+  const pinned = current >= 0 ? normalized[current] : undefined;
+  const folded: typeof normalized = [];
+  // Keep the last few messages, starting at a step boundary.
   let cut = Math.max(0, normalized.length - 8);
-  if (current >= 0) cut = Math.min(cut, current);
   while (cut > 0 && normalized[cut]!.role === "tool") cut -= 1;
-  const dropped = normalized.slice(0, cut).filter((message) => message.role === "user" || message.role === "assistant").map((message) => `${message.role}: ${message.content}`).join("\n");
-  const summary = truncateTail([previousSummary, dropped].filter(Boolean).join("\n"), 8_000);
-  normalized = normalized.slice(cut);
-  while (size() > MAX_PROMPT_CHARS && normalized.length > 1) {
-    const nextUser = normalized.findIndex((message, index) => index > 0 && message.role === "user");
-    if (nextUser < 0) break;
-    normalized = normalized.slice(nextUser);
+  if (pinned && cut > current) {
+    // The request is older than the kept tail: it rides in front of it.
+    folded.push(...normalized.slice(0, cut).filter((message) => message !== pinned));
+    normalized = [pinned, ...normalized.slice(cut)];
+  } else {
+    folded.push(...normalized.slice(0, cut));
+    normalized = normalized.slice(cut);
   }
+  // Still too big (a long single turn): fold the oldest whole step, keeping the newest.
+  while (size() > MAX_PROMPT_CHARS) {
+    const first = normalized.findIndex((message) => message !== pinned);
+    if (first < 0) break;
+    let end = first + 1;
+    while (end < normalized.length && normalized[end]!.role === "tool") end += 1;
+    if (normalized.slice(end).every((message) => message === pinned)) break;
+    folded.push(...normalized.slice(first, end));
+    normalized = [...normalized.slice(0, first), ...normalized.slice(end)];
+  }
+  const dropped = folded.flatMap((message) => {
+    if (message.role !== "user" && message.role !== "assistant") return [];
+    const calls = message.toolCalls?.length ? `(called ${message.toolCalls.map((call) => call.function.name).join(", ")})` : "";
+    const line = [message.content, calls].filter(Boolean).join(" ");
+    return line ? [`${message.role}: ${line}`] : [];
+  }).join("\n");
+  const summary = truncateTail([previousSummary, dropped].filter(Boolean).join("\n"), 8_000);
   return { messages: normalized, summary };
 }
 /**

@@ -377,7 +377,8 @@ describe("compact", () => {
       ({ summary } = compact(messages, summary));
     }
     expect(summary!.length).toBeLessThanOrEqual(8_000);
-    expect(summary).toContain("round 2 turn 3");
+    expect(summary).toContain("round 2 turn 4");
+    expect(summary).not.toContain("round 0 turn 0");
   });
 });
 
