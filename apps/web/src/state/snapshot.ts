@@ -95,6 +95,8 @@ export interface AppSnapshot {
   route: Route;
   /** Set when the address names something that does not exist; the page keeps its address. */
   notFound: { what: "bot" | "group" | "task" | "page"; path: string } | null;
+  /** The daemon has not yet sent the roster, so a bot address cannot be told apart from a missing bot. */
+  routePending: boolean;
   /** Group channels; null until the daemon has listed them. */
   groups: ChannelInfo[] | null;
   /** The task an address names, to open on the Tasks screen. */

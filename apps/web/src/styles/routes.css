@@ -41,6 +41,10 @@
   overflow-wrap: anywhere;
 }
 
+.route-state-loading {
+  color: var(--ink-tertiary);
+}
+
 .route-state-path {
   color: var(--ink);
 }

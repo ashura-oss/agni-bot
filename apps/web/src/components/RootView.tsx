@@ -20,6 +20,7 @@ import { ChatGPTPlanNotice } from "./ChatGPTConnectionView";
 import { TasksView } from "./TasksView";
 import { ConnectionBanner } from "./ConnectionBanner";
 import { NotFoundView } from "./NotFoundView";
+import { RouteLoadingView } from "./RouteLoadingView";
 import { GroupView } from "./GroupView";
 
 export function RootView() {
@@ -133,6 +134,8 @@ function ChatView() {
   let mainColumn: ReactNode;
   if (snapshot.notFound) {
     mainColumn = <NotFoundView onToggleSidebar={toggleSidebar} />;
+  } else if (snapshot.routePending) {
+    mainColumn = <RouteLoadingView onToggleSidebar={toggleSidebar} />;
   } else if (route.kind === "group") {
     mainColumn = <GroupView groupID={route.id} onToggleSidebar={toggleSidebar} />;
   } else if (snapshot.isTasksPresented) {

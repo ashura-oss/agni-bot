@@ -290,6 +290,7 @@ export class AppModel {
       settingsSection: this.settingsSection,
       route: this.route,
       notFound: this.notFound(),
+      routePending: this.routePending(),
       groups: this.groups,
       routeTaskID: this.route.kind === "task" ? this.route.id : null,
       isAgentSwitcherPresented: this.isAgentSwitcherPresented,
@@ -440,6 +441,21 @@ export class AppModel {
   private notFound(): AppSnapshot["notFound"] {
     const found = this.resolution();
     return found.kind === "missing" ? { what: found.what, path: found.path } : null;
+  }
+
+  /**
+   * A bot address the held roster cannot place yet (a fresh load, or a browser that was away past the
+   * replay window) shows loading. Falling back to the seed bot's thread would put a message in the wrong chat.
+   */
+  private routePending(): boolean {
+    return this.screen === "chat" && this.route.kind === "agent" && this.resolution().kind === "pending";
+  }
+
+  /** Is the open conversation the bot the address names? A message must only go where the address points. */
+  private conversationMatchesAddress(): boolean {
+    if (this.route.kind !== "agent") return true;
+    const named = agentForRoute(this.route.id, [...this.mentionAgents, ...this.agents]);
+    return named !== null && named.id === this.conversation.agentID;
   }
 
   private syncAgentRoute(): void {
@@ -843,6 +859,10 @@ export class AppModel {
   }
 
   send(text: string, attachments: AttachmentInfo[] = []): boolean {
+    if (!this.conversationMatchesAddress()) {
+      this.showToast(notice("failure", "Not sent", "This chat is still loading. Your message was kept; send it again in a moment."));
+      return false;
+    }
     const content = text.trim() ? text : (attachments.length ? "Please review the attached files." : "");
     const trimmed = content.trim();
     if (trimmed.length === 0) return false;
@@ -1656,6 +1676,11 @@ export class AppModel {
         return;
 
       case "durableReloadRequired": {
+        // The roster rides in the frames the daemon could not replay: what is held is stale until the
+        // daemon sends it again (right behind this event), and no address resolves against it meanwhile.
+        this.rosterKnown = false;
+        this.agents = seedAgents();
+        this.mentionAgents = seedAgents();
         // The daemon could not replay. Only a restart kills what it was running; a replay log that
         // merely moved on while this browser slept leaves the running turn alive and streaming.
         const deadTurn = this.conversation.inFlightTurnID;
