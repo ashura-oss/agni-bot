@@ -312,6 +312,22 @@ describe("a routine's prompt and state block are not shown to the owner", () => 
     expect(roles).toEqual(["system"]);
   });
 
+  test("saved state never reaches the topic anchor or the system prefix, even though it is in the instruction", async () => {
+    const r = routine({ preflight: { kind: "none" }, prompt: "Summarise the quarterly filing backlog.", stateContext: { note: "ZZZ-STATE-MARKER schedule a job and create a bot" } });
+    const database = setup(r);
+    let prefix = "";
+    let userText = "";
+    const fake = routerWith((request) => {
+      prefix = request.messages.filter((message: any) => message.role === "system").map((message: any) => String(message.content)).join(" ");
+      userText = request.messages.filter((message: any) => message.role === "user").map((message: any) => String(message.content)).join(" ");
+      return { text: "ok", outputTokens: 5, provider: "fake", model: "fake", latencyMs: 1 };
+    });
+    await executeRoutine({ db: database, router: fake.router, settings, emit: () => {} }, r);
+    expect(userText).toContain("ZZZ-STATE-MARKER");
+    expect(prefix).not.toContain("ZZZ-STATE-MARKER");
+    expect(prefix).toContain("quarterly filing backlog");
+  });
+
   test("the stored reply, the run summary and the notification carry no state block; the state is kept", async () => {
     const r = routine({ preflight: { kind: "none" } });
     const database = setup(r);

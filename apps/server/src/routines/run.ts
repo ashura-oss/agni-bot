@@ -109,6 +109,11 @@ export async function executeRoutine(deps: RoutineRunDeps, routine: Routine): Pr
       // typed: it is logged as a system row, so history never shows it as the owner's
       // message. The routine keeps the trust it always had; only the log row differs.
       hideInput: true,
+      // The saved state in the instruction is data from earlier runs, which can carry text an
+      // attacker planted: the turn is gated like peer input, and only the routine's own prompt
+      // may shape its topic anchor and retrieval. It still streams to the owner.
+      untrustedInput: true,
+      queryText: routine.prompt,
       persona,
       emit: deps.emit,
       signal,

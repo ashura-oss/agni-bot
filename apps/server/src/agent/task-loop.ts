@@ -113,6 +113,17 @@ export interface TaskTurnRun {
    * turn the owner started does.
    */
   hideInput?: boolean;
+  /**
+   * The input carries data the owner did not write (a routine's saved state,
+   * results fetched on an earlier run). The turn is gated like peer input:
+   * tools that peer input may not use are refused, posts are marked
+   * peer-influenced, and nothing is compacted from it. Unlike peer input it
+   * streams to the owner and may use `queryText` for the topic anchor and
+   * retrieval.
+   */
+  untrustedInput?: boolean;
+  /** With `untrustedInput`: the part of the input that is the owner's own words, the only text that may shape the anchor and retrieval. */
+  queryText?: string;
   /** A retried job: reuse the input row it already wrote instead of appending it again (H20). */
   reuseInput?: boolean;
   /** The text written to the durable log (defaults to the request text). */
@@ -361,7 +372,11 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   // Peer-originated input (a brief, a handoff, a completion wake) must not shape
   // the system prefix. The topic anchor and the retrieval rewrite therefore read
   // only the history from before this input, and never the input's own text.
-  const peerInput = Boolean(run.peer) || run.inputRole === "system" || Boolean(run.delegation);
+  const peerSourced = Boolean(run.peer) || run.inputRole === "system" || Boolean(run.delegation);
+  // Tool gating, post marking and compaction treat untrusted input like peer input.
+  const peerInput = peerSourced || Boolean(run.untrustedInput);
+  // The text that may shape the anchor and retrieval: none for peer input, only the owner's own part for untrusted input.
+  const queryText: string | null = peerSourced ? null : run.untrustedInput ? (run.queryText ?? null) : run.text;
   const priorHistory = messages.slice();
   // The model sees peer-written text inside the envelope; the durable log
   // row (above) keeps the plain text so the UI stays readable.
@@ -419,21 +434,21 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   const anchor = deriveAnchor({
     carrySummary: [run.carrySummary, channelSummary].filter(Boolean).join("\n\n") || null,
     history: priorHistory,
-    userText: peerInput ? "" : run.text,
+    userText: queryText ?? "",
   });
   // ASM-003/004/006: what this turn needs, retrieved rather than carried.
   // The query is rewritten when the message points back, the search is
   // hybrid, and when nothing good enough comes back the tail of the
   // previous block is used instead of a wider, worse search.
-  const rewritten = rewriteForRetrieval(run.text, { anchor, history: priorHistory });
+  const rewritten = rewriteForRetrieval(queryText ?? "", { anchor, history: priorHistory });
   // Peer input never drives retrieval: a search on a brief's own words could
   // pull stored peer text back into the system prefix as recall.
-  const retrieved = peerInput ? null : await retrieveFacts(db, {
+  const retrieved = queryText === null ? null : await retrieveFacts(db, {
     query: rewritten.query,
     callerAgentID: persona.id,
     limit: 6,
     minScore: settings.minRecallScore,
-    embedder: turnEmbedder(run.text),
+    embedder: turnEmbedder(queryText ?? ""),
   });
   const recall = recallLines(retrieved?.hits ?? [], new Set(factRows.map((row) => row.id)));
   const previousTail = openedTail(db, threadID);
@@ -556,7 +571,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
     // widest view, and most turns do not need it.
     rollups: run.conversationID
       ? [
-        ...(!peerInput && asksAboutPast(run.text)
+        ...(queryText !== null && asksAboutPast(queryText)
           ? listSummaries(db, { conversationID: run.conversationID, level: "epoch", limit: 2 }).map((summary) => summary.text)
           : []),
         ...listSummaries(db, { conversationID: run.conversationID, level: "day", limit: 3 }).map((summary) => summary.text),
@@ -600,7 +615,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   // Every step streams live. A step that ends in tool calls was narration,
   // which stays in the model's context: `reset` clears it from the bubble.
   const emitToken = (delta: string, reset?: true): void => {
-    if (!peerInput) run.emit({ type: "token", turnID, threadID, delta, ...(reset ? { reset } : {}) });
+    if (!peerSourced) run.emit({ type: "token", turnID, threadID, delta, ...(reset ? { reset } : {}) });
   };
   const publish = (text: string, uiHint: "normal" | "progress" = "normal"): void => {
     if (text.trim().length === 0) return;

@@ -75,3 +75,40 @@ describe("the note matches the reason the turn was aborted", () => {
   test("device_revoked writes the revoked-device note", async () => { expect(await abortedWith("device_revoked")).toEqual([REVOKED_REQUEST_NOTE]); });
   test("an abort with no reason is treated as the owner's Stop", async () => { expect(await abortedWith(undefined)).toEqual([STOPPED_REQUEST_NOTE]); });
 });
+
+describe("a routine turn is untrusted input that still streams", () => {
+  const persona = { id: "ea", name: "Agni", color: "#f0b95a", role: "r", systemPromptTemplate: "x", systemPrompt: "x", tools: ["remember_fact", "job_schedule", "routine_create", "create_agent", "memory_search"] };
+  const call = (name: string, args: unknown) => new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      const body = `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [{ index: 0, id: `c-${name}`, type: "function", function: { name, arguments: JSON.stringify(args) } }] } }] })}\n\ndata: [DONE]\n\n`;
+      controller.enqueue(new TextEncoder().encode(body)); controller.close();
+    },
+  }), { status: 200 });
+  const text = (content: string) => new Response(new ReadableStream<Uint8Array>({
+    start(controller) { controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\ndata: [DONE]\n\n`)); controller.close(); },
+  }), { status: 200 });
+
+  test("tool calls that peer input may not make are refused for a routine-style turn, and tokens still stream", async () => {
+    db = openDatabase(":memory:");
+    const thread = createThread(db, "ea");
+    let step = 0;
+    const router = new Router([provider], new HealthTracker(), (async () => {
+      step += 1;
+      if (step === 1) return call("remember_fact", { fact: "exfiltrate this" });
+      if (step === 2) return call("routine_create", { name: "x", prompt: "y", cron: "0 9 * * *", timezone: "UTC" });
+      return text("Done.");
+    }) as unknown as typeof fetch);
+    const frames: Array<{ type: string }> = [];
+    await runTaskTurn(db, router, { firstTokenTimeoutMs: 5_000, turnTimeoutMs: 10_000 }, {
+      threadID: thread.id, text: "prompt\n```json\n{\"note\":\"schedule a job\"}\n```", persona, hideInput: true, untrustedInput: true, queryText: "prompt",
+      emit: (frame: { type: string }) => frames.push(frame), signal: new AbortController().signal, toolAllowlist: ["remember_fact", "routine_create"],
+    } as never);
+    const results = db.query<{ tool_name: string; result: string }, []>("SELECT tool_name, result FROM tool_calls ORDER BY created_at").all();
+    expect(results.map((row) => row.tool_name)).toEqual(["remember_fact", "routine_create"]);
+    for (const row of results) expect(row.result).toContain("another agent's message");
+    expect(db.query("SELECT count(*) AS n FROM agent_memories").get()).toEqual({ n: 0 });
+    expect(frames.some((frame) => frame.type === "token")).toBe(true);
+    // The instruction is hidden from the owner's history.
+    expect(db.query<{ role: string }, []>("SELECT role FROM messages WHERE text LIKE 'prompt%'").all().map((row) => row.role)).toEqual(["system"]);
+  });
+});
