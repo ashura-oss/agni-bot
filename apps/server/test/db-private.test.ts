@@ -10,7 +10,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openDatabase } from "../src/db";
+import { openDatabase, openDatabaseForCLI } from "../src/db";
 import { agniHome } from "../src/home";
 import { log } from "../src/log";
 import { currentUserSid, windowsSystemTool } from "../src/util/windows-acl";
@@ -149,5 +149,33 @@ describe("databases nobody configured are left alone", () => {
     db.close();
     db = openDatabase(join(root, "other", "agni.sqlite"));
     expect(existsSync(join(root, "other", "agni.sqlite"))).toBe(true);
+  });
+});
+
+describe("the command line opens the database as privately as the server does", () => {
+  onlyWindows("in a folder that is not ours, the -wal and -shm it makes are owner-only", () => {
+    process.env.AGNI_HOME = join(fresh(), "home");
+    const shared = join(root, "shared");
+    mkdirSync(shared);
+    writeFileSync(join(shared, "notes.txt"), "not ours");
+    process.env.AGNI_DB_PATH = join(shared, "agni.sqlite");
+    openDatabase(process.env.AGNI_DB_PATH).close();
+    for (const suffix of ["-wal", "-shm"]) rmSync(`${process.env.AGNI_DB_PATH}${suffix}`, { force: true });
+
+    db = openDatabaseForCLI(process.env.AGNI_DB_PATH);
+    db.run("INSERT INTO jobs (id, kind, payload, run_at, enabled, created_at, updated_at) VALUES ('job_cli', 'turn', '{}', 'x', 1, 'x', 'x')");
+    for (const file of ["agni.sqlite", "agni.sqlite-wal", "agni.sqlite-shm"]) expect(ownerOnly(join(shared, file))).toBe(true);
+    expect(isOwnerOnlyDirectory(shared)).toBe(false);
+  });
+
+  onlyWindows("refuses, naming the path, when the files cannot be locked", () => {
+    process.env.AGNI_HOME = join(fresh(), "home");
+    const shared = join(root, "shared");
+    mkdirSync(shared);
+    writeFileSync(join(shared, "notes.txt"), "not ours");
+    process.env.AGNI_DB_PATH = join(shared, "agni.sqlite");
+    openDatabase(process.env.AGNI_DB_PATH).close();
+    breakAclTools();
+    expect(() => openDatabaseForCLI(process.env.AGNI_DB_PATH!)).toThrow(/shared/);
   });
 });

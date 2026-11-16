@@ -203,7 +203,13 @@ export function registerTurnJob(runner: JobRunner, deps: TurnJobDeps): void {
     // S1-13: a scheduled run whose gated action was denied or never approved did
     // not do that work. Never record it as done, whatever the model then said.
     const blocked = payload.wakeKey || delegationTaskID ? null : blockedByApproval(deps.db, threadID, startedAt);
-    if (blocked && result.stopReason !== "needs_input") throw new JobGiveUp(`not done: ${blocked}`);
+    // A run that ended normally after a real call succeeded did the work another
+    // way (awk denied, then read_file and write_file did it): done, with a note.
+    let deniedNote = "";
+    if (blocked && result.stopReason !== "needs_input") {
+      if (!(blocked.workedAround && result.stopReason === "end")) throw new JobGiveUp(`not done: ${blocked.reason}`);
+      deniedNote = ` (one action was denied: ${blocked.tools.join(", ")}; finished another way)`;
+    }
 
     if (result.stopReason === "needs_input") {
       // DEL-006: the task asked the owner a question and is waiting. This is
@@ -255,7 +261,7 @@ export function registerTurnJob(runner: JobRunner, deps: TurnJobDeps): void {
       deps.emit({ type: "notify", title: `${persona.name} · ${truncate(text, 60)}`, body: reply, sound: false });
     }
 
-    const outcome: { result: string; nextRunAt?: string } = { result: `thread ${threadID}: ${reply}` };
+    const outcome: { result: string; nextRunAt?: string } = { result: `thread ${threadID}: ${reply}${deniedNote}` };
     if (payload.dailyAt) {
       // A clock, not an interval: the next run is the next wall-clock moment
       // the schedule names, on the days it names.
@@ -331,25 +337,49 @@ function parseObject(raw: unknown): Record<string, unknown> | null {
   }
 }
 
+/** Tools whose success says nothing about the work being done: loading a schema, a progress line. */
+const NOT_WORK_TOOLS: ReadonlySet<string> = new Set(["load_tools", "say"]);
+
+interface ApprovalBlock {
+  /** Why the run was blocked, in words for the job's result. */
+  reason: string;
+  /** The tools whose calls were refused. */
+  tools: string[];
+  /** A real tool call succeeded after the last refusal: the work may have been done another way. */
+  workedAround: boolean;
+}
+
 /**
  * S1-13: why a background run could not do its work for want of approval, or
  * null. Reads the gated calls the loop refused this run: the owner denied them
  * (the card's decision is "reject"), or nobody decided before the turn ended or
  * the card expired (`approval_expired`).
  */
-function blockedByApproval(db: Database, threadID: string, since: string): string | null {
-  const row = db
-    .query<{ tool_name: string; decision: string | null; error: string }, [string, string]>(
-      `SELECT tc.tool_name, a.decision, tc.error FROM tool_calls tc
+function blockedByApproval(db: Database, threadID: string, since: string): ApprovalBlock | null {
+  const rows = db
+    .query<{ rowid: number; created_at: string; tool_name: string; decision: string | null; error: string }, [string, string]>(
+      `SELECT tc.rowid AS rowid, tc.created_at, tc.tool_name, a.decision, tc.error FROM tool_calls tc
        LEFT JOIN approvals a ON a.turn_id = tc.turn_id AND a.call_id = tc.call_id
        WHERE tc.thread_id = ? AND tc.created_at >= ? AND tc.error IN ('approval_rejected', 'approval_expired')
-       ORDER BY tc.created_at LIMIT 1`,
+       ORDER BY tc.created_at, tc.rowid`,
     )
-    .get(threadID, since);
+    .all(threadID, since);
+  const row = rows[0];
   if (!row) return null;
-  if (row.decision === "reject") return `the owner denied approval for ${row.tool_name}, so it did not run`;
-  if (row.error === "approval_expired") return `approval for ${row.tool_name} expired, nobody answered, so it did not run`;
-  return `approval for ${row.tool_name} was not given before the run ended, so it did not run`;
+  const reason = row.decision === "reject" ? `the owner denied approval for ${row.tool_name}, so it did not run`
+    : row.error === "approval_expired" ? `approval for ${row.tool_name} expired, nobody answered, so it did not run`
+    : `approval for ${row.tool_name} was not given before the run ended, so it did not run`;
+  const last = rows[rows.length - 1]!;
+  const after = db
+    .query<{ tool_name: string }, [string, string, number]>(
+      "SELECT tool_name FROM tool_calls WHERE thread_id = ? AND created_at >= ? AND rowid > ? AND ok = 1 AND error IS NULL AND result IS NOT NULL",
+    )
+    .all(threadID, last.created_at, last.rowid);
+  return {
+    reason,
+    tools: [...new Set(rows.map((denied) => denied.tool_name))],
+    workedAround: after.some((call) => !NOT_WORK_TOOLS.has(call.tool_name)),
+  };
 }
 
 /** The owner's own channel with this agent: where a background reply belongs. */

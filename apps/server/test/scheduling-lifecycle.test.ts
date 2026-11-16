@@ -463,3 +463,51 @@ describe("S1-22: wake turns", () => {
     expect(accepted.id).toBeTruthy();
   });
 });
+
+describe("a denied action does not fail a run that finished the work another way", () => {
+  const load = { tool: "load_tools", args: { names: ["mail_send"] } } as const;
+  const mail = { tool: "mail_send", args: { account: "owner", to: "a@example.com", subject: "Hi", body: "Hello" } } as const;
+  const other = { tool: "task_create", args: { title: "Wrote the report another way" } } as const;
+  const job = (database: Database) => enqueueJob(database, { kind: "turn", payload: { text: "Email the owner's report.", agentID: "ea", inputRole: "system" } });
+  function deny(database: Database, frame: ServerFrameBody): void {
+    if (frame.type !== "approval.request") return;
+    setTimeout(() => {
+      database.run("UPDATE approvals SET status = 'decided', decision = 'reject' WHERE id = ?", [frame.requestID]);
+      resolveApprovalWaiter(frame.requestID, "reject");
+    }, 5);
+  }
+  async function runWith(database: Database, script: Scripted[]) {
+    const emit = (frame: ServerFrameBody): void => deny(database, frame);
+    const runner = new JobRunner(database, emit, { retryDelayMs: 1 });
+    registerTurnJob(runner, { db: database, router: scriptedRouter(script).router, settings, emit });
+    const queued = job(database);
+    await runner.tick();
+    return getJob(database, queued.id)!;
+  }
+
+  test("a later call succeeded and the turn ended normally: the job is done, with a note naming the denied tool", async () => {
+    db = openDatabase(":memory:");
+    const row = await runWith(db, [load, mail, other, { text: "Done another way." }]);
+    expect(row.state).toBe("done");
+    expect(row.result).toMatch(/one action was denied: mail_send; finished another way/);
+  });
+
+  test("nothing succeeded after the denial: still not done", async () => {
+    db = openDatabase(":memory:");
+    const row = await runWith(db, [load, mail, { text: "Sent." }]);
+    expect(row.state).toBe("failed");
+    expect(row.result).toMatch(/not done/i);
+  });
+
+  test("a harmless call after the denial (load_tools) does not count as finishing the work", async () => {
+    db = openDatabase(":memory:");
+    const row = await runWith(db, [load, mail, { tool: "load_tools", args: { names: ["mail_send"] } }, { text: "Sent." }]);
+    expect(row.state).toBe("failed");
+  });
+
+  test("a later success but the turn did not end normally: still not done", async () => {
+    db = openDatabase(":memory:");
+    const row = await runWith(db, [load, mail, other, "hang"]);
+    expect(row.state).toBe("failed");
+  });
+});

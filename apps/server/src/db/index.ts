@@ -64,34 +64,47 @@ function lockDatabaseFiles(path: string): void {
   }
 }
 
+/**
+ * Protect a database path before SQLite opens it (see `Protection`). A failure
+ * refuses to start, naming the path, and leaves nothing behind it created.
+ */
+function protectBeforeOpen(path: string, createdFolder: boolean): Protection {
+  const protection = protectionFor(path, createdFolder);
+  try {
+    if (protection === "folder") secureDirectoryIfNeeded(dirname(resolve(path)), "throw");
+    else if (protection === "files") {
+      log.warn(`${dirname(resolve(path))} already holds other files, so its access rules are left alone; the database files are restricted to your account one by one`);
+      lockDatabaseFiles(path);
+    }
+  } catch (error) {
+    throw cannotProtect(path, error);
+  }
+  return protection;
+}
+
+/** The write-ahead files exist once the database is in use; lock any SQLite made itself, before a row is written. */
+function protectAfterOpen(db: Database, path: string, protection: Protection): void {
+  if (protection !== "files") return;
+  try {
+    lockDatabaseFiles(path);
+  } catch (error) {
+    db.close();
+    throw cannotProtect(path, error);
+  }
+}
+
 /** Open (creating if needed), apply WAL mode and migrations, return the handle. */
 export function openDatabase(path: string): Database {
   let protection: Protection = null;
   if (path !== ":memory:") {
     const created = mkdirSync(dirname(path), { recursive: true });
-    protection = protectionFor(path, created !== undefined);
-    try {
-      // Before SQLite touches anything. A failure refuses to start.
-      if (protection === "folder") secureDirectoryIfNeeded(dirname(resolve(path)), "throw");
-      else if (protection === "files") {
-        log.warn(`${dirname(resolve(path))} already holds other files, so its access rules are left alone; the database files are restricted to your account one by one`);
-        lockDatabaseFiles(path);
-      }
-    } catch (error) {
-      throw cannotProtect(path, error);
-    }
+    protection = protectBeforeOpen(path, created !== undefined);
   }
   const db = new Database(path, { create: true });
   // A CLI and the daemon share this file; wait for the other writer instead of failing with SQLITE_BUSY.
   db.exec("PRAGMA busy_timeout = 5000;");
   db.exec("PRAGMA journal_mode = WAL;");
-  try {
-    // The write-ahead files exist now; lock any SQLite made itself, before a row is written.
-    if (protection === "files") lockDatabaseFiles(path);
-  } catch (error) {
-    db.close();
-    throw cannotProtect(path, error);
-  }
+  protectAfterOpen(db, path, protection);
   db.exec("PRAGMA foreign_keys = ON;");
   const applied = migrate(db);
   if (applied.length > 0) log.info(`db: applied migrations ${applied.join(", ")}`);
@@ -101,10 +114,13 @@ export function openDatabase(path: string): Database {
 /**
  * Open the database for a CLI command (`pair`, `revoke`, `job add`, …). The
  * schema belongs to the daemon, so this never migrates: a database that is
- * behind this build is refused with a message that says how to fix it.
+ * behind this build is refused with a message that says how to fix it. It is
+ * protected exactly as the server's own open is: the CLI can be the process
+ * that makes the -wal and -shm files while the daemon is stopped.
  */
 export function openDatabaseForCLI(path: string): Database {
   if (!existsSync(path)) throw new Error(`no database at ${path} — run \`agni setup\` (or \`agni migrate\`) first`);
+  const protection = protectBeforeOpen(path, false);
   const db = new Database(path, { readwrite: true, create: false });
   db.exec("PRAGMA busy_timeout = 5000;");
   db.exec("PRAGMA foreign_keys = ON;");
@@ -115,6 +131,7 @@ export function openDatabaseForCLI(path: string): Database {
   } catch {
     // No schema_migrations table: a database no server has ever opened.
   }
+  protectAfterOpen(db, path, protection);
   if (current < latest) {
     db.close();
     throw new Error(

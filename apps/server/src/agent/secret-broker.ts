@@ -14,6 +14,7 @@
  */
 import type { ServerFrameBody } from "@agni/protocol";
 import { newID, nowISO } from "../util/ids";
+import { entry } from "./card-text";
 
 export interface SecretRequestInfo {
   id: string;
@@ -74,8 +75,10 @@ export function requestSecret(
   const ttlMs = Math.max(5_000, Math.min(input.ttlMs ?? SECRET_TTL_MS, 600_000));
   const info: SecretRequestInfo = {
     id: newID("sec"),
-    purpose: input.purpose,
-    command: input.command,
+    // What the owner reads is cleaned like an approval card; the command that
+    // runs is the tool's own string, never this copy.
+    purpose: entry(input.purpose, 200),
+    command: entry(input.command, 2_000),
     kind: input.kind ?? "password",
     threadID: input.threadID ?? null,
     conversationID: input.conversationID ?? null,

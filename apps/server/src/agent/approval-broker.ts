@@ -20,6 +20,9 @@
  */
 import type { Database } from "bun:sqlite";
 import { newID, nowISO } from "../util/ids";
+import { clip, entry, escapeUnsafe, quoted } from "./card-text";
+
+export { clip };
 import { isReadOnlyCommand } from "../tools/bash";
 import { isOutsideScratch, resolveWritePath, scratchDir, writeTargetExists } from "../tools/write-file";
 import { MCP_FREE_TOOLS } from "../plugins/mcp";
@@ -196,40 +199,6 @@ Auto-approved by standing rule ${rule.id}: "Always allow" for ${rule.agentID} / 
   }
 }
 
-/**
- * Everything on an approval card that the model chose (a path, a command, a
- * recipient, any argument) goes through this section before it is drawn, so
- * nothing the model writes can add a line to the card, reorder it, or read
- * differently from what it is. Control characters, bidirectional overrides and
- * isolates, and zero-width or invisible characters are shown as visible
- * escapes (a line break becomes backslash-n, U+202E becomes backslash-u202E); each entry is capped; free text that really is
- * several lines (a mail body, a shell script) is quoted line by line.
- */
-const UNSAFE_CHARS = /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb]|[\u{e0000}-\u{e007f}]/gu;
-const NAMED_ESCAPES: Record<string, string> = { "\n": "\\n", "\r": "\\r", "\t": "\\t" };
-
-/** Show every character that could change how the card reads as a visible escape. `keepLineBreaks` leaves "\n" alone (the card's own structure). */
-function escapeUnsafe(text: string, keepLineBreaks = false): string {
-  return text.replace(UNSAFE_CHARS, (ch) => {
-    if (keepLineBreaks && ch === "\n") return ch;
-    const named = NAMED_ESCAPES[ch];
-    if (named) return named;
-    const code = ch.codePointAt(0)!;
-    return code > 0xffff ? `\\u{${code.toString(16).toUpperCase()}}` : `\\u${code.toString(16).toUpperCase().padStart(4, "0")}`;
-  });
-}
-
-/** One model-chosen entry on one line, cut at `max` characters with a marker that says how much is missing. */
-function entry(value: unknown, max = 320): string {
-  const raw = typeof value === "string" ? value : JSON.stringify(value) ?? "";
-  return raw.length > max ? `${escapeUnsafe(raw.slice(0, max))}… (+${raw.length - max} chars)` : escapeUnsafe(raw);
-}
-
-/** Several lines of model-written text, each quoted, so a line that looks like a card field is plainly quoted text. */
-function quoted(text: string, max: number): string {
-  return escapeUnsafe(clip(text.replace(/\r\n/g, "\n"), max), true).split("\n").map((line) => `> ${line}`).join("\n");
-}
-
 /** An argument for display. A missing one reads as "(not given)", never "?" or "undefined". */
 function shown(value: unknown, max = 400): string {
   if (value === undefined || value === null || value === "") return "(not given)";
@@ -249,8 +218,9 @@ function describeAction(toolName: string, args: Record<string, unknown>): string
     case "bash": return `run shell: ${shown(String(args.command ?? ""), 400)}`;
     case "write_file": {
       const path = typeof args.path === "string" ? args.path : "";
-      const replaces = path !== "" && args.append !== true && !isOutsideScratch(path, scratchDir()) && writeTargetExists(path);
-      return `${replaces ? "overwrite existing file" : "write file"}: ${shown(path)}`;
+      const exists = path !== "" && !isOutsideScratch(path, scratchDir()) && writeTargetExists(path);
+      const label = !exists ? "write file" : args.append === true ? "append to existing file" : "overwrite existing file";
+      return `${label}: ${shown(path)}`;
     }
     case "read_file": return `read file: ${shown(args.path)}`;
     case "memory_write": return `save memory: ${entry(String(args.text ?? ""), 80)}`;
@@ -314,11 +284,4 @@ function audienceLines(args: Record<string, unknown>): string[] {
     out.push(`${label} (${names.length}): ${names.slice(0, AUDIENCE_SHOWN).map((name) => entry(name)).join(", ")}${more}`);
   }
   return out;
-}
-
-/** Cap long text without hiding its end: the dangerous part is often the tail. */
-export function clip(text: string, max: number): string {
-  if (text.length <= max) return text;
-  const half = Math.floor(max / 2);
-  return `${text.slice(0, half)} … ${text.length - 2 * half} chars omitted … ${text.slice(-half)}`;
 }

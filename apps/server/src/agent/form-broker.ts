@@ -15,6 +15,7 @@ import type { Database } from "bun:sqlite";
 import type { ServerFrameBody } from "@agni/protocol";
 import { answerForm, createForm, getForm, type FormEmail, type FormKind } from "../stores/forms";
 import { OWNER_WAIT_CEILING_MS, expireCard } from "./pending-cards";
+import { entry, multiLine } from "./card-text";
 
 /** Waiters are process-local; the row remains the durable authority. */
 const formWaiters = new Map<string, (answer: string) => void>();
@@ -80,14 +81,21 @@ export class FormBroker {
 
   /** Puts the question to the owner and waits for the answer. */
   async request(spec: FormRequestSpec, signal: AbortSignal): Promise<string | null> {
+    // Everything the model wrote that the owner will read is cleaned first, so
+    // the card, its replay after a reconnect and the stored row agree.
     const form = createForm(this.deps.db, {
       threadID: spec.threadID,
       turnID: spec.turnID,
       kind: spec.kind,
-      question: spec.question,
-      options: spec.options,
+      question: multiLine(spec.question),
+      options: spec.options?.map((option) => entry(option, 200)),
       multiple: spec.multiple,
-      email: spec.email,
+      email: spec.email && {
+        ...(spec.email.from === undefined ? {} : { from: entry(spec.email.from) }),
+        to: entry(spec.email.to),
+        subject: entry(spec.email.subject, 300),
+        body: multiLine(spec.email.body),
+      },
     });
     this.deps.emit({
       type: "form.request",

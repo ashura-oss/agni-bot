@@ -80,6 +80,8 @@ export interface RouteResult {
   /** The model's own reasoning, when the provider streams it. */
   reasoning?: string;
   responseItems?: import("./client").ResponseContextItem[];
+  /** Why the provider stopped, when it said (`length`: the answer was cut at the output ceiling). */
+  finishReason?: string;
 }
 
 export interface ProviderStatus {
@@ -221,6 +223,7 @@ export class Router {
             ...(result.toolCalls ? { toolCalls: result.toolCalls } : {}),
             ...(result.reasoning ? { reasoning: result.reasoning } : {}),
             ...(result.responseItems ? { responseItems: result.responseItems } : {}),
+            ...(result.finishReason ? { finishReason: result.finishReason } : {}),
           };
         } catch (error) {
           const providerError =
