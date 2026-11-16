@@ -1,7 +1,7 @@
-import { renameSync } from "node:fs";
+import { existsSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { agniHome } from "../home";
-import { openDatabaseForCLI } from "../db";
+import { DatabaseBehindError, openDatabaseForCLI } from "../db";
 import { loadConfig } from "../config";
 import { setEnvFileValues } from "../secrets/env";
 import { runVaultExport, runVaultMigrations } from "../secrets/migrate";
@@ -49,21 +49,43 @@ async function list(): Promise<void> {
   if (vault.list().length === 0) console.log("the vault is empty");
 }
 
-/** The database, when there is one: some migrators (OAuth tokens) need it. A bare vault CLI works without it. */
-function optionalDatabase() {
+/**
+ * The database, when there is one: some migrators (OAuth tokens) need it. A home
+ * with no database yet has nothing in it to move, so that is not an error. A
+ * database that exists but cannot be opened is: carrying on without it would
+ * leave OAuth tokens in the clear while the home switches to vault mode. A
+ * database that is behind says so and names `agni migrate`.
+ */
+export function optionalDatabase(path: string = loadConfig().dbPath) {
+  if (!existsSync(path)) return undefined;
   try {
-    const config = loadConfig();
-    return openDatabaseForCLI(config.dbPath);
-  } catch {
-    return undefined;
+    return openDatabaseForCLI(path);
+  } catch (error) {
+    if (error instanceof DatabaseBehindError) {
+      throw new Error(
+        `the database at ${path} is behind this version (missing migration ${error.missing.join(", ")}), so its OAuth tokens cannot be moved. ` +
+          "Run `agni migrate`, then run this command again.",
+        { cause: error },
+      );
+    }
+    throw new Error(`the database at ${path} could not be opened (${error instanceof Error ? error.message : String(error)}), so its OAuth tokens cannot be moved.`, { cause: error });
   }
 }
 
 async function migrate(): Promise<void> {
+  // The database first: a refusal there must not leave a new, empty vault behind.
+  let db: ReturnType<typeof optionalDatabase>;
+  try {
+    db = optionalDatabase();
+  } catch (error) {
+    return fail(`migration not started: ${error instanceof Error ? error.message : String(error)}`);
+  }
   const vault = await open(true);
-  if (!vault) return;
+  if (!vault) {
+    db?.close();
+    return;
+  }
   const home = agniHome();
-  const db = optionalDatabase();
   try {
     const results = await runVaultMigrations(vault, { home, db });
     for (const { name, count } of results) console.log(`${name}: ${count} moved`);
@@ -114,10 +136,18 @@ async function exportSecrets(args: string[]): Promise<void> {
     fail("there is no vault to export.");
     return;
   }
+  let db: ReturnType<typeof optionalDatabase>;
+  try {
+    db = optionalDatabase();
+  } catch (error) {
+    return fail(`export not started: ${error instanceof Error ? error.message : String(error)}`);
+  }
   const vault = await open(false);
-  if (!vault) return;
+  if (!vault) {
+    db?.close();
+    return;
+  }
   const home = agniHome();
-  const db = optionalDatabase();
   try {
     for (const { name, count } of await runVaultExport(vault, { home, db })) console.log(`${name}: ${count} written`);
     setEnvFileValues(join(home, "config.env"), { AGNI_SECRETS_MODE: "file" });

@@ -113,6 +113,14 @@ export function openDatabase(path: string): Database {
   return db;
 }
 
+/** A database that exists but lacks migrations this version lists. `missing` holds their ids. */
+export class DatabaseBehindError extends Error {
+  constructor(readonly path: string, readonly current: number, readonly missing: number[]) {
+    super(`database ${path} is at schema ${current}, missing migration(s) ${missing.join(", ")} — run \`agni setup\` (or \`agni migrate\`) first`);
+    this.name = "DatabaseBehindError";
+  }
+}
+
 /**
  * Open the database for a CLI command (`pair`, `revoke`, `job add`, …). The
  * schema belongs to the daemon, so this never migrates: a database that is
@@ -142,9 +150,7 @@ export function openDatabaseForCLI(path: string, migrations: ReadonlyArray<Migra
   const missing = migrations.map((migration) => migration.id).filter((id) => !applied.has(id));
   if (missing.length > 0) {
     db.close();
-    throw new Error(
-      `database ${path} is at schema ${current}, missing migration(s) ${missing.join(", ")} — run \`agni setup\` (or \`agni migrate\`) first`,
-    );
+    throw new DatabaseBehindError(path, current, missing);
   }
   return db;
 }
