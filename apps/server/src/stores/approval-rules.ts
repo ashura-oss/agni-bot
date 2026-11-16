@@ -9,9 +9,10 @@
  *
  * The target is the thing the owner was actually shown and agreed to, per tool:
  *
- *   write_file      the resolved absolute real path (relative paths resolve
- *                   against scratch, symlinks are followed; folded to lower
- *                   case on Windows). Never the content.
+ *   write_file      the resolved absolute real path inside scratch (relative
+ *                   paths resolve against scratch, symlinks are followed;
+ *                   folded to lower case on Windows). Never the content. A
+ *                   path outside scratch has no target: it asks every time.
  *   mail_send       the account plus the recipient list: JSON
  *                   `{"account","to"}`, recipients sorted and de-duplicated,
  *                   the domain lower-cased and the local part left exact.
@@ -22,6 +23,7 @@
  *                   remembered, so an event id alone never allows a new edit.
  *
  * Shell tools are never remembered: `bash` and `run_privileged` always ask.
+ * `findApprovalRule` and `addApprovalRule` refuse them too, whoever the caller.
  * Whether a command is safe depends on the files it runs, the programs PATH
  * finds and the directory it runs in, all of which can change after the owner
  * looked, and no check made here can see them as the shell will. So an
@@ -32,7 +34,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { newID, nowISO } from "../util/ids";
-import { resolveWritePath } from "../tools/write-file";
+import { isOutsideScratch, resolveWritePath, scratchDir } from "../tools/write-file";
 
 /** Shell tools: `bash` (see the header) and `run_privileged` (the owner reviews each command and types the secret). */
 const NEVER_REMEMBER = new Set(["bash", "run_privileged"]);
@@ -75,6 +77,10 @@ export function approvalTarget(toolName: string, args: Record<string, unknown>):
   switch (toolName) {
     case "write_file": {
       if (typeof args.path !== "string" || !args.path.trim()) return null;
+      // A path-only rule outside scratch would let the bot later rewrite startup
+      // items, hooks, scripts or config files with no card. Only scratch overwrites
+      // are remembered.
+      if (isOutsideScratch(args.path, scratchDir())) return null;
       const target = resolveWritePath(args.path);
       if (!target) return null;
       return process.platform === "win32" ? target.toLowerCase() : target;
@@ -101,17 +107,22 @@ export function agentForTurn(db: Database, threadID: string, turnID: string): st
 
 /** The active rule for exactly this bot, tool and target, if any. */
 export function findApprovalRule(db: Database, agentID: string, toolName: string, target: string): ApprovalRule | null {
+  if (NEVER_REMEMBER.has(toolName)) return null;
   const row = db
     .query("SELECT * FROM approval_rules WHERE agent_id = ? AND tool_name = ? AND target = ? AND revoked_at IS NULL")
     .get(agentID, toolName, target) as RuleRow | null;
   return row ? toRule(row) : null;
 }
 
-/** Remember a rule. Adding one that is already active returns the existing rule. */
+/**
+ * Remember a rule. Adding one that is already active returns the existing rule.
+ * Null, and nothing stored, for a tool that is never remembered.
+ */
 export function addApprovalRule(
   db: Database,
   rule: { agentID: string; toolName: string; target: string; approvalID?: string | null },
-): ApprovalRule {
+): ApprovalRule | null {
+  if (NEVER_REMEMBER.has(rule.toolName)) return null;
   const existing = findApprovalRule(db, rule.agentID, rule.toolName, rule.target);
   if (existing) return existing;
   const id = newID("rul");

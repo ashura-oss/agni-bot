@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect } from "bun:test";
 import { scenarioTest, calls, call, loadTools, say, useScenarios, type Scenario, type ScenarioClient } from "./harness";
 
@@ -132,16 +133,21 @@ describe("S1-06 scratch overwrite gates", () => {
 });
 
 describe("S1-07 always allow persists for one bot, tool and target", () => {
-  scenarioTest("a remembered write skips the card; another target or another bot still asks", async () => {
+  scenarioTest("a remembered scratch overwrite skips the card; another target or another bot still asks; outside scratch never remembers", async () => {
     const s = await scenarios.start();
-    const granted = s.outside("granted.txt");
-    const other = s.outside("other.txt");
+    // "Always allow" is remembered for overwrites inside scratch only; a path
+    // outside scratch asks every time (see the last turn).
+    mkdirSync(s.scratch, { recursive: true });
+    const granted = join(s.scratch, "granted.txt");
+    const other = join(s.scratch, "other.txt");
+    writeFileSync(granted, "zero");
+    writeFileSync(other, "zero");
     const a = await s.connect({ label: "A" });
 
-    // Turn 1: the first write asks, the owner answers "always".
+    // Turn 1: the first overwrite asks, the owner answers "always".
     s.model.queue(loadTools("write_file"), call("write_file", { path: granted, content: "one" }, "call_first"), say("Saved."));
     const first = await a.startTurn("save the granted file");
-    const card = await expectCard(a, first.since, "the first write outside scratch");
+    const card = await expectCard(a, first.since, "the first overwrite of an existing scratch file");
     a.send({ type: "approve.reply", requestID: card.requestID, decision: "always" });
     await a.waitFor("turn.end", { since: first.since, why: "turn 1 to end" });
     expect(readFileSync(granted, "utf8")).toBe("one");
@@ -159,7 +165,7 @@ describe("S1-07 always allow persists for one bot, tool and target", () => {
     const otherCard = await expectCard(a, third.since, "a write to a different target");
     a.send({ type: "approve.reply", requestID: otherCard.requestID, decision: "reject" });
     await a.waitFor("turn.end", { since: third.since, why: "turn 3 to end" });
-    expect(existsSync(other)).toBe(false);
+    expect(readFileSync(other, "utf8")).toBe("zero");
 
     // Turn 4: another bot, the same tool and target, still asks.
     s.model.queue(loadTools("write_file"), call("write_file", { path: granted, content: "from coder" }, "call_coder"), say("Saved as coder."));
@@ -168,5 +174,20 @@ describe("S1-07 always allow persists for one bot, tool and target", () => {
     a.send({ type: "approve.reply", requestID: coderCard.requestID, decision: "reject" });
     await a.waitFor("turn.end", { since: fourth.since, why: "turn 4 to end" });
     expect(readFileSync(granted, "utf8"), "the other bot's write ran without its own approval").toBe("two");
+
+    // Turn 5: outside scratch "Always" is not offered, so a second write asks again.
+    const away = s.outside("away.txt");
+    s.model.queue(loadTools("write_file"), call("write_file", { path: away, content: "one" }, "call_away_1"), say("Saved away."));
+    const fifth = await a.startTurn("save a file outside scratch");
+    const awayCard = await expectCard(a, fifth.since, "a write outside scratch");
+    expect(awayCard.buttons, "the card offered Always allow for a path outside scratch").toEqual(["once", "reject"]);
+    a.send({ type: "approve.reply", requestID: awayCard.requestID, decision: "once" });
+    await a.waitFor("turn.end", { since: fifth.since, why: "turn 5 to end" });
+    s.model.queue(loadTools("write_file"), call("write_file", { path: away, content: "two" }, "call_away_2"), say("Saved away again."));
+    const sixth = await a.startTurn("save it again");
+    const again = await expectCard(a, sixth.since, "the same write outside scratch, again");
+    a.send({ type: "approve.reply", requestID: again.requestID, decision: "reject" });
+    await a.waitFor("turn.end", { since: sixth.since, why: "turn 6 to end" });
+    expect(readFileSync(away, "utf8")).toBe("one");
   });
 });
