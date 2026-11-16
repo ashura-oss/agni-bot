@@ -268,13 +268,18 @@ export class AgniConnection {
                 this.onEventValue?.({ type: "durableReloadRequired" });
               }
               const resumeAfterSeq = this.settings.lastSeq;
-              this.setState({ kind: "ready", lastSeq: frame.lastSeq });
-              // Re-enter the stream where this browser left off.
+              // Re-enter the stream where this browser left off. This must reach
+              // the server before the app hears "ready": the app answers ready
+              // by sending its list requests, and any frame that arrives ahead
+              // of `resync` releases the server's hold on live frames, so lastSeq
+              // jumps past the replay and the replay is dropped as already seen.
               try {
                 await socket.send(encodeClientFrame({ type: "resync", lastSeq: resumeAfterSeq }));
               } catch {
                 // The receive loop will report a closed socket next iteration.
               }
+              if (this.aborted(id)) return "stopped";
+              this.setState({ kind: "ready", lastSeq: frame.lastSeq });
             } else if (frame.type === "error" && !("__unknown" in frame)) {
               // The server rejects before hello.ok: unauthorized, version_mismatch.
               throw TransportError.closed(frame.code === "version_mismatch" ? 4002 : 4003, frame.message);
