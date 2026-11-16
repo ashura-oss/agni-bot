@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mintToken, revokeDevice } from "../../src/auth/tokens";
 import { openDatabase } from "../../src/db";
-import { startPending, getConnectionByState, completeConnect } from "../../src/plugins/store";
 import { runPreflight } from "../../src/routines/preflight";
 import { enqueueJob, getJob, getJobByPrefix } from "../../src/stores/jobs";
 import { saveLink } from "../../src/stores/links";
@@ -222,17 +221,6 @@ describe("LIKE wildcards in id-prefix lookups", () => {
     expect(getJob(harness.db, job.id)!.enabled).toBe(1);
   });
 
-  test("an OAuth state value is matched exactly: a wildcard or a quote finds no pending connection", () => {
-    db = openDatabase(":memory:");
-    const pending = startPending(db, { pluginID: "gmail", account: "agent", scopes: [], capabilities: {}, state: "st_realvalue" });
-    expect(getConnectionByState(db, "st_realvalue")?.id).toBe(pending.id);
-    for (const state of ["%", "_", "st_%", "st_realvalu_", '"', '","x":"', `st_realvalue","state":"x`, "", "st_realvalue%"]) {
-      expect({ state, found: getConnectionByState(db, state)?.id ?? null }).toEqual({ state, found: null });
-    }
-    // Once connected, the state is spent: the same value finds nothing.
-    completeConnect(db, pending.id, { access_token: "t" } as never, "a@example.test");
-    expect(getConnectionByState(db, "st_realvalue")).toBeNull();
-  });
 });
 
 describe("routine pre-check SQL (S3-09)", () => {

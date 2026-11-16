@@ -195,26 +195,3 @@ export function readLocalFlag(pluginsPath: string, pluginID: string): boolean {
     return false;
   }
 }
-
-/**
- * Copy each entry's `local` flag from the file on disk into the in-memory config, so
- * a later save writes the owner's current choice back. Without this, removing the
- * flag by hand would be undone by the next save from stale memory.
- *
- * Switch when S3-3 adds `local?: boolean` to `PluginEntry` (plugins/config.ts): type the
- * parameter as `{ plugins: Record<string, PluginEntry> }` and replace the two
- * `(entry as { local?: boolean })` casts below with `entry.local`. Nothing else changes.
- */
-export function syncLocalFlags(pluginsPath: string, config: { plugins: Record<string, object> }): void {
-  let onDisk: { plugins?: Record<string, { local?: unknown }> };
-  try {
-    onDisk = JSON.parse(readFileSync(pluginsPath, "utf-8"));
-  } catch {
-    return;
-  }
-  if (!onDisk?.plugins || typeof onDisk.plugins !== "object") return;
-  for (const [id, entry] of Object.entries(config.plugins)) {
-    if (onDisk.plugins[id]?.local === true) (entry as { local?: boolean }).local = true;
-    else delete (entry as { local?: boolean }).local;
-  }
-}

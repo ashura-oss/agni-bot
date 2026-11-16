@@ -35,7 +35,7 @@ export interface PluginConnectionRow {
   updated_at: string;
 }
 
-/** What lives in the `tokens` column. `state` survives a daemon restart mid-auth. */
+/** What lives in the `tokens` column. `state` is only on rows written before Sprint 3 (the sign-in state is in `oauth_states` now); nothing writes it. */
 export interface TokenBlob {
   state?: string;
   refresh_token?: string;
@@ -101,33 +101,12 @@ export function getConnectionFor(db: Database, pluginID: string, account: Plugin
     .get(pluginID, account) ?? null;
 }
 
-/**
- * Find a pending row by OAuth state (survives daemon restarts mid-flow). An
- * exact match on the `state` in the row's JSON, never a LIKE. Sprint 3's OAuth
- * flow keeps its state in `oauth_states` (migration 61) and no longer calls
- * this; delete it, `ConnectPatch.state` and the `state` written by
- * `startPending` once that flow has merged.
- */
-export function getConnectionByState(db: Database, state: string): PluginConnectionRow | null {
-  return (
-    db
-      .query<PluginConnectionRow, [string]>(
-        `SELECT * FROM plugin_connections
-          WHERE status = 'pending'
-            AND CASE WHEN json_valid(tokens) THEN json_extract(tokens, '$.state') END = ?`,
-      )
-      .get(state) ?? null
-  );
-}
-
 export interface ConnectPatch {
   connectionID?: string;
   pluginID: string;
   account: PluginAccount;
   scopes: string[]; // catalog scopes requested at this connect
   capabilities: unknown; // policy snapshot
-  /** Caller-supplied state for the pending OAuth flow; minted when absent. */
-  state?: string;
 }
 
 /**
@@ -139,13 +118,12 @@ export interface ConnectPatch {
 export function startPending(db: Database, patch: ConnectPatch): PluginConnectionRow {
   const existing = getConnectionFor(db, patch.pluginID, patch.account);
   const id = existing?.id ?? newID("plc");
-  const state = patch.state ?? `st_${crypto.randomUUID()}`;
   const now = nowISO();
   db.run(
     `INSERT INTO plugin_connections
        (id, plugin_id, account, status, account_label, scopes, capabilities, tokens, token_ref,
         error, grant_started_at, connected_at, updated_at)
-     VALUES (?, ?, ?, 'pending', NULL, ?, ?, ?, NULL, NULL, ?, NULL, ?)
+     VALUES (?, ?, ?, 'pending', NULL, ?, ?, NULL, NULL, NULL, ?, NULL, ?)
      ON CONFLICT(plugin_id, account) DO UPDATE SET
        status = 'pending',
        account_label = NULL,
@@ -163,7 +141,6 @@ export function startPending(db: Database, patch: ConnectPatch): PluginConnectio
       patch.account,
       JSON.stringify(patch.scopes),
       JSON.stringify(patch.capabilities),
-      JSON.stringify({ state }),
       now,
       now,
     ],

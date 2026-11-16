@@ -16,7 +16,6 @@ import {
   completeConnect,
   deleteConnection,
   getConnection,
-  getConnectionByState,
   readConnectionTokens,
   startPending,
   updateTokens,
@@ -166,25 +165,7 @@ describe("file mode with the vault open (a migration that stopped part way)", ()
   });
 });
 
-describe("state lookup", () => {
-  test("matches the state exactly: LIKE wildcards in the input are just characters", () => {
-    const db = openDatabase(":memory:");
-    startPending(db, { pluginID: "calendar", account: "agent", scopes: ["s"], capabilities: [], state: "st_abc" });
-    startPending(db, { pluginID: "gmail-owner", account: "owner", scopes: ["s"], capabilities: [], state: "st_abcdef" });
-    expect(getConnectionByState(db, "st_abc")?.plugin_id).toBe("calendar");
-    expect(getConnectionByState(db, "st_abcdef")?.plugin_id).toBe("gmail-owner");
-    for (const probe of ["st_ab%", "st_%", "%", "st_ab_", "_", "st_abc%"]) expect(getConnectionByState(db, probe)).toBeNull();
-    db.close();
-  });
-
-  test("a row whose tokens are not JSON does not break the lookup", () => {
-    const db = openDatabase(":memory:");
-    const pending = startPending(db, { pluginID: "calendar", account: "agent", scopes: ["s"], capabilities: [], state: "st_x" });
-    db.run("UPDATE plugin_connections SET tokens = 'not json' WHERE id = ?", [pending.id]);
-    expect(getConnectionByState(db, "st_x")).toBeNull();
-    db.close();
-  });
-
+describe("the store's SQL", () => {
   test("no SQL in the store uses LIKE", async () => {
     const source = await Bun.file(join(import.meta.dir, "../src/plugins/store.ts")).text();
     // The operator followed by a parameter or a literal; the word may appear in a comment.

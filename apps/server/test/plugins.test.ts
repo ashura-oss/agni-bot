@@ -6,7 +6,6 @@ import { authorizeURL, isConfigured, redirectURI } from "../src/plugins/oauth";
 import {
   completeConnect,
   getConnection,
-  getConnectionByState,
   getConnectionFor,
   getConnections,
   startPending,
@@ -248,7 +247,6 @@ describe("oauth callback", () => {
     expect(tokens.refresh_token).toBe("rt_1");
 
     // The callback is keyed on state, not on the connection the frame opened.
-    expect(getConnectionByState(db, state)).toBeNull(); // consumed
     // Snapshot fan-out ends at connected.
     const snapshot = states.at(-1) as { plugins: PluginInfo[] };
     expect(snapshot.plugins.find((entry) => entry.id === "calendar")!.status).toBe("connected");
@@ -411,16 +409,6 @@ describe("plugin connection store", () => {
     expect(second.account_label).toBeNull();
     const wrongAccount = getConnectionFor(db, "calendar", "owner");
     expect(wrongAccount).toBeNull();
-    db.close();
-  });
-
-  test("state lookup matches exactly, never a LIKE prefix accident", () => {
-    const db = openDatabase(":memory:");
-    startPending(db, { pluginID: "calendar", account: "agent", scopes: ["s"], capabilities: [], state: "st_abc" });
-    startPending(db, { pluginID: "gmail-owner", account: "owner", scopes: ["s"], capabilities: [], state: "st_abcdef" });
-    expect(getConnectionByState(db, "st_abc")!.account).toBe("agent");
-    expect(getConnectionByState(db, "st_abcdef")!.account).toBe("owner");
-    expect(getConnectionByState(db, "st_ab")).toBeNull();
     db.close();
   });
 

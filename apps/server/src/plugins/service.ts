@@ -12,7 +12,7 @@ import * as oauth from "./oauth";
 import { consumeOAuthState, dropOAuthStates, issueOAuthState, newOAuthState } from "./oauth-state";
 import { mcpHub } from "./mcp";
 import { clearPlugin } from "./mcp-pins";
-import { mcpUrlShapeError, readLocalFlag, syncLocalFlags } from "./mcp-url";
+import { mcpUrlShapeError, readLocalFlag } from "./mcp-url";
 import {
   completeConnect,
   deleteConnection,
@@ -104,7 +104,6 @@ export class PluginService {
   /** Persist the in-memory plugins.json to disk (mode-600). */
   private save(): void {
     syncTrustedTools(this.deps.pluginsPath, this.pluginsFile);
-    syncLocalFlags(this.deps.pluginsPath, this.pluginsFile);
     savePluginsFile(this.deps.pluginsPath, this.pluginsFile);
   }
 
@@ -337,7 +336,6 @@ export class PluginService {
         account,
         scopes: role.scopes,
         capabilities: role.capabilities,
-        state,
       });
       // The state and its PKCE verifier live in oauth_states; starting over replaces the old pair.
       issueOAuthState(this.deps.db, { state, connectionID: pending.id, pluginID, account, codeVerifier: pkce.verifier }, this.now());
