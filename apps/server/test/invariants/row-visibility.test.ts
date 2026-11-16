@@ -5,7 +5,9 @@
  * them. Reading a channel through the primary bot's visibility alone returned a private bot's lines in
  * full to a bot that was not in the room. Every reader of channel or thread history decides per row:
  * the author's visibility, the strictest member's for the owner's own lines, and "private" (a receipt)
- * for an author that cannot be resolved. A bot that belongs to the channel reads it in full.
+ * for an author that cannot be resolved. A bot that belongs to the channel reads the owner's lines and its own in full;
+ * another bot's line comes through that bot's visibility, exactly as the group context shows it, so no reader
+ * shows a member more of the room than `groupHistory` does.
  *
  * One test per reader: expand, transcript search, facts, handoff's own chat, task status and wait,
  * and the group context.
@@ -94,11 +96,22 @@ describe("expand reads a shared channel row by row", () => {
     expect(JSON.stringify(view)).not.toContain(SECRET);
   });
 
-  test("a bot that belongs to the room still reads every line", async () => {
+  test("a bot that belongs to the room reads another bot's line through that bot's visibility, as the group context shows it", async () => {
     const { database, channelID } = room();
     const kid = say(database, channelID, "kid", `kid says: ${LONG}`);
     const view = await expandAs(database, "lead", kid);
-    expect(view.messages[0]!.text).toContain(SECRET);
+    expect(JSON.stringify(view)).not.toContain(SECRET);
+    expect(view.messages).toEqual([]);
+    expect(view.redacted).toBe(true);
+  });
+
+  test("a bot that belongs to the room reads the owner's lines, its own, and a shared bot's in full", async () => {
+    const { database, channelID } = room();
+    const mine = say(database, channelID, "user", `owner says: ${LONG}`);
+    const lead = say(database, channelID, "lead", `lead says: ${LONG}`);
+    expect((await expandAs(database, "kid", mine)).messages[0]!.text).toContain(SECRET);
+    expect((await expandAs(database, "kid", lead)).messages[0]!.text).toContain(SECRET);
+    expect((await expandAs(database, "lead", lead)).messages[0]!.text).toContain(SECRET);
   });
 
   test("a bot reads its own line wherever it was written", async () => {
@@ -144,10 +157,13 @@ describe("transcript search reads a shared channel row by row", () => {
     expect(JSON.stringify(searchTranscripts(database, { query: "zebra budget", callerAgentID: "outsider" }))).not.toContain(SECRET);
   });
 
-  test("a bot in the room searches it in full; a search with no caller reads no private line", () => {
+  test("a bot in the room finds the owner's lines and a shared bot's in full, and not a private bot's; a search with no caller reads no private line", () => {
     const { database, channelID } = room();
     say(database, channelID, "kid", `the kid notes the zebra budget ${SECRET}`);
-    expect(JSON.stringify(searchTranscripts(database, { query: "zebra budget", callerAgentID: "lead" }))).toContain(SECRET);
+    say(database, channelID, "user", `the owner notes the zebra budget OWNER-LINE`);
+    const hits = JSON.stringify(searchTranscripts(database, { query: "zebra budget", callerAgentID: "lead" }));
+    expect(hits).not.toContain(SECRET);
+    expect(hits).toContain("OWNER-LINE");
     expect(JSON.stringify(searchTranscripts(database, { query: "zebra budget" }))).not.toContain(SECRET);
   });
 
@@ -264,6 +280,19 @@ describe("task_status and delegate_wait", () => {
     const task = createDelegationTask(database, { ownerAgentID: "sumo", brief: { goal: "Write the report" }, parentAgentID: "ea" });
     setDelegationState(database, task.id, "done", LONG);
     expect(JSON.stringify(await statusAs(database, "ea", "task_status", task.id))).toContain(SECRET);
+  });
+});
+
+describe("a member reads no more through expand and transcript search than the group context shows it", () => {
+  test("a private bot's line is a receipt in all three", async () => {
+    const { database, channelID } = room();
+    const kid = say(database, channelID, "kid", `the kid notes the zebra budget ${SECRET}`);
+    const context = groupHistory(database, channelID, "lead").join(" | ");
+    const registry = new ToolRegistry();
+    registerExpandTool(registry, { db: database, currentAgentID: "lead" });
+    const expanded = JSON.stringify(await (registry.get("expand") as unknown as Handler).handler({ kind: "messages", id: kid }, ctx));
+    const found = JSON.stringify(searchTranscripts(database, { query: "zebra budget", callerAgentID: "lead" }));
+    expect({ context: context.includes(SECRET), expanded: expanded.includes(SECRET), found: found.includes(SECRET) }).toEqual({ context: false, expanded: false, found: false });
   });
 });
 

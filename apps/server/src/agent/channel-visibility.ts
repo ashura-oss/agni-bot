@@ -6,10 +6,11 @@
  * handed a private bot's lines to a bot outside the room, so every reader of channel
  * history decides per row, here and nowhere else:
  *
- *   a bot that belongs to the channel      reads every row in full
  *   a bot's own row                        in full, wherever it was written
- *   a row written by a bot                 that bot's visibility
- *   a row written by the owner             the strictest visibility among the channel's bots
+ *   a row written by another bot           that bot's visibility, even for a bot that belongs to the channel
+ *                                          (the group context shows a member no more, and neither may a search)
+ *   a row written by the owner             in full for a bot that belongs to the channel; for any other bot,
+ *                                          the strictest visibility among the channel's bots
  *   a row whose author cannot be resolved  private: a receipt
  *
  * Ids are compared canonically on both sides, and a caller that is not known is a
@@ -79,7 +80,9 @@ export function redactRowForCaller(
   text: string,
   callerAgentID: string | null | undefined,
 ): RedactedText {
-  if (isChannelParticipant(db, channel, callerAgentID)) return { text, redacted: false, mode: "shared" };
+  // The owner's lines are the room's own. Another bot's line, even in a room the caller belongs to, is read through that
+  // bot's visibility, which is how the group context (`groupHistory`) shows it: no reader shows a member more than that.
+  if (row.from_type === "user" && isChannelParticipant(db, channel, callerAgentID)) return { text, redacted: false, mode: "shared" };
   const { owner, visibility } = rowAuthority(db, channel, row);
   return redactForCaller(text, owner, callerKey(callerAgentID), visibility);
 }

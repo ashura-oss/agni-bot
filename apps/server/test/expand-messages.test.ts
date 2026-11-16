@@ -105,12 +105,16 @@ describe("expand(kind=messages): another bot's channel", () => {
     expect(view.messages[0]!.text).toContain("END-OF-WORKING");
   });
 
-  test("a member of a group channel reads it in full even when the group's primary bot is a summary bot", async () => {
+  test("a member of a group channel reads the owner's line in full, and a summary bot's line as one line, whoever the group's primary bot is", async () => {
     db = openDatabase(":memory:");
     createAgentPersona(db, { name: "Kid", prompt: "p", visibility: "summary" }, []);
     const group = createGroupChannel(db, "team", ["kid", "ea"]);
-    const anchor = say(db, group.id, long, 0, "kid");
-    const view = await expandAs(db, "ea", { kind: "messages", id: anchor });
-    expect(view.messages[0]!.text).toContain("END-OF-WORKING");
+    const theirs = say(db, group.id, long, 0, "kid");
+    const mine = say(db, group.id, long, 600);
+    const kidLine = await expandAs(db, "ea", { kind: "messages", id: theirs });
+    expect(kidLine.messages[0]!.text).not.toContain("END-OF-WORKING");
+    expect(kidLine.messages[0]!.text.length).toBeLessThanOrEqual(SUMMARY_MAX_CHARS + 1);
+    const ownerLine = await expandAs(db, "ea", { kind: "messages", id: mine });
+    expect(ownerLine.messages[0]!.text).toContain("END-OF-WORKING");
   });
 });
