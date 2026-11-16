@@ -55,9 +55,10 @@ const RECORD_LIMIT = 10;
 /** The argument that says what a call was about, in the order a person would name it. */
 const TARGET_KEYS = ["path", "command", "to", "recipients", "attendees", "url", "title", "name", "toAgentID", "query"] as const;
 
-/** Characters the record is built from, shown as escapes inside a target so a path cannot imitate its structure. */
-const STRUCTURE_CHARS = /[\[\];]/g;
-const neutralise = (text: string): string => text.replace(STRUCTURE_CHARS, (ch) => `\\u${ch.charCodeAt(0).toString(16).toUpperCase().padStart(4, "0")}`);
+/** A tool is named only when it looks like one (registry names, mcp_ names included); anything else is a placeholder. */
+function toolLabel(name: string): string {
+  return /^[a-z0-9_]{1,64}$/.test(name) ? name : "unknown_tool";
+}
 
 function targetOf(args: unknown): string {
   if (typeof args !== "object" || args === null) return "";
@@ -65,7 +66,9 @@ function targetOf(args: unknown): string {
   for (const key of TARGET_KEYS) {
     const value = record[key];
     if (value === undefined || value === null || value === "") continue;
-    return neutralise(entry(Array.isArray(value) ? value.map((item) => (typeof item === "string" ? item : JSON.stringify(item))).join(", ") : value, 80));
+    // Cleaned and cut by the card sanitiser, then quoted: inside quotes (with its own quotes and
+      // backslashes escaped) a target cannot end its entry, start another or open a section.
+      return JSON.stringify(entry(Array.isArray(value) ? value.map((item) => (typeof item === "string" ? item : JSON.stringify(item))).join(", ") : value, 80));
   }
   return "";
 }
@@ -122,7 +125,7 @@ function recordOf(db: Database, turnID: string): string {
     let args: unknown = {};
     try { args = JSON.parse(row.args); } catch { /* an unreadable call is listed by name only */ }
     const target = targetOf(args);
-    return { bucket, text: `${entry(row.tool_name, 60)}${target ? ` ${target}` : ""} (${outcome})` };
+    return { bucket, text: `${toolLabel(row.tool_name)}${target ? ` ${target}` : ""} (${outcome})` };
   });
   let shown = 0;
   const parts: string[] = [];
