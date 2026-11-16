@@ -90,7 +90,11 @@ describe("routes that need a paired device", () => {
       const response = await fetch(`${dast.base}/`, { method, body: "x" });
       expect({ method, status: response.status }).toEqual({ method, status: 404 });
     }
-    expect((await fetch(`${dast.base}/share/${"a".repeat(32)}`, { method: "POST", body: "x" })).status).toBe(405);
+    // Auth comes before the method check (decision, S3-9): an unpaired POST to a share link is 401, so the
+    // route's methods are not revealed to a caller who is not paired. A paired device is told 405.
+    const shareURL = `${dast.base}/share/${"a".repeat(32)}`;
+    expect((await fetch(shareURL, { method: "POST", body: "x" })).status).toBe(401);
+    expect((await fetch(shareURL, { method: "POST", body: "x", headers: { authorization: `Bearer ${dast.harness.token}` } })).status).toBe(405);
   });
 });
 
