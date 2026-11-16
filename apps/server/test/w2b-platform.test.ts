@@ -4,7 +4,8 @@
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDatabase } from "../src/db";
@@ -78,7 +79,47 @@ describe("W2-B 9: a database kept outside AGNI_HOME gets an owner-only folder on
     }
   });
 
-  test.skipIf(process.platform !== "win32")("a folder inside the home, a database nobody configured, and a drive root are left alone", () => {
+  /** Lines of `icacls` for a path that still inherit from the parent. */
+  const inherited = (path: string): number =>
+    execFileSync(windowsSystemTool("icacls"), [path], { encoding: "utf8", windowsHide: true }).split("\n").filter((line) => line.includes("(I)")).length;
+
+  test.skipIf(process.platform !== "win32")("an existing empty folder is secured too", () => {
+    const root = mkdtempSync(join(tmpdir(), "agni-w2b-db-"));
+    try {
+      process.env.AGNI_HOME = join(root, "home");
+      const empty = join(root, "empty");
+      mkdirSync(empty);
+      process.env.AGNI_DB_PATH = join(empty, "agni.sqlite");
+      db = openDatabase(process.env.AGNI_DB_PATH);
+      db.close(); db = undefined;
+      expect(isOwnerOnlyDirectory(empty)).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test.skipIf(process.platform !== "win32")("a folder that already holds other files is left alone; only the database files are secured", () => {
+    const root = mkdtempSync(join(tmpdir(), "agni-w2b-db-"));
+    try {
+      process.env.AGNI_HOME = join(root, "home");
+      const shared = join(root, "shared");
+      mkdirSync(shared);
+      const neighbour = join(shared, "notes.txt");
+      writeFileSync(neighbour, "not ours");
+      process.env.AGNI_DB_PATH = join(shared, "agni.sqlite");
+      db = openDatabase(process.env.AGNI_DB_PATH);
+      db.run("CREATE TABLE IF NOT EXISTS w (x)");
+      db.run("INSERT INTO w VALUES (1)");
+      expect(isOwnerOnlyDirectory(shared)).toBe(false);
+      expect(inherited(neighbour)).toBeGreaterThan(0);
+      expect(inherited(process.env.AGNI_DB_PATH)).toBe(0);
+      db.close(); db = undefined;
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test.skipIf(process.platform !== "win32")("a folder inside the home and a database nobody configured are left alone", () => {
     const root = mkdtempSync(join(tmpdir(), "agni-w2b-db-"));
     try {
       process.env.AGNI_HOME = join(root, "home");
@@ -88,11 +129,11 @@ describe("W2-B 9: a database kept outside AGNI_HOME gets an owner-only folder on
       db.close(); db = undefined;
       expect(isOwnerOnlyDirectory(inside)).toBe(false);
 
-      // Not the configured path (a test, a tool): no folder changes.
       const other = join(root, "other");
       db = openDatabase(join(other, "agni.sqlite"));
       db.close(); db = undefined;
       expect(isOwnerOnlyDirectory(other)).toBe(false);
+      expect(existsSync(join(other, "agni.sqlite"))).toBe(true);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
