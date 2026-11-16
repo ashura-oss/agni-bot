@@ -3,6 +3,7 @@ import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { PROTOCOL_VERSION } from "@agni/protocol";
 import { installFakeMailNetwork, type FakeMailNetwork } from "../injection/fake-mail-network";
+import { lockVault, unlockVault } from "../../src/secrets";
 import { startDast, type Dast } from "./dast-harness";
 
 /**
@@ -11,8 +12,10 @@ import { startDast, type Dast } from "./dast-harness";
  * looks for them in the vault, the database, the log, the frames the owner's
  * client received, and every other file under the home.
  *
- *   - "the key is kept in the vault file" needs S3-01..03 (the vault) and fails until it exists.
- *   - "found nowhere in plaintext" needs the same: today the key is written to config.env.
+ * The home is in vault mode (`AGNI_SECRETS_MODE=vault`, the state `agni vault migrate`
+ * leaves it in) with the vault unlocked on the test keystore, so no real credential store
+ * is touched. A home still in the default file mode keeps its keys in `config.env` until
+ * the owner migrates; that is a product decision, not something this test can assume.
  */
 
 const SCRIPT = resolve(import.meta.dir, "../../../../scripts/canary-scan.ts");
@@ -25,6 +28,7 @@ const restoreConsole: Array<() => void> = [];
 const savedEnv: Record<string, string | undefined> = {};
 
 afterEach(async () => {
+  lockVault();
   for (const restore of restoreConsole.splice(0)) restore();
   network?.restore();
   network = undefined;
@@ -90,9 +94,12 @@ function scan(server: Dast, extra: string[]): { code: number; out: string; err: 
 describe("secrets entered through the socket (exit test 1)", () => {
   async function run(): Promise<{ server: Dast; frames: string; logFile: string }> {
     savedEnv.GROQ_API_KEY = Bun.env.GROQ_API_KEY;
+    savedEnv.AGNI_SECRETS_MODE = Bun.env.AGNI_SECRETS_MODE;
     network = installFakeMailNetwork();
     const log = captureLog();
     dast = await startDast({ files: true });
+    Bun.env.AGNI_SECRETS_MODE = "vault";
+    await unlockVault({ home: dast.home, create: true });
     const frames = await enterSecrets(dast);
     const framesFile = join(dast.home, "frames.jsonl");
     writeFileSync(framesFile, `${frames.join("\n")}\n`);
