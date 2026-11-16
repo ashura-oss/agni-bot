@@ -82,6 +82,7 @@ import type { PluginService } from "../plugins/service";
 import { pluginMailResolver } from "../plugins/credentials";
 import type { FrameLog } from "./frame-log";
 import { buildConversationHistory } from "./history";
+import { replayButtons } from "./approval-replay";
 import { cancelTurn, cancelTurnsForDevice, isServerStopping, registerTurn, unregisterTurn } from "./turn-registry";
 import { activateAppearanceProfile, deleteAppearanceProfile, listAppearanceProfiles, saveAppearanceProfile } from "../stores/appearance";
 import { getRoutineByJobID, listRuns, updateRoutineState } from "../stores/routines";
@@ -363,11 +364,12 @@ function handleHello(deps: DispatchDeps, session: Session, frame: Extract<Client
     }
     // H36: the same for approval and form cards a turn in this process is still waiting on.
     // Only a card whose turn is still running can be answered; a dead one stays quiet (S1-05).
-    for (const approval of deps.db.query<{ id: string; action: string; preview: string; thread_id: string | null; turn_id: string | null }, [string]>(
-      "SELECT id, action, preview, thread_id, turn_id FROM approvals WHERE status = 'pending' AND created_at >= ? ORDER BY created_at",
+    for (const approval of deps.db.query<{ id: string; action: string; preview: string; thread_id: string | null; turn_id: string | null; call_id: string | null; tool_name: string | null }, [string]>(
+      "SELECT id, action, preview, thread_id, turn_id, call_id, tool_name FROM approvals WHERE status = 'pending' AND created_at >= ? ORDER BY created_at",
     ).all(PROCESS_STARTED_AT)) {
       if (!cardIsLive(deps.db, approval.thread_id, approval.turn_id)) continue;
-      deps.reply({ type: "approval.request", requestID: approval.id, action: approval.action, preview: approval.preview, buttons: ["once", "always", "reject"] });
+      // The same buttons the broker offered: no "always" where the call cannot be remembered.
+      deps.reply({ type: "approval.request", requestID: approval.id, action: approval.action, preview: approval.preview, buttons: replayButtons(deps.db, approval) });
     }
     for (const { id } of deps.db.query<{ id: string }, [string]>(
       "SELECT id FROM forms WHERE status = 'pending' AND created_at >= ? ORDER BY created_at",
