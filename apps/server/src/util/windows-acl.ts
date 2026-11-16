@@ -4,29 +4,32 @@ import { win32 } from "node:path";
 
 const runFile = promisify(execFile);
 
-const DEFAULT_SYSTEM_ROOT = "C:\\Windows";
-
 /**
  * Absolute path of a Windows system tool under `%SystemRoot%\System32`.
  *
  * System tools are never called by bare name: PATH order decides what runs
  * (Git Bash puts GNU `whoami`, which rejects `/user`, ahead of the Windows
  * one) and a planted executable earlier on PATH would run with the owner's
- * rights. `SystemRoot` (or `windir`) must be an absolute drive path; anything
- * else falls back to `C:\Windows`.
+ * rights. `SystemRoot` (or `windir`) must be an absolute drive path. If
+ * neither is, this throws rather than guess `C:\Windows`: a guessed path on a
+ * drive that is not the system drive could hold a planted executable.
  */
 export function windowsSystemTool(
   name: "whoami" | "icacls",
   env: Record<string, string | undefined> = process.env,
 ): string {
-  const configured = env.SystemRoot || env.windir || env.SYSTEMROOT || env.WINDIR;
-  const root = configured && /^[A-Za-z]:[\\/]/.test(configured) ? configured : DEFAULT_SYSTEM_ROOT;
+  const root = [env.SystemRoot, env.windir, env.SYSTEMROOT, env.WINDIR].find((value) => value && /^[A-Za-z]:[\\/]/.test(value));
+  if (!root) throw new Error("Cannot locate the Windows system directory: SystemRoot is not set to an absolute drive path.");
   return win32.join(root, "System32", `${name}.exe`);
 }
 
-/** The SID in `whoami /user /fo csv /nh` output. */
+/**
+ * The SID in `whoami /user /fo csv /nh` output: the second field of
+ * `"domain\user","S-1-..."`. The first field is an account name the user
+ * chose, and could itself look like a SID.
+ */
 export function parseSid(output: string): string {
-  const sid = output.match(/S-1-\d+(?:-\d+)+/)?.[0];
+  const sid = output.match(/^\s*"[^"]*","(S-1-\d+(?:-\d+)+)"\s*$/m)?.[1];
   if (!sid) throw new Error("Could not identify the owner of the private path.");
   return sid;
 }
@@ -47,7 +50,7 @@ export function icaclsArgs(path: string, sid: string, isDirectory: boolean): str
   // icacls reads a leading "/" as a switch ("/tmp" is not a path to it), so
   // the target is always a drive-absolute path.
   // (OI)(CI) makes files created later in a directory inherit owner-only access.
-  return [win32.resolve(path),"/inheritance:r", "/grant:r", `*${sid}:${isDirectory ? "(OI)(CI)" : ""}F`];
+  return [win32.resolve(path), "/inheritance:r", "/grant:r", `*${sid}:${isDirectory ? "(OI)(CI)" : ""}F`];
 }
 
 /** Windows: owner-only ACL on `path`. Elsewhere: nothing (callers keep their chmod). */

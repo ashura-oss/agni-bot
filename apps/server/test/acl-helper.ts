@@ -32,6 +32,33 @@ export function expectOwnerOnlyAcl(path: string): void {
   }
 }
 
+/**
+ * Run `fn` with SystemRoot pointing at a drive-absolute path that has no
+ * System32, so every icacls/whoami call fails the way it does on a volume
+ * that cannot hold ACLs. Windows only: elsewhere the ACL step is a no-op.
+ */
+export function withFailingAcl<T>(fn: () => T): T {
+  const saved = process.env.SystemRoot;
+  process.env.SystemRoot = "C:\\agni-no-such-windows";
+  try {
+    return fn();
+  } finally {
+    if (saved === undefined) delete process.env.SystemRoot;
+    else process.env.SystemRoot = saved;
+  }
+}
+
+export async function withFailingAclAsync<T>(fn: () => Promise<T>): Promise<T> {
+  const saved = process.env.SystemRoot;
+  process.env.SystemRoot = "C:\\agni-no-such-windows";
+  try {
+    return await fn();
+  } finally {
+    if (saved === undefined) delete process.env.SystemRoot;
+    else process.env.SystemRoot = saved;
+  }
+}
+
 /** The owner-only assertion for the platform: an ACL on Windows, mode bits elsewhere. */
 export function expectPrivate(path: string, posixMode: number): void {
   if (process.platform === "win32") expectOwnerOnlyAcl(path);

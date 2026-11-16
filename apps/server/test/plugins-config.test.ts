@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { loadPluginsFile, savePluginsFile } from "../src/plugins/config";
 import { windowsSystemTool } from "../src/util/windows-acl";
-import { expectPrivate } from "./acl-helper";
+import { expectPrivate, withFailingAcl } from "./acl-helper";
 
 const dir = () => mkdtempSync(join(tmpdir(), "agni-plugins-config-"));
 
@@ -34,5 +34,33 @@ describe("plugins.json", () => {
     savePluginsFile(path, { version: 1, plugins: {} });
     expectPrivate(path, 0o600);
     expect(loadPluginsFile(path).version).toBe(1);
+  });
+
+  test("a directory deleted and recreated while the server runs is secured again", () => {
+    const parent = dir();
+    const path = join(parent, "private", "plugins.json");
+    savePluginsFile(path, { version: 1, plugins: {} });
+    rmSync(dirname(path), { recursive: true, force: true });
+    savePluginsFile(path, { version: 1, plugins: { gmail: { account: "owner", enabled: true, auth: { kind: "api-key", key: "k" } } } });
+    expectPrivate(dirname(path), 0o700);
+    expectPrivate(path, 0o600);
+  });
+
+  // Windows only: elsewhere the ACL step is a no-op, so there is nothing to fail.
+  test.skipIf(process.platform !== "win32")("when the ACL cannot be set, the log does not claim a .corrupt copy that was not made", () => {
+    const path = join(dir(), "plugins.json");
+    writeFileSync(path, '{"version":1,"plugins":{"gmail":{"auth":{"pass":"se');
+    const lines: string[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => { lines.push(args.join(" ")); };
+    try {
+      withFailingAcl(() => loadPluginsFile(path));
+    } finally {
+      console.error = realError;
+    }
+    expect(existsSync(`${path}.corrupt`)).toBe(false);
+    const message = lines.join("\n");
+    expect(message).toContain("unreadable");
+    expect(message).not.toContain("kept a copy");
   });
 });

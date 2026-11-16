@@ -9,9 +9,9 @@ describe("windowsSystemTool", () => {
     expect(windowsSystemTool("icacls", { windir: "E:\\NT" })).toBe("E:\\NT\\System32\\icacls.exe");
   });
 
-  test("falls back to C:\\Windows when the environment is missing or not an absolute drive path", () => {
+  test("refuses to guess a system root when the environment is missing or not an absolute drive path", () => {
     for (const env of [{}, { SystemRoot: "" }, { SystemRoot: "Windows" }, { SystemRoot: "..\\evil" }, { SystemRoot: "\\\\host\\share" }]) {
-      expect(windowsSystemTool("whoami", env)).toBe("C:\\Windows\\System32\\whoami.exe");
+      expect(() => windowsSystemTool("whoami", env)).toThrow(/SystemRoot/);
     }
   });
 });
@@ -30,8 +30,15 @@ describe("parseSid", () => {
   test("reads the SID from whoami's csv output", () => {
     expect(parseSid('"desktop\\owner","S-1-5-21-111-222-333-1001"\r\n')).toBe("S-1-5-21-111-222-333-1001");
   });
+  test("takes the SID from the second field, not an account name that looks like one", () => {
+    expect(parseSid('"S-1-1-0","S-1-5-21-111-222-333-1001"\r\n')).toBe("S-1-5-21-111-222-333-1001");
+  });
   test("rejects output without a SID", () => {
     expect(() => parseSid("desktop\n")).toThrow(/owner/);
+  });
+  test("rejects a SID-shaped text that is not the second field", () => {
+    expect(() => parseSid('"S-1-1-0"\r\n')).toThrow(/owner/);
+    expect(() => parseSid('"desktop\\owner","not a sid S-1-1-0"\r\n')).toThrow(/owner/);
   });
 });
 

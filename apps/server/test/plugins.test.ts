@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import type { PluginInfo, ServerFrameBody } from "@agni/protocol";
 import { openDatabase } from "../src/db";
 import { PluginService } from "../src/plugins/service";
@@ -15,12 +15,13 @@ import { CATALOG, manifestFor } from "../src/plugins/catalog";
 import { mailCredentialsFromPlugins, pluginMailResolver } from "../src/plugins/credentials";
 import { resolveMailConfig } from "../src/tools/mail";
 import type { Config } from "../src/config";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 /** A private scratch directory per run, never a fixed path under the shared temp root. */
 const pluginsDir = mkdtempSync(join(tmpdir(), "agni-plugins-test-"));
+afterAll(() => rmSync(pluginsDir, { recursive: true, force: true }));
 
 function fakeConfig(overrides: Partial<Config> = {}): Config {
   return {

@@ -49,7 +49,7 @@ interface TokenResponse {
 }
 
 export class ChatGPTAuthError extends Error {
-  constructor(message: string) { super(message); this.name = "ChatGPTAuthError"; }
+  constructor(message: string, options?: ErrorOptions) { super(message, options); this.name = "ChatGPTAuthError"; }
 }
 
 export class ChatGPTAuth {
@@ -393,7 +393,7 @@ export class ChatGPTAuth {
       await mkdir(directory, { recursive: true, mode: 0o700 });
       await chmod(directory, 0o700);
       try { await restrictToOwnerOnWindowsAsync(directory, true); }
-      catch { throw new ChatGPTAuthError("Could not secure the ChatGPT credential directory."); }
+      catch (cause) { throw new ChatGPTAuthError("Could not secure the ChatGPT credential directory.", { cause }); }
       const temporary = `${path}.${randomUUID()}.tmp`;
       try { await writeFile(temporary, contents, { mode: 0o600, flag: "wx" }); await chmod(temporary, 0o600); await rename(temporary, path); }
       finally { await unlink(temporary).catch(() => {}); }
