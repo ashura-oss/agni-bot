@@ -147,8 +147,10 @@ export const MessageInfoSchema = z.object({
   uiHint: z.string().optional(),
   /**
    * How the turn that produced an assistant message ended (`end`, `cancelled`,
-   * `error`, `timeout`, `budget`, ...); absent for other roles and for a turn
-   * still running. Additive in v2.
+   * `error`, `timeout`, `budget`, ...); absent for a turn still running. On the
+   * owner's own message it is set only when that message's turn ended without
+   * writing a reply, so a stop before any text can be shown after a reload.
+   * Additive in v2.
    */
   stopReason: z.string().optional(),
 });

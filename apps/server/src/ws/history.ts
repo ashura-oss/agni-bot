@@ -20,7 +20,10 @@ export interface HistoryMessage {
   uiHint?: string;
   attachments?: AttachmentInfo[];
   toAgentId?: string;
-  /** How the turn behind an assistant message ended; absent while it runs and for other roles. */
+  /**
+   * How the turn behind an assistant message ended; absent while it runs. On the owner's own message it is set only
+   * when its turn was stopped before any reply was written (a stop, an error, a timeout, a spend stop).
+   */
   stopReason?: string;
 }
 
@@ -173,6 +176,16 @@ export function buildConversationHistory(db: Database, conversationID: string, l
       messages.push(messageData);
       seen.set(key, [...(seen.get(key) ?? []), messages.length - 1]);
     }
+  }
+  // A turn stopped before it wrote anything leaves no assistant row to carry its stop reason, so the owner's own
+  // row (which names the turn) carries it, and the app can show "No reply, stopped" after a reload.
+  const answered = new Set<string>();
+  threadRows.forEach((row, index) => { const turn = turnOfThreadRow[index]; if (turn && row.role === "assistant") answered.add(turn); });
+  for (const row of channelRows) if (row.turn_id && row.from_type !== "user" && row.from_type !== "system") answered.add(row.turn_id);
+  for (const message of messages) {
+    if (message.role !== "user" || !message.turnID || answered.has(message.turnID)) continue;
+    const reason = stopReasons.get(message.turnID);
+    if (reason && reason !== "end" && reason !== "needs_input") message.stopReason = reason;
   }
   // Oldest first; rows with the same time keep the order they were read in.
   messages.sort((a, b) => a.createdAt.localeCompare(b.createdAt));

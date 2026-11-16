@@ -75,7 +75,7 @@ import {
   type AgentMemoryRow,
 } from "../stores/agent-memories";
 import { getConflict, listConflicts, resolveConflict } from "../stores/conflicts";
-import { appendChannelMessage, channelAgentIDs, createGroupChannel, ensureDMChannel, getChannel, listGroupChannels, type ChannelRow } from "../stores/channels";
+import { appendChannelMessage, channelAgentIDs, createGroupChannel, ensureDMChannel, getChannel, listGroupChannels, setChannelMessageTurn, type ChannelRow } from "../stores/channels";
 import { groupContextBlock, groupHistory, groupResponder } from "../agent/group";
 import { canonicalURL, saveLink, searchLinks } from "../stores/links";
 import { buildShareDocument, publishShare, shareBaseURL } from "../share/document";
@@ -962,10 +962,12 @@ async function runUserMessage(
     });
   }
   if (!attachments.length && (isCapture(routedText) || isStoreQuery(routedText))) {
-    detach(deps, session, "capture", captureMessage(deps, session, thread, persona.id, routedText));
+    detach(deps, session, "capture", captureMessage(deps, session, thread, persona.id, routedText, userMessageID));
     return;
   }
   const turnID = newID("trn");
+  // The owner's row names the turn it started, so a reload can show how that turn ended even if it wrote nothing.
+  if (userMessageID) setChannelMessageTurn(deps.db, userMessageID, turnID);
   const controller = new AbortController();
   // Server-wide, not per connection: the turn outlives this socket and any
   // device may cancel it.
@@ -1037,12 +1039,13 @@ function isStoreQuery(text: string): boolean {
   return /^\s*(search memory|search memories|search links|find saved links|what do you remember|list tasks|what tasks)\s*:?/i.test(text);
 }
 
-async function captureMessage(deps: DispatchDeps, session: Session, thread: ThreadRow, agentID: string, text: string): Promise<void> {
+async function captureMessage(deps: DispatchDeps, session: Session, thread: ThreadRow, agentID: string, text: string, userMessageID?: string): Promise<void> {
   const threadID = thread.id;
   const conversationID = thread.conversation_id ?? undefined;
   const turnID = newID("trn");
   try {
     createTurn(deps.db, { id: turnID, threadID, agentID });
+    if (userMessageID) setChannelMessageTurn(deps.db, userMessageID, turnID);
     appendMessage(deps.db, { threadID, turnID, role: "user", text });
     titleThreadFromFirstMessage(deps.db, threadID, text);
     deps.emit({ type: "turn.start", turnID, threadID, agentID, ...(conversationID ? { conversationID } : {}) });
