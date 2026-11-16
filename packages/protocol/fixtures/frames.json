@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-10-19T05:18:09.569Z",
+  "generatedAt": "2026-11-16T13:32:45.972Z",
   "protocolVersion": 2,
   "client": [
     {
@@ -83,6 +83,13 @@
       "limit": 50
     },
     {
+      "type": "approval.rules.list"
+    },
+    {
+      "type": "approval.rule.revoke",
+      "id": "rul_01hq"
+    },
+    {
       "type": "job.set",
       "jobID": "job_01hq",
       "action": "pause"
@@ -138,6 +145,233 @@
       "type": "agent.rename",
       "agentId": "agni",
       "name": "Agni Prime"
+    },
+    {
+      "type": "channel.create",
+      "name": "Launch",
+      "agentIds": [
+        "ea",
+        "researcher"
+      ]
+    },
+    {
+      "type": "channel.list"
+    },
+    {
+      "type": "channel.history",
+      "channelId": "chn_01hq",
+      "limit": 50
+    },
+    {
+      "type": "provider.auth.status",
+      "providerID": "chatgpt"
+    },
+    {
+      "type": "provider.auth.start",
+      "providerID": "chatgpt",
+      "accountID": "acct_01hq"
+    },
+    {
+      "type": "provider.auth.cancel",
+      "providerID": "chatgpt",
+      "loginID": "login_01hq"
+    },
+    {
+      "type": "provider.auth.disconnect",
+      "providerID": "chatgpt",
+      "accountID": "acct_01hq"
+    },
+    {
+      "type": "provider.auth.select",
+      "providerID": "chatgpt",
+      "accountID": "acct_01hq"
+    },
+    {
+      "type": "provider.auth.acknowledge",
+      "providerID": "chatgpt",
+      "accountID": "acct_01hq"
+    },
+    {
+      "type": "secret.reply",
+      "requestID": "sec_01hq",
+      "value": "fixture-secret"
+    },
+    {
+      "type": "secret.cancel",
+      "requestID": "sec_01hq"
+    },
+    {
+      "type": "routine.domains.set",
+      "jobID": "job_01hq",
+      "domains": [
+        "example.com",
+        "news.example.org"
+      ]
+    },
+    {
+      "type": "task.create",
+      "title": "Renew insurance",
+      "dueAt": "2026-10-17T01:00:00.000Z",
+      "priority": "high"
+    },
+    {
+      "type": "task.list.create",
+      "name": "Home"
+    },
+    {
+      "type": "task.activity",
+      "taskID": "tsk_01hq"
+    },
+    {
+      "type": "memory.list",
+      "scope": "agent",
+      "limit": 50
+    },
+    {
+      "type": "memory.update",
+      "id": "mem_01hq",
+      "text": "Prefers short answers in the morning."
+    },
+    {
+      "type": "memory.pin",
+      "id": "mem_01hq",
+      "pinned": true
+    },
+    {
+      "type": "memory.forget",
+      "id": "mem_01hq"
+    },
+    {
+      "type": "memory.conflicts.list",
+      "limit": 20
+    },
+    {
+      "type": "memory.conflict.resolve",
+      "id": "mcf_01hq",
+      "keepId": "mem_01hq"
+    },
+    {
+      "type": "task.answer",
+      "taskID": "tsk_01hq",
+      "questionID": "qst_01hq",
+      "text": "Use the blue folder."
+    },
+    {
+      "type": "bind.direct",
+      "agentID": "researcher"
+    },
+    {
+      "type": "appearance.list"
+    },
+    {
+      "type": "appearance.save",
+      "profile": {
+        "version": 1,
+        "id": "theme_01hq",
+        "name": "Evening",
+        "mode": "dark",
+        "preset": "midnight",
+        "accent": "ember",
+        "background": {
+          "kind": "gradient",
+          "from": "#101820",
+          "to": "#1c2b3a",
+          "angle": 135
+        },
+        "textScale": "default",
+        "density": "comfortable",
+        "corners": "standard",
+        "motion": "system",
+        "agentTint": "subtle",
+        "updatedAt": "2026-11-01T10:00:00.000Z"
+      },
+      "activate": true
+    },
+    {
+      "type": "appearance.activate",
+      "id": "theme_01hq"
+    },
+    {
+      "type": "appearance.delete",
+      "id": "theme_01hq"
+    },
+    {
+      "type": "plugin.configure",
+      "pluginID": "gmail",
+      "account": "agent",
+      "clientID": "fixture-client",
+      "clientSecret": "fixture-secret"
+    },
+    {
+      "type": "agent.profile",
+      "agentId": "researcher",
+      "role": "finds sources",
+      "visibility": "summary",
+      "model": null,
+      "critic": null
+    },
+    {
+      "type": "agent.create",
+      "name": "Scout",
+      "prompt": "You find sources and summarise them.",
+      "role": "researcher",
+      "color": "#7cc4ff"
+    },
+    {
+      "type": "form.answer",
+      "requestID": "frm_01hq",
+      "answer": "agent"
+    },
+    {
+      "type": "push.subscribe",
+      "subscription": {
+        "endpoint": "https://push.example.com/send/abc",
+        "keys": {
+          "p256dh": "fixture-p256dh",
+          "auth": "fixture-auth"
+        }
+      }
+    },
+    {
+      "type": "push.unsubscribe",
+      "endpoint": "https://push.example.com/send/abc"
+    },
+    {
+      "type": "push.vapid.get"
+    },
+    {
+      "type": "agent.proactivity",
+      "agentId": "agni",
+      "quietStart": "22:00",
+      "quietEnd": "07:00",
+      "maxPerDay": 3
+    },
+    {
+      "type": "approval.full",
+      "requestID": "apr_01hr"
+    },
+    {
+      "type": "policy.pause",
+      "paused": true
+    },
+    {
+      "type": "policy.pause",
+      "paused": false,
+      "agentID": "researcher"
+    },
+    {
+      "type": "agent.enabled.set",
+      "agentID": "researcher",
+      "enabled": false
+    },
+    {
+      "type": "spend.status"
+    },
+    {
+      "type": "spend.caps.set",
+      "dayUsd": 2,
+      "perBotDayUsd": 1,
+      "perJobUsd": 0.5
     }
   ],
   "server": [
@@ -606,6 +840,440 @@
       "agentId": "agni",
       "displayName": "Agni Prime",
       "onboarded": true
+    },
+    {
+      "type": "channel.created",
+      "seq": 72,
+      "channel": {
+        "id": "chn_01hq",
+        "name": "Launch",
+        "type": "group",
+        "agentIds": [
+          "ea",
+          "researcher"
+        ],
+        "createdAt": "2026-10-31T09:00:00.000Z"
+      }
+    },
+    {
+      "type": "channel.list.ok",
+      "seq": 73,
+      "channels": [
+        {
+          "id": "chn_01hq",
+          "name": "Launch",
+          "type": "group",
+          "agentIds": [
+            "ea",
+            "researcher"
+          ],
+          "createdAt": "2026-10-31T09:00:00.000Z"
+        }
+      ]
+    },
+    {
+      "type": "channel.history.ok",
+      "seq": 74,
+      "channelId": "chn_01hq",
+      "messages": [
+        {
+          "id": "chm_01hq",
+          "role": "user",
+          "text": "plan the launch",
+          "createdAt": "2026-10-31T09:01:00.000Z"
+        }
+      ]
+    },
+    {
+      "type": "approval.closed",
+      "seq": 75,
+      "requestID": "apr_01hq",
+      "kind": "approval",
+      "reason": "decided"
+    },
+    {
+      "type": "approval.rules.list.ok",
+      "seq": 76,
+      "rules": [
+        {
+          "id": "rul_01hq",
+          "agentID": "agni",
+          "agentName": "Agni",
+          "toolName": "bash",
+          "target": "ls -la",
+          "createdAt": "2026-10-23T09:00:00.000Z"
+        }
+      ]
+    },
+    {
+      "type": "approval.rule.revoke.ok",
+      "seq": 77,
+      "id": "rul_01hq"
+    },
+    {
+      "type": "approval.request",
+      "seq": 78,
+      "requestID": "apr_01hr",
+      "action": "send email to ann@example.org: Your report",
+      "preview": "To (1): ann@example.org\nsend email to ann@example.org: Your report\n\n\"first part of the body... [cut] ...last part of the body\"",
+      "buttons": [
+        "once",
+        "reject"
+      ],
+      "source": [
+        {
+          "kind": "web",
+          "label": "example.com/offers"
+        },
+        {
+          "kind": "email",
+          "label": "from bob@example.com, \"Invoice\""
+        }
+      ],
+      "tier": 2,
+      "expiresAt": "2026-11-16T12:10:00.000Z",
+      "truncated": true
+    },
+    {
+      "type": "approval.full.ok",
+      "seq": 79,
+      "requestID": "apr_01hr",
+      "text": "To: ann@example.org\nSubject: Your report\n\nThe whole body, uncut."
+    },
+    {
+      "type": "policy.pause.ok",
+      "seq": 80,
+      "paused": true,
+      "changedAt": "2026-11-16T12:00:00.000Z",
+      "stopped": 2,
+      "bots": [
+        {
+          "agentID": "ea",
+          "name": "Agni",
+          "enabled": true,
+          "runningTurns": 0,
+          "scheduledJobs": 1
+        },
+        {
+          "agentID": "researcher",
+          "name": "Scout",
+          "enabled": false,
+          "runningTurns": 0,
+          "scheduledJobs": 3
+        }
+      ]
+    },
+    {
+      "type": "spend.status.ok",
+      "seq": 81,
+      "day": "2026-11-16",
+      "resetsAt": "2026-11-17T00:00:00.000Z",
+      "timeZone": "UTC",
+      "caps": {
+        "dayUsd": 2,
+        "perBotDayUsd": 1,
+        "perJobUsd": 0.5
+      },
+      "daySpentUsd": 0.42,
+      "bots": [
+        {
+          "agentID": "ea",
+          "spentUsd": 0.3,
+          "capUsd": 1
+        },
+        {
+          "agentID": "researcher",
+          "spentUsd": 0.12,
+          "capUsd": 1
+        }
+      ],
+      "unpricedCalls": 0
+    },
+    {
+      "type": "secret.request",
+      "seq": 82,
+      "requestID": "sec_01hq",
+      "purpose": "Install the update",
+      "command": "sudo apt-get install -y fixture-package",
+      "kind": "password",
+      "expiresAt": "2026-11-16T12:05:00.000Z",
+      "threadID": "thr_01hq",
+      "conversationID": "cnv_01hq"
+    },
+    {
+      "type": "secret.cancel",
+      "seq": 83,
+      "requestID": "sec_01hq",
+      "reason": "expired"
+    },
+    {
+      "type": "task.create.ok",
+      "seq": 84,
+      "task": {
+        "id": "tsk_01hq",
+        "title": "Renew insurance",
+        "dueAt": "2026-10-17T01:00:00.000Z",
+        "priority": "high",
+        "status": "open",
+        "snoozedUntil": null,
+        "createdAt": "2026-10-16T12:00:00.000Z",
+        "updatedAt": "2026-10-16T12:00:00.000Z"
+      }
+    },
+    {
+      "type": "task.list.create.ok",
+      "seq": 85,
+      "lists": [
+        {
+          "id": "lst_01hq",
+          "name": "Home",
+          "position": 0,
+          "taskCount": 1
+        }
+      ]
+    },
+    {
+      "type": "task.activity.ok",
+      "seq": 86,
+      "taskID": "tsk_01hq",
+      "activity": [
+        {
+          "id": "act_01hq",
+          "actor": "owner",
+          "action": "created",
+          "detail": null,
+          "createdAt": "2026-10-16T12:00:00.000Z"
+        }
+      ]
+    },
+    {
+      "type": "memory.list.ok",
+      "seq": 87,
+      "memories": [
+        {
+          "id": "mem_01hq",
+          "text": "Prefers short answers in the morning.",
+          "scope": "global_user",
+          "visibility": "shared",
+          "source": "owner",
+          "confidence": 0.9,
+          "salience": 0.6,
+          "updatedAt": "2026-11-01T10:00:00.000Z",
+          "lastUsedAt": null,
+          "useCount": 3
+        }
+      ]
+    },
+    {
+      "type": "memory.update.ok",
+      "seq": 88,
+      "memory": {
+        "id": "mem_01hq",
+        "text": "Prefers short answers in the morning.",
+        "scope": "global_user",
+        "visibility": "shared",
+        "source": "owner",
+        "confidence": 0.9,
+        "salience": 0.6,
+        "updatedAt": "2026-11-01T10:00:00.000Z",
+        "lastUsedAt": null,
+        "useCount": 3
+      }
+    },
+    {
+      "type": "memory.pin.ok",
+      "seq": 89,
+      "memory": {
+        "id": "mem_01hq",
+        "text": "Prefers short answers in the morning.",
+        "scope": "global_user",
+        "visibility": "shared",
+        "source": "owner",
+        "confidence": 0.9,
+        "salience": 0.6,
+        "updatedAt": "2026-11-01T10:00:00.000Z",
+        "lastUsedAt": null,
+        "useCount": 3
+      }
+    },
+    {
+      "type": "memory.forget.ok",
+      "seq": 90,
+      "id": "mem_01hq",
+      "deleted": true
+    },
+    {
+      "type": "memory.conflicts.list.ok",
+      "seq": 91,
+      "conflicts": [
+        {
+          "id": "mcf_01hq",
+          "memoryId": "mem_01hq",
+          "previousId": "mem_01hp",
+          "content": "Lives in Pune.",
+          "previousContent": "Lives in Mumbai.",
+          "createdAt": "2026-11-01T10:00:00.000Z"
+        }
+      ]
+    },
+    {
+      "type": "memory.conflict.resolve.ok",
+      "seq": 92,
+      "id": "mcf_01hq",
+      "memory": {
+        "id": "mem_01hq",
+        "text": "Prefers short answers in the morning.",
+        "scope": "global_user",
+        "visibility": "shared",
+        "source": "owner",
+        "confidence": 0.9,
+        "salience": 0.6,
+        "updatedAt": "2026-11-01T10:00:00.000Z",
+        "lastUsedAt": null,
+        "useCount": 3
+      }
+    },
+    {
+      "type": "task.updated",
+      "seq": 93,
+      "task": {
+        "id": "tsk_01hq",
+        "title": "Renew insurance",
+        "dueAt": "2026-10-17T01:00:00.000Z",
+        "priority": "high",
+        "status": "snoozed",
+        "snoozedUntil": "2026-10-17T01:00:00.000Z",
+        "createdAt": "2026-10-16T12:00:00.000Z",
+        "updatedAt": "2026-10-16T12:00:00.000Z"
+      }
+    },
+    {
+      "type": "task.answer.ok",
+      "seq": 94,
+      "task": {
+        "id": "tsk_01hq",
+        "title": "Renew insurance",
+        "dueAt": "2026-10-17T01:00:00.000Z",
+        "priority": "high",
+        "status": "open",
+        "snoozedUntil": null,
+        "createdAt": "2026-10-16T12:00:00.000Z",
+        "updatedAt": "2026-10-16T12:00:00.000Z",
+        "delegateState": "running"
+      }
+    },
+    {
+      "type": "bind.direct.ok",
+      "seq": 95,
+      "agentID": "researcher",
+      "conversationID": "cnv_01hq",
+      "sessionID": "thr_01hq",
+      "channelID": "dm:researcher"
+    },
+    {
+      "type": "provider.auth.started",
+      "seq": 96,
+      "providerID": "chatgpt",
+      "loginID": "login_01hq",
+      "authorizeURL": "https://auth.example.com/authorize?state=fixture",
+      "expiresAt": "2026-11-16T12:10:00.000Z"
+    },
+    {
+      "type": "provider.auth.state",
+      "seq": 97,
+      "providerID": "chatgpt",
+      "connection": {
+        "status": "connected",
+        "accounts": [
+          {
+            "id": "acct_01hq",
+            "label": "owner@example.com",
+            "connected": true
+          }
+        ],
+        "activeAccountID": "acct_01hq",
+        "model": "gpt-fixture",
+        "models": [
+          {
+            "id": "gpt-fixture",
+            "label": "GPT Fixture"
+          }
+        ]
+      }
+    },
+    {
+      "type": "appearance.list.ok",
+      "seq": 98,
+      "profiles": [
+        {
+          "version": 1,
+          "id": "theme_01hq",
+          "name": "Evening",
+          "mode": "dark",
+          "preset": "midnight",
+          "accent": "ember",
+          "background": {
+            "kind": "gradient",
+            "from": "#101820",
+            "to": "#1c2b3a",
+            "angle": 135
+          },
+          "textScale": "default",
+          "density": "comfortable",
+          "corners": "standard",
+          "motion": "system",
+          "agentTint": "subtle",
+          "updatedAt": "2026-11-01T10:00:00.000Z"
+        }
+      ],
+      "activeID": "theme_01hq"
+    },
+    {
+      "type": "appearance.updated",
+      "seq": 99,
+      "profiles": [
+        {
+          "version": 1,
+          "id": "theme_01hq",
+          "name": "Evening",
+          "mode": "dark",
+          "preset": "midnight",
+          "accent": "ember",
+          "background": {
+            "kind": "gradient",
+            "from": "#101820",
+            "to": "#1c2b3a",
+            "angle": 135
+          },
+          "textScale": "default",
+          "density": "comfortable",
+          "corners": "standard",
+          "motion": "system",
+          "agentTint": "subtle",
+          "updatedAt": "2026-11-01T10:00:00.000Z"
+        }
+      ],
+      "activeID": "theme_01hq"
+    },
+    {
+      "type": "agent.presence",
+      "seq": 100,
+      "agentId": "researcher",
+      "state": "working",
+      "taskId": "tsk_01hq"
+    },
+    {
+      "type": "push.vapid",
+      "seq": 101,
+      "publicKey": "BFixtureVapidPublicKey"
+    },
+    {
+      "type": "agent.proactivity",
+      "seq": 102,
+      "agentId": "agni",
+      "quietStart": "22:00",
+      "quietEnd": "07:00",
+      "maxPerDay": 3
     }
   ]
 }

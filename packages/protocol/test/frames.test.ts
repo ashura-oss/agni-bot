@@ -297,3 +297,63 @@ describe("envelope helpers", () => {
     expect(isSupportedVersion(PROTOCOL_VERSION - 1)).toBe(false);
   });
 });
+
+describe("Sprint 2 frames (additive)", () => {
+  test("approval.request still parses without the new fields, and with them", () => {
+    const base = { type: "approval.request", seq: 1, requestID: "apr_1", action: "do it", preview: "preview", buttons: ["once", "reject"] };
+    expect(parseServerFrame(base).ok).toBe(true);
+    expect(parseServerFrame({
+      ...base,
+      source: [{ kind: "web", label: "example.com/offers" }, { kind: "scheduled" }],
+      tier: 2,
+      expiresAt: "2026-11-16T12:10:00.000Z",
+      truncated: true,
+    }).ok).toBe(true);
+  });
+
+  test("approval.request rejects an unknown source kind and a tier outside 0-3", () => {
+    const base = { type: "approval.request", seq: 1, requestID: "apr_1", action: "a", preview: "p", buttons: ["once"] };
+    expect(parseServerFrame({ ...base, source: [{ kind: "carrier-pigeon" }] }).ok).toBe(false);
+    expect(parseServerFrame({ ...base, tier: 4 }).ok).toBe(false);
+  });
+
+  test("approval.full needs a request id", () => {
+    expect(parseClientFrame({ type: "approval.full", requestID: "apr_1" }).ok).toBe(true);
+    expect(parseClientFrame({ type: "approval.full" }).ok).toBe(false);
+  });
+
+  test("policy.pause reads with no fields, pauses, or addresses one bot", () => {
+    expect(parseClientFrame({ type: "policy.pause" }).ok).toBe(true);
+    expect(parseClientFrame({ type: "policy.pause", paused: true }).ok).toBe(true);
+    expect(parseClientFrame({ type: "policy.pause", paused: false, agentID: "researcher" }).ok).toBe(true);
+    expect(parseClientFrame({ type: "policy.pause", paused: "yes" }).ok).toBe(false);
+  });
+
+  test("agent.enabled.set needs both fields", () => {
+    expect(parseClientFrame({ type: "agent.enabled.set", agentID: "researcher", enabled: false }).ok).toBe(true);
+    expect(parseClientFrame({ type: "agent.enabled.set", agentID: "researcher" }).ok).toBe(false);
+  });
+
+  test("spend.caps.set takes positive dollars or null, and leaves out what it does not change", () => {
+    expect(parseClientFrame({ type: "spend.caps.set", dayUsd: 2 }).ok).toBe(true);
+    expect(parseClientFrame({ type: "spend.caps.set", perJobUsd: null }).ok).toBe(true);
+    expect(parseClientFrame({ type: "spend.caps.set" }).ok).toBe(true);
+    expect(parseClientFrame({ type: "spend.caps.set", dayUsd: 0 }).ok).toBe(false);
+    expect(parseClientFrame({ type: "spend.caps.set", dayUsd: -1 }).ok).toBe(false);
+    expect(parseClientFrame({ type: "spend.caps.set", dayUsd: "2" }).ok).toBe(false);
+  });
+
+  test("an agent and an approval rule may carry the new optional fields", () => {
+    expect(parseServerFrame({ type: "agents.update", seq: 1, agents: [{ id: "ea", name: "Agni", enabled: false }] }).ok).toBe(true);
+    expect(parseServerFrame({
+      type: "approval.rules.list.ok", seq: 1,
+      rules: [{ id: "rul_1", agentID: "ea", agentName: "Agni", toolName: "write_file", target: "resource:reports/*", createdAt: "2026-11-16T00:00:00.000Z", resourcePattern: "reports/*" }],
+    }).ok).toBe(true);
+  });
+
+  test("policy.pause.ok and spend.status.ok parse", () => {
+    expect(parseServerFrame({ type: "policy.pause.ok", seq: 1, paused: false, stopped: 0, bots: [{ agentID: "ea", name: "Agni", enabled: true, runningTurns: 0, scheduledJobs: 0 }] }).ok).toBe(true);
+    expect(parseServerFrame({ type: "spend.status.ok", seq: 1, day: "2026-11-16", resetsAt: "2026-11-17T00:00:00.000Z", timeZone: "UTC", caps: { dayUsd: 2, perBotDayUsd: null, perJobUsd: 0.5 }, daySpentUsd: 0, bots: [], unpricedCalls: 0 }).ok).toBe(true);
+    expect(parseServerFrame({ type: "approval.full.ok", seq: 1, requestID: "apr_1", text: "everything" }).ok).toBe(true);
+  });
+});

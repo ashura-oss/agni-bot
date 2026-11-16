@@ -14,7 +14,11 @@
 import type { Database } from "bun:sqlite";
 import type { ServerFrameBody } from "@agni/protocol";
 import { log } from "../log";
-import { claimDueJob, finishJob, requeueJob, type JobRow } from "../stores/jobs";
+import { canonicalAgentID, defaultPersona } from "../agent/personas";
+import { isRunPaused } from "../policy/pause";
+import { claimDueJob, finishJob, parseJobPayload, requeueJob, type JobRow } from "../stores/jobs";
+import { getRoutine } from "../stores/routines";
+import { setDelegationState } from "../stores/tasks";
 
 export interface JobOutcome {
   /** Short human-readable note stored on the job row. */
@@ -39,6 +43,12 @@ export interface JobRegisterOptions {
 }
 
 const MAX_RETRY_DELAY_MS = 3_600_000;
+
+/**
+ * Kinds that start a bot's work. Only these stop for pause-all or a bot being off (S2-13); housekeeping
+ * (tagging, backups, embedding), task reminders and the morning brief start no bot and go on.
+ */
+const BOT_KINDS: ReadonlySet<string> = new Set(["turn", "routine"]);
 
 /** Kinds whose jobs are independent of each other; all others run one at a time. */
 export const PARALLEL_KINDS: ReadonlySet<string> = new Set(["turn", "routine", "task.reminder"]);
@@ -139,6 +149,7 @@ export class JobRunner {
       const job = claimDueJob(this.db, undefined, [...this.runningSingletons]);
       if (!job) break;
       ran += 1;
+      if (this.skipIfPaused(job)) continue;
       const singleton = !PARALLEL_KINDS.has(job.kind);
       if (singleton) this.runningSingletons.add(job.kind);
       try {
@@ -148,6 +159,46 @@ export class JobRunner {
       }
     }
     return ran;
+  }
+
+  /**
+   * S2-13: a claimed job of a paused or switched-off bot is not run. It is recorded as skipped and not run
+   * late on resume: a recurring job waits for its next slot, a one-shot is done. A delegation that is
+   * skipped is marked failed, so the bot waiting on it is told instead of waiting for ever.
+   */
+  private skipIfPaused(job: JobRow): boolean {
+    if (!BOT_KINDS.has(job.kind)) return false;
+    let verdict;
+    try {
+      verdict = isRunPaused({ agentID: jobAgentID(this.db, job) });
+    } catch (error) {
+      log.warn(`job ${job.id}: could not read the pause state, running it`, error);
+      return false;
+    }
+    if (!verdict.paused) return false;
+    const result = verdict.scope === "agent" ? "skipped (bot off)" : "skipped (paused)";
+    try {
+      const delegationID = parseJobPayload<{ delegationTaskID?: string }>(job).delegationTaskID;
+      if (delegationID) {
+        setDelegationState(this.db, delegationID, "failed", verdict.scope === "agent" ? "Not run: the owner turned this bot off." : "Not run: the owner paused all bots.");
+      }
+    } catch {
+      // An unreadable payload has no delegation to fail.
+    }
+    let next: string | null = null;
+    try {
+      next = this.nextRuns.get(job.kind)?.(job) ?? null;
+    } catch {
+      // A broken schedule cannot be skipped to; the job is closed below.
+    }
+    if (next) {
+      requeueJob(this.db, job.id, next);
+      this.db.run("UPDATE jobs SET attempts = 0, result = ? WHERE id = ?", [result, job.id]);
+    } else {
+      finishJob(this.db, job.id, "done", result);
+    }
+    log.info(`job ${job.id} (${job.kind}) ${result}${next ? `, next run ${next}` : ""}`);
+    return true;
   }
 
   private async execute(job: JobRow): Promise<void> {
@@ -211,6 +262,20 @@ export class JobRunner {
   private notify(title: string, body: string): void {
     this.emit({ type: "notify", title, body, sound: false });
   }
+}
+
+/** The bot a bot-kind job runs as: the turn's own agent (the main assistant when none is named) or its routine's. */
+function jobAgentID(db: Database, job: JobRow): string | null {
+  let payload: { agentID?: unknown; routineID?: unknown };
+  try {
+    payload = parseJobPayload(job);
+  } catch {
+    return null;
+  }
+  if (job.kind === "routine") {
+    return typeof payload.routineID === "string" ? (getRoutine(db, payload.routineID)?.agentID ?? null) : null;
+  }
+  return typeof payload.agentID === "string" && payload.agentID ? canonicalAgentID(payload.agentID) : defaultPersona().id;
 }
 
 function truncate(text: string, max: number): string {

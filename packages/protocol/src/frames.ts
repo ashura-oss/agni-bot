@@ -55,6 +55,11 @@ export const AgentInfoSchema = z.object({
    * `private` (a receipt only), `summary` (one line) or `shared` (full text).
    */
   visibility: z.enum(["private", "summary", "shared"]).optional(),
+  /**
+   * False when the owner turned this bot off (`agent.enabled.set`). Absent means on, so older
+   * servers and clients agree. Additive in v2.
+   */
+  enabled: z.boolean().optional(),
 });
 export type AgentInfo = z.infer<typeof AgentInfoSchema>;
 
@@ -253,8 +258,46 @@ export const ApprovalRuleInfoSchema = z.object({
   toolName: z.string(),
   target: z.string(),
   createdAt: z.string(),
+  /**
+   * Set when the rule matches by resource pattern (a path, address or host with `*` wildcards)
+   * instead of one exact target. Still one bot and one tool. Additive in v2.
+   */
+  resourcePattern: z.string().optional(),
 });
 export type ApprovalRuleInfo = z.infer<typeof ApprovalRuleInfoSchema>;
+
+/**
+ * What untrusted input a run read before an approval card was raised, newest first: the line
+ * "Ava read a web page earlier in this task: example.com/offers". `label` is already one clean line
+ * (a host and path without the query, an address and subject, a bot name); clients show it as text.
+ * Additive in v2.
+ */
+export const APPROVAL_SOURCE_KINDS = ["web", "email", "agent", "attachment", "connector", "scheduled", "unknown"] as const;
+export const ApprovalSourceSchema = z.object({
+  kind: z.enum(APPROVAL_SOURCE_KINDS),
+  label: z.string().max(300).optional(),
+});
+export type ApprovalSource = z.infer<typeof ApprovalSourceSchema>;
+
+/** One bot in a `policy.pause.ok`: whether it is on, and what turning it off would stop. */
+export const BotPauseStateSchema = z.object({
+  agentID: z.string().min(1),
+  name: z.string(),
+  enabled: z.boolean(),
+  /** Turns of this bot running right now (the "Ava's 2 running tasks will stop" count). */
+  runningTurns: z.number().int().nonnegative(),
+  /** Queued or recurring jobs of this bot that would be skipped while it is off. */
+  scheduledJobs: z.number().int().nonnegative(),
+});
+export type BotPauseState = z.infer<typeof BotPauseStateSchema>;
+
+/** The three spend caps in USD; null means no cap. */
+export const SpendCapsSchema = z.object({
+  dayUsd: z.number().positive().nullable(),
+  perBotDayUsd: z.number().positive().nullable(),
+  perJobUsd: z.number().positive().nullable(),
+});
+export type SpendCaps = z.infer<typeof SpendCapsSchema>;
 
 export const TaskStatusSchema = z.enum(["open", "done", "snoozed"]);
 export const TaskWorkflowStatusSchema = z.enum(["not_started", "in_progress", "ai_review"]);
@@ -510,6 +553,32 @@ export const ClientFrameSchema = z.discriminatedUnion("type", [
    * `not_found` when the id is unknown or already revoked. Additive in v2.
    */
   z.object({ type: z.literal("approval.rule.revoke"), id: z.string().min(1) }),
+  /**
+   * The full text behind an approval card whose preview was cut (`approval.request.truncated`);
+   * answered by `approval.full.ok`, or by an error `not_found` when the card is gone. Additive in v2.
+   */
+  z.object({ type: z.literal("approval.full"), requestID: z.string().min(1) }),
+  /**
+   * Pause or resume every bot, or read the pause state. `paused` true stops running work and starts
+   * nothing new, false resumes (bots turned off stay off); omit it to just read. With `agentID` it
+   * means that one bot: the same as `agent.enabled.set` with `enabled: !paused`. Answered by a
+   * broadcast `policy.pause.ok`. Additive in v2.
+   */
+  z.object({ type: z.literal("policy.pause"), paused: z.boolean().optional(), agentID: z.string().min(1).optional() }),
+  /** Turn one bot on or off. Off stops its running turns and skips its jobs; answered by `policy.pause.ok`. Additive in v2. */
+  z.object({ type: z.literal("agent.enabled.set"), agentID: z.string().min(1), enabled: z.boolean() }),
+  /** Read today's spend against the caps; answered by `spend.status.ok`. Additive in v2. */
+  z.object({ type: z.literal("spend.status") }),
+  /**
+   * Change any of the spend caps (a number of dollars above zero, or null for none); fields left out
+   * keep their value. Answered by a broadcast `spend.status.ok`, or an error `bad_cap`. Additive in v2.
+   */
+  z.object({
+    type: z.literal("spend.caps.set"),
+    dayUsd: z.number().positive().max(1_000_000).nullable().optional(),
+    perBotDayUsd: z.number().positive().max(1_000_000).nullable().optional(),
+    perJobUsd: z.number().positive().max(1_000_000).nullable().optional(),
+  }),
   /** Owner-only: replace a routine's web domain allowlist (additive v2). Bots cannot send this. */
   z.object({ type: z.literal("routine.domains.set"), jobID: z.string().min(1), domains: z.array(z.string().max(253)).max(20) }),
   /** Delete a task unless it is currently running. */
@@ -760,6 +829,14 @@ export const ServerFrameSchema = z.discriminatedUnion("type", [
     action: z.string(),
     preview: z.string(),
     buttons: z.array(DecisionSchema).min(1),
+    /** What untrusted input the run read before this call, newest first. Absent when it read none. Additive in v2. */
+    source: z.array(ApprovalSourceSchema).max(20).optional(),
+    /** How risky the call is: 1 undoable change, 2 sends data out or cannot be undone, 3 runs a command. Additive in v2. */
+    tier: z.number().int().min(0).max(3).optional(),
+    /** When the card expires (ISO time). Past it, the answer is no. Chat 10 minutes, background 30. Additive in v2. */
+    expiresAt: z.string().optional(),
+    /** The preview hides part of the call; the client asks for `approval.full` and the owner reads it before Allow. Additive in v2. */
+    truncated: z.boolean().optional(),
   }),
   /**
    * An `approval.request` or `form.request` card is no longer actionable:
@@ -881,6 +958,37 @@ export const ServerFrameSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("approval.rules.list.ok"), seq, rules: z.array(ApprovalRuleInfoSchema) }),
   /** Answer to `approval.rule.revoke`; addressed to the requester, not replayed. */
   z.object({ type: z.literal("approval.rule.revoke.ok"), seq, id: z.string() }),
+  /** Answer to `approval.full`; addressed to the requester, not replayed. `cut` is true when even this text hit the size limit. */
+  z.object({ type: z.literal("approval.full.ok"), seq, requestID: z.string(), text: z.string(), cut: z.boolean().optional() }),
+  /**
+   * The pause state: all bots paused or not, and every bot with its on/off state and what turning it off
+   * stops. Broadcast when it changes and sent to a client after hello; `stopped` is how many running
+   * turns the change that caused this frame stopped (0 for a read or a hello). Replayable. Additive in v2.
+   */
+  z.object({
+    type: z.literal("policy.pause.ok"),
+    seq,
+    paused: z.boolean(),
+    changedAt: z.string().optional(),
+    stopped: z.number().int().nonnegative(),
+    bots: z.array(BotPauseStateSchema),
+  }),
+  /**
+   * Today's spend against the caps (local day), answering `spend.status` and broadcast after
+   * `spend.caps.set`. `daySpentUsd` and the bots' `spentUsd` count priced calls only;
+   * `unpricedCalls` says how many calls had no price. Additive in v2.
+   */
+  z.object({
+    type: z.literal("spend.status.ok"),
+    seq,
+    day: z.string(),
+    resetsAt: z.string(),
+    timeZone: z.string(),
+    caps: SpendCapsSchema,
+    daySpentUsd: z.number().nonnegative(),
+    bots: z.array(z.object({ agentID: z.string(), spentUsd: z.number().nonnegative(), capUsd: z.number().positive().nullable() })),
+    unpricedCalls: z.number().int().nonnegative(),
+  }),
   z.object({ type: z.literal("task.list.ok"), seq, tasks: z.array(TaskInfoSchema), lists: z.array(TaskListInfoSchema).optional() }),
   z.object({ type: z.literal("task.create.ok"), seq, task: TaskInfoSchema }),
   z.object({ type: z.literal("task.list.create.ok"), seq, lists: z.array(TaskListInfoSchema) }),
