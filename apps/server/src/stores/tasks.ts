@@ -218,7 +218,7 @@ const runningDelegations = new Map<string, AbortController>();
  */
 export function trackRunningDelegation(db: Database, id: string, controller: AbortController): () => void {
   runningDelegations.set(id, controller);
-  if (isDelegationCancelled(db, id)) controller.abort();
+  if (isDelegationCancelled(db, id)) controller.abort("owner_stop");
   return () => {
     if (runningDelegations.get(id) === controller) runningDelegations.delete(id);
   };
@@ -246,7 +246,7 @@ export function cancelDelegation(db: Database, id: string): TaskRow | null {
   const shut = db.run("UPDATE tasks SET status = 'done', snoozed_until = NULL WHERE id = ? AND status != 'done'", [id]);
   if (shut.changes > 0) recordTaskActivity(db, id, "owner", "cancelled", null);
   // Mark first, then abort: the unwinding turn must already see the cancellation.
-  runningDelegations.get(id)?.abort();
+  runningDelegations.get(id)?.abort("owner_stop");
   return getTask(db, id);
 }
 

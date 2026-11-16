@@ -17,18 +17,21 @@ export const STOPPED_REQUEST_NOTE =
 export const INTERRUPTED_REQUEST_NOTE =
   "[My previous request was interrupted by a restart and was not completed. That request is closed: I will not resume it, re-run its tool calls, or ask for its approvals again unless the owner asks for it again in a new message.]";
 
-const CLOSURE_NOTES: ReadonlySet<string> = new Set([STOPPED_REQUEST_NOTE, INTERRUPTED_REQUEST_NOTE]);
+export const REVOKED_REQUEST_NOTE =
+  "[My previous request came from a device that has since been revoked. That request is closed: I will not resume it, retry its actions, or ask for its approvals again.]";
+
+const CLOSURE_NOTES: ReadonlySet<string> = new Set([STOPPED_REQUEST_NOTE, INTERRUPTED_REQUEST_NOTE, REVOKED_REQUEST_NOTE]);
 
 /** True for a stored row that is one of these notes (and not, say, a scheduled job's instruction). */
 export function isClosureNote(role: string, text: string): boolean {
   return role === "system" && CLOSURE_NOTES.has(text);
 }
 
-export function closeRequest(db: Database, params: { threadID: string; turnID?: string; reason: "stopped" | "interrupted" }): void {
+export function closeRequest(db: Database, params: { threadID: string; turnID?: string; reason: "stopped" | "interrupted" | "revoked" }): void {
   appendMessage(db, {
     threadID: params.threadID,
     ...(params.turnID ? { turnID: params.turnID } : {}),
     role: "system",
-    text: params.reason === "stopped" ? STOPPED_REQUEST_NOTE : INTERRUPTED_REQUEST_NOTE,
+    text: params.reason === "stopped" ? STOPPED_REQUEST_NOTE : params.reason === "revoked" ? REVOKED_REQUEST_NOTE : INTERRUPTED_REQUEST_NOTE,
   });
 }

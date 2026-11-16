@@ -12,12 +12,12 @@ async function skipOnboarding(client: TestClient): Promise<void> {
 }
 
 describe("msg.cancel for a turn that is not running", () => {
-  test("the asker is told not_found, not left waiting", async () => {
+  test("the asker is told not_running (not not_found, which means a missing rule), not left waiting", async () => {
     harness = await startHarness({});
     const client = await harness.connect();
     client.send({ type: "msg.cancel", turnID: "trn_does_not_exist" });
     const error = await client.next("error");
-    expect(error.code).toBe("not_found");
+    expect(error.code).toBe("not_running");
   });
 });
 

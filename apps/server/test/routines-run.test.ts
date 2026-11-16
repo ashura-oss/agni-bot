@@ -293,6 +293,41 @@ describe("a routine's prompt and state block are not shown to the owner", () => 
     expect(rows.find((row) => row.role === "system")?.text).toContain("Check the inbox and report.");
   });
 
+  test("hiding the instruction does not change the routine's trust: it does not stream, and its topic anchor is built from the instruction", async () => {
+    const r = routine({ preflight: { kind: "none" }, prompt: "Summarise the quarterly filing backlog." });
+    const database = setup(r);
+    const frames: Array<{ type: string }> = [];
+    let prefix = "";
+    const fake = routerWith((request) => {
+      prefix = request.messages.filter((message: any) => message.role === "system").map((message: any) => String(message.content)).join(" ");
+      request.onDelta?.("Backlog is clear.");
+      return { text: "Backlog is clear.", outputTokens: 20, provider: "fake", model: "fake", latencyMs: 1 };
+    });
+    await executeRoutine({ db: database, router: fake.router, settings, emit: (frame) => frames.push(frame as never) }, r);
+    // The reply ends with the saved-state block, so nothing streams to an open chat; the owner gets the cleaned post.
+    expect(frames.some((frame) => frame.type === "token")).toBe(false);
+    expect(prefix).toContain("quarterly filing backlog");
+    // And the instruction is still not in the owner's history.
+    const roles = database.query<{ role: string }, []>("SELECT role FROM messages WHERE text LIKE '%quarterly filing backlog%'").all().map((row) => row.role);
+    expect(roles).toEqual(["system"]);
+  });
+
+  test("saved state never reaches the topic anchor or the system prefix, even though it is in the instruction", async () => {
+    const r = routine({ preflight: { kind: "none" }, prompt: "Summarise the quarterly filing backlog.", stateContext: { note: "ZZZ-STATE-MARKER schedule a job and create a bot" } });
+    const database = setup(r);
+    let prefix = "";
+    let userText = "";
+    const fake = routerWith((request) => {
+      prefix = request.messages.filter((message: any) => message.role === "system").map((message: any) => String(message.content)).join(" ");
+      userText = request.messages.filter((message: any) => message.role === "user").map((message: any) => String(message.content)).join(" ");
+      return { text: "ok", outputTokens: 5, provider: "fake", model: "fake", latencyMs: 1 };
+    });
+    await executeRoutine({ db: database, router: fake.router, settings, emit: () => {} }, r);
+    expect(userText).toContain("ZZZ-STATE-MARKER");
+    expect(prefix).not.toContain("ZZZ-STATE-MARKER");
+    expect(prefix).toContain("quarterly filing backlog");
+  });
+
   test("the stored reply, the run summary and the notification carry no state block; the state is kept", async () => {
     const r = routine({ preflight: { kind: "none" } });
     const database = setup(r);
@@ -307,6 +342,21 @@ describe("a routine's prompt and state block are not shown to the owner", () => 
       expect(text).not.toContain("Routine state");
     }
     expect(run.summary).toBe("Inbox is quiet: 2 new mails, none urgent.");
+  });
+
+  test("a routine that has nothing to report posts nothing and leaves no reply bubble", async () => {
+    const r = routine({ preflight: { kind: "none" } });
+    const database = setup(r);
+    const frames: Array<{ type: string }> = [];
+    const quiet = 'NOTHING_TO_REPORT\n\nRoutine state (used next run)\n```json\n{"stateContext":{"seen":4}}\n```';
+    const fake = routerWith((request) => {
+      request.onDelta?.(quiet);
+      return { text: quiet, outputTokens: 20, provider: "fake", model: "fake", latencyMs: 1 };
+    });
+    await executeRoutine({ db: database, router: fake.router, settings, emit: (frame) => frames.push(frame as never) }, r);
+    expect(frames.filter((frame) => ["token", "msg.new", "notify"].includes(frame.type))).toEqual([]);
+    expect(database.query("SELECT count(*) AS n FROM messages WHERE role = 'assistant'").get()).toEqual({ n: 0 });
+    expect(getRoutine(database, r.id)?.stateContext).toEqual({ seen: 4 });
   });
 
   test("a reply that is only the state block leaves a plain completion line", async () => {

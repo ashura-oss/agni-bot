@@ -5,6 +5,7 @@ import type { Database } from "bun:sqlite";
 import type { PeerIntent, ServerFrameBody, StopReason } from "@agni/protocol";
 import { peerEnvelope, stripPeerTags } from "./peer-message";
 import { ApprovalBroker, waitForApprovalDecision } from "./approval-broker";
+import { abortReasonOf } from "./abort-reason";
 import { closeRequest, isClosureNote } from "./closure";
 import { FormBroker } from "./form-broker";
 import type { Decision } from "./approval-broker";
@@ -105,6 +106,24 @@ export interface TaskTurnRun {
    * system note ("Vision messaged you: …"), not the owner speaking.
    */
   inputRole?: "user" | "system";
+  /**
+   * Log the request as a system row so the owner's history does not show it.
+   * Only the log row changes: the turn's role, and how it is trusted, do not
+   * (see `untrustedInput` for that).
+   */
+  hideInput?: boolean;
+  /**
+   * The input carries data the owner did not write (a routine's saved state,
+   * results fetched on an earlier run). The turn is gated like peer input:
+   * tools that peer input may not use are refused, posts are marked
+   * peer-influenced, nothing is compacted from it, and nothing streams (a
+   * routine's reply ends with its saved-state block, which an open chat must
+   * not show). Unlike peer input it may use `queryText` for the topic anchor
+   * and retrieval.
+   */
+  untrustedInput?: boolean;
+  /** With `untrustedInput`: the part of the input that is the owner's own words, the only text that may shape the anchor and retrieval. */
+  queryText?: string;
   /** A retried job: reuse the input row it already wrote instead of appending it again (H20). */
   reuseInput?: boolean;
   /** The text written to the durable log (defaults to the request text). */
@@ -347,13 +366,17 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   const reused = previous?.role === inputRole && previous.text === inputText;
   // The reused row and its turn's output are history; the model gets the input below instead.
   if (reused) messages.splice(Math.max(0, messages.length - tail.slice(at).filter((m) => m.role === "user" || m.role === "assistant").length));
-  const inputMessage = reused ? previous : appendMessage(db, { threadID, turnID, role: inputRole, text: inputText });
+  const inputMessage = reused ? previous : appendMessage(db, { threadID, turnID, role: run.hideInput ? "system" : inputRole, text: inputText });
   if (!reused && run.attachmentIDs?.length) linkAttachments(db, inputMessage.id, run.attachmentIDs);
   titleThreadFromFirstMessage(db, threadID, run.text);
   // Peer-originated input (a brief, a handoff, a completion wake) must not shape
   // the system prefix. The topic anchor and the retrieval rewrite therefore read
   // only the history from before this input, and never the input's own text.
-  const peerInput = Boolean(run.peer) || run.inputRole === "system" || Boolean(run.delegation);
+  const peerSourced = Boolean(run.peer) || run.inputRole === "system" || Boolean(run.delegation);
+  // Tool gating, post marking and compaction treat untrusted input like peer input.
+  const peerInput = peerSourced || Boolean(run.untrustedInput);
+  // The text that may shape the anchor and retrieval: none for peer input, only the owner's own part for untrusted input.
+  const queryText: string | null = peerSourced ? null : run.untrustedInput ? (run.queryText ?? null) : run.text;
   const priorHistory = messages.slice();
   // The model sees peer-written text inside the envelope; the durable log
   // row (above) keeps the plain text so the UI stays readable.
@@ -411,21 +434,21 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   const anchor = deriveAnchor({
     carrySummary: [run.carrySummary, channelSummary].filter(Boolean).join("\n\n") || null,
     history: priorHistory,
-    userText: peerInput ? "" : run.text,
+    userText: queryText ?? "",
   });
   // ASM-003/004/006: what this turn needs, retrieved rather than carried.
   // The query is rewritten when the message points back, the search is
   // hybrid, and when nothing good enough comes back the tail of the
   // previous block is used instead of a wider, worse search.
-  const rewritten = rewriteForRetrieval(run.text, { anchor, history: priorHistory });
+  const rewritten = rewriteForRetrieval(queryText ?? "", { anchor, history: priorHistory });
   // Peer input never drives retrieval: a search on a brief's own words could
   // pull stored peer text back into the system prefix as recall.
-  const retrieved = peerInput ? null : await retrieveFacts(db, {
+  const retrieved = queryText === null ? null : await retrieveFacts(db, {
     query: rewritten.query,
     callerAgentID: persona.id,
     limit: 6,
     minScore: settings.minRecallScore,
-    embedder: turnEmbedder(run.text),
+    embedder: turnEmbedder(queryText ?? ""),
   });
   const recall = recallLines(retrieved?.hits ?? [], new Set(factRows.map((row) => row.id)));
   const previousTail = openedTail(db, threadID);
@@ -548,7 +571,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
     // widest view, and most turns do not need it.
     rollups: run.conversationID
       ? [
-        ...(!peerInput && asksAboutPast(run.text)
+        ...(queryText !== null && asksAboutPast(queryText)
           ? listSummaries(db, { conversationID: run.conversationID, level: "epoch", limit: 2 }).map((summary) => summary.text)
           : []),
         ...listSummaries(db, { conversationID: run.conversationID, level: "day", limit: 3 }).map((summary) => summary.text),
@@ -701,6 +724,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
         isUnloaded: (name) => deferred.includes(name) && !loadedTools.has(name),
         hold: () => timer.hold(),
         ownerWaitMs: settings.ownerWaitMs ?? OWNER_WAIT_CEILING_MS,
+        unattended: Boolean(run.untrustedInput) && !peerSourced,
       };
       // Several read-only lookups in one step start together; the loop below
       // still consumes them in order, so guards and message order are unchanged.
@@ -859,7 +883,12 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   expirePendingForTurn(db, turnID, stopReason === "cancelled" ? "cancelled" : "expired", run.emit);
   finishTurn(db, { id: turnID, stopReason, ...usage });
   // A request the owner stopped is closed for the model too; one their next message took over from is not.
-  if (stopReason === "cancelled" && cancelReason !== SUPERSEDED) closeRequest(db, { threadID, turnID, reason: "stopped" });
+  if (stopReason === "cancelled" && cancelReason !== SUPERSEDED) {
+    // Only an explicit Stop is the owner's; an abort nobody labelled is "interrupted", never "Stop".
+    const why = abortReasonOf(run.signal);
+    const ownerStopped = why === "owner_stop" || cancelReason === "the owner asked to stop";
+    if (why !== "timeout") closeRequest(db, { threadID, turnID, reason: why === "device_revoked" ? "revoked" : ownerStopped ? "stopped" : "interrupted" });
+  }
   touchThread(db, threadID);
   // A turn waiting for the owner's answer is not a failed turn: the session
   // is parked, and the resume picks it up.
@@ -1073,6 +1102,8 @@ interface ToolHooks {
   hold: () => () => void;
   /** The longest the owner is waited for before the card expires. */
   ownerWaitMs: number;
+  /** An unattended routine run: refusals that blame "another agent's message" say what this is instead. */
+  unattended?: boolean;
 }
 
 async function executeTool(  db: Database, threadID: string, turnID: string, call: ToolCall, allowlist: string[],
@@ -1191,6 +1222,7 @@ async function executeTool(  db: Database, threadID: string, turnID: string, cal
       new Promise<never>((_, reject) => combined.addEventListener("abort", () => reject(new Error("tool timed out or was cancelled")), { once: true })),
     ]);
     let safeResult = result;
+    if (hooks.unattended) safeResult = unattendedWording(result);
     if (allowedDomains && call.function.name === "web_search" && typeof result === "object" && result !== null && Array.isArray((result as { results?: unknown }).results)) {
       safeResult = { ...(result as Record<string, unknown>), results: (result as { results: unknown[] }).results.filter((item) => {
         if (typeof item !== "object" || item === null || typeof (item as { url?: unknown }).url !== "string") return false;
@@ -1213,6 +1245,17 @@ async function executeTool(  db: Database, threadID: string, turnID: string, cal
     clearTimeout(ownerWaitCeiling);
     releaseOwnerWait?.();
   }
+}
+
+/**
+ * The tools refuse peer-influenced turns with words about "another agent's message". An unattended
+ * routine run is refused for the same reason but is not that, so the refusal says what it is.
+ */
+function unattendedWording(result: unknown): unknown {
+  if (typeof result !== "object" || result === null || typeof (result as { error?: unknown }).error !== "string") return result;
+  const error = (result as { error: string }).error;
+  const reworded = error.replace("this turn started from another agent's message", "this is an unattended routine run");
+  return reworded === error ? result : { ...(result as Record<string, unknown>), error: reworded };
 }
 
 function parseSessionMessages(raw: string): ChatMessage[] {

@@ -1340,7 +1340,7 @@ function handleMsgCancel(deps: DispatchDeps, session: Session, frame: Extract<Cl
   if (!requireAuth(deps, session)) return;
   // Nothing is running under that ID (it finished, never existed, or the server restarted):
   // say so, so the asker is not left waiting on a Stop that did nothing.
-  if (!cancelTurn(frame.turnID)) sendError(deps, session, "not_found", `no running turn ${frame.turnID}`);
+  if (!cancelTurn(frame.turnID, "owner_stop")) sendError(deps, session, "not_running", `no running turn ${frame.turnID}`);
 }
 
 function handleApproveReply(

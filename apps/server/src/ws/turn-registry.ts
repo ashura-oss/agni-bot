@@ -7,6 +7,8 @@
  * one server-wide map, instead of on each connection's session.
  */
 
+import type { AbortReason } from "../agent/abort-reason";
+
 interface RunningTurn {
   controller: AbortController;
   threadID: string;
@@ -34,10 +36,10 @@ export function unregisterTurn(turnID: string, controller: AbortController): voi
 }
 
 /** Abort a running turn from any connection; false when it is unknown or already over. */
-export function cancelTurn(turnID: string): boolean {
+export function cancelTurn(turnID: string, reason: AbortReason = "owner_stop"): boolean {
   const turn = running.get(turnID);
   if (!turn) return false;
-  turn.controller.abort();
+  turn.controller.abort(reason);
   return true;
 }
 
@@ -46,7 +48,7 @@ export function cancelTurnsForDevice(deviceID: string): number {
   let cancelled = 0;
   for (const turn of running.values()) {
     if (turn.deviceID !== deviceID) continue;
-    turn.controller.abort();
+    turn.controller.abort("device_revoked" satisfies AbortReason);
     cancelled += 1;
   }
   return cancelled;
@@ -74,7 +76,7 @@ export function isServerStopping(db: object): boolean { return stopping.has(db);
  */
 export function cancelAllTurns(): number {
   const turns = [...running.values()];
-  for (const turn of turns) turn.controller.abort();
+  for (const turn of turns) turn.controller.abort("shutdown" satisfies AbortReason);
   return turns.length;
 }
 

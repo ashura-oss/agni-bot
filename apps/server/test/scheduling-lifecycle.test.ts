@@ -7,6 +7,9 @@
  * reaches the owner's chat, S1-24 "run now" never starts a second copy,
  * S1-38 monthly repeats keep their day of the month.
  */
+import { existsSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 import type { ServerFrameBody } from "@agni/protocol";
@@ -510,6 +513,24 @@ describe("a denied action does not fail a run that finished the work another way
     const row = getJob(database, queued.id)!;
     expect(row.state).toBe("done");
     expect(row.result).toMatch(/a denied step was skipped; check the result: mail_send/);
+  });
+
+  test("a free new-file write after a denied rm is not the work done another way: still not done", async () => {
+    db = openDatabase(":memory:");
+    const scratch = mkdtempSync(join(tmpdir(), "agni-sched-scratch-"));
+    const savedScratch = process.env.AGNI_SCRATCH_DIR;
+    process.env.AGNI_SCRATCH_DIR = scratch;
+    try {
+      const loadTwo = { tool: "load_tools", args: { names: ["bash", "write_file"] } } as const;
+      const rm = { tool: "bash", args: { command: "rm -rf old-build" } } as const;
+      const note = { tool: "write_file", args: { path: "report.txt", content: "I could not delete it." } } as const;
+      const row = await runWith(db, [loadTwo, rm, note, { text: "Cleaned up." }]);
+      expect(existsSync(join(scratch, "report.txt"))).toBe(true);
+      expect(row.state).toBe("failed");
+      expect(row.result).toMatch(/not done/i);
+    } finally {
+      if (savedScratch === undefined) delete process.env.AGNI_SCRATCH_DIR; else process.env.AGNI_SCRATCH_DIR = savedScratch;
+    }
   });
 
   test("a later free call (even a successful one) does not finish the work: still not done", async () => {

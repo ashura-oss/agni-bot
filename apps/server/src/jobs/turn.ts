@@ -374,17 +374,23 @@ function blockedByApproval(db: Database, threadID: string, since: string): Appro
     : row.error === "approval_expired" ? `approval for ${row.tool_name} expired, nobody answered, so it did not run`
     : `approval for ${row.tool_name} was not given before the run ended, so it did not run`;
   const last = rows[rows.length - 1]!;
+  // A later call counts only if it has its own approval record: a card the owner
+  // answered once or always, or a standing rule that answered it. Deciding that by
+  // asking the policy now would let a free write of a new file count, because the
+  // file exists by then.
   const after = db
-    .query<{ tool_name: string; args: string }, [string, string, number]>(
-      "SELECT tool_name, args FROM tool_calls WHERE thread_id = ? AND created_at >= ? AND rowid > ? AND ok = 1 AND error IS NULL AND result IS NOT NULL",
+    .query<{ tool_name: string }, [string, string, number]>(
+      `SELECT tc.tool_name FROM tool_calls tc
+       JOIN approvals a ON a.turn_id = tc.turn_id AND a.call_id = tc.call_id
+       WHERE tc.thread_id = ? AND tc.created_at >= ? AND tc.rowid > ?
+         AND tc.ok = 1 AND tc.error IS NULL AND tc.result IS NOT NULL
+         AND a.status = 'decided' AND (a.decision IN ('once', 'always') OR a.rule_id IS NOT NULL)`,
     )
     .all(threadID, last.created_at, last.rowid);
   return {
     reason,
     tools: [...new Set(rows.map((denied) => denied.tool_name))],
-    // Only a later call that was itself gated and then allowed counts: reading, searching or
-    // loading a schema after a denial is not the denied work being done another way.
-    workedAround: after.some((call) => gatePolicy.requiresApproval(call.tool_name, parseObject(call.args) ?? {})),
+    workedAround: after.length > 0,
   };
 }
 
