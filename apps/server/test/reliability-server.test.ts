@@ -70,9 +70,10 @@ async function until(check: () => boolean, timeoutMs = 4000): Promise<void> {
   }
 }
 
-const cleanups: Array<() => void> = [];
-afterEach(() => {
-  for (const cleanup of cleanups.splice(0).reverse()) cleanup();
+const cleanups: Array<() => unknown> = [];
+afterEach(async () => {
+  // Turns outlive their sockets now, so a stopping server settles them before the database closes.
+  for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
 function config(dbPath: string): Config {

@@ -17,12 +17,17 @@ import { log } from "../log";
 import { PluginService } from "../plugins/service";
 import type { Router, ProviderStatus } from "../models/router";
 import { dayTotals, type DayTotals } from "../stores/usage";
-import { readShareFile } from "../share/document";
-import { dispatch, errorFrame, newSession, resumeQueuedMessages, type DispatchDeps, type Session } from "./dispatch";
+import { purgeExpiredShares } from "../share/document";
+import { shareRequest } from "../share/http";
+import { dispatch, errorFrame, purgeRevokedQueues, newSession, resumeQueuedMessages, type DispatchDeps, type Session } from "./dispatch";
 import { isDeviceRevoked, requestToken, verifyToken } from "../auth/tokens";
 import { authRequest } from "../auth/web";
+import { createOriginPolicy, originConfigProblem, parseOriginList } from "../auth/origin";
+import { staticPageHeaders } from "./csp";
 import { webAppRequest } from "./web-app";
 import { FrameLog } from "./frame-log";
+import { recoverInterruptedTurns } from "./boot-recovery";
+import { cancelAllTurns, cancelTurnsForDevice, clearServerStopping, markServerStopping, runningTurnDeviceIDs, whenNoTurnsRunning } from "./turn-registry";
 import { dirname, resolve } from "node:path";
 import { ChatGPTAuth } from "../models/chatgpt-auth";
 import { PushService } from "../push/web-push";
@@ -35,21 +40,28 @@ export interface RunningServer {
   readonly plugins: PluginService | undefined;
   /** Fan out a frame to every authed session (job results, notices). */
   emit(body: ServerFrameBody): ServerFrame;
-  stop(): void;
+  /**
+   * Stop serving and cancel running turns. Resolves once those turns have
+   * finished writing, so it is safe to close the database after awaiting it;
+   * a caller that does not await still gets the synchronous stop.
+   */
+  stop(): Promise<void>;
 }
 
 /**
- * The daemon's read-only health snapshot is safe to expose to any origin: it
- * carries no secrets, and a web client paired on another origin must be able
- * to read it before it opens the socket.
+ * `GET /health` answers any origin, so a web client on another origin can tell
+ * the daemon is up before it pairs. That is safe only because the answer to a
+ * caller who is not paired carries no owner or config data (see `liveness`).
+ * The full report also needs `Authorization`, which this header set does not
+ * allow cross-origin, so it is only ever read same-origin or by a native client.
  */
-const CORS_HEADERS = {
+const HEALTH_CORS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET, OPTIONS",
   "access-control-allow-headers": "accept, content-type",
 } as const;
 
-/** Shape of `GET /health` — also what `daemon status` shows. */
+/** Shape of the full `GET /health`, for a paired device — also what `daemon status` shows. */
 export interface HealthReport {
   ok: boolean;
   v: number;
@@ -61,12 +73,21 @@ export interface HealthReport {
   modelCapacity: { active: number; capacity: number };
 }
 
+/** What anyone may learn from `GET /health`: that the server is up, and its protocol version. */
+export interface Liveness {
+  ok: boolean;
+  v: number;
+  serverTime: string;
+  uptimeMs: number;
+}
+
+export function liveness(startedAt: number): Liveness {
+  return { ok: true, v: PROTOCOL_VERSION, serverTime: new Date().toISOString(), uptimeMs: Date.now() - startedAt };
+}
+
 export function healthReport(db: Database, router: Router, seq: number, startedAt: number): HealthReport {
   return {
-    ok: true,
-    v: PROTOCOL_VERSION,
-    serverTime: new Date().toISOString(),
-    uptimeMs: Date.now() - startedAt,
+    ...liveness(startedAt),
     seq,
     providers: router.status(),
     usageToday: dayTotals(db),
@@ -76,14 +97,26 @@ export function healthReport(db: Database, router: Router, seq: number, startedA
 
 export function startServer(config: Config, db: Database, router: Router, startedAt = Date.now()): RunningServer {
   const frameLog = new FrameLog(config.frameLogCapacity, (seq) => writeMeta(db, "seq", String(seq)));
-  frameLog.adoptSeq(Number.parseInt(readMeta(db, "seq") ?? "0", 10) || 0);
+  // A fresh database has no persisted counter and starts at 1. After a clean stop the
+  // counter is exact (the stop left a marker equal to it), so resume from it and
+  // let caught-up clients carry on; after a crash it can trail frames already
+  // sent, so resume one interval above it (S1-31).
+  const persistedSeq = readMeta(db, "seq");
+  if (persistedSeq !== null) {
+    const exact = readMeta(db, SEQ_CLEAN_KEY) === persistedSeq;
+    if (exact) frameLog.adoptSeq(Number.parseInt(persistedSeq, 10) || 0);
+    else frameLog.adoptPersistedSeq(Number.parseInt(persistedSeq, 10) || 0);
+  }
+  // The marker describes the last stop only: a crash from here on must not look clean.
+  db.run("DELETE FROM meta WHERE key = ?", [SEQ_CLEAN_KEY]);
 
   const sessions = new Map<Bun.ServerWebSocket<Session>, Session>();
+  clearServerStopping(db);
 
   /** A live frame for one connection: held while it waits for its resync replay (H32). */
   const deliver = (socket: Bun.ServerWebSocket<Session>, frame: ServerFrame): void => {
     if (socket.data.held) socket.data.held.push(frame);
-    else socket.send(encodeFrame(frame));
+    else sendIfOpen(socket, frame);
   };
 
   const push = new PushService(db, {
@@ -112,6 +145,12 @@ export function startServer(config: Config, db: Database, router: Router, starte
       session.authed = false;
       socket.close(4003, "revoked");
     }
+    // A turn outlives its socket, so revocation has to find it by device, not by connection.
+    // Queued messages first, so the turn that ends below cannot start a revoked device's text.
+    purgeRevokedQueues(db);
+    for (const deviceID of runningTurnDeviceIDs()) {
+      if (isDeviceRevoked(db, deviceID)) cancelTurnsForDevice(deviceID);
+    }
   }, REVOCATION_SWEEP_MS);
 
   const plugins = new PluginService({ config, db, emit, pluginsPath: config.pluginsPath });
@@ -126,51 +165,71 @@ export function startServer(config: Config, db: Database, router: Router, starte
   });
   router.setChatGPT(chatgpt);
 
+  // Who may reach this server from a browser: exact origins and exact Host
+  // names, not "any loopback". The port is only known after bind (tests bind
+  // port 0), so it is read through a variable set once the socket is open.
+  let boundPort = config.port;
+  const extraOrigins = parseOriginList(Bun.env.AGNI_ALLOWED_ORIGINS);
+  const policy = createOriginPolicy({
+    host: config.host,
+    port: () => boundPort,
+    publicOrigin: config.publicOrigin,
+    extraOrigins,
+    devServer: Bun.env.AGNI_DEV === "1",
+  });
+  const originProblem = originConfigProblem({ host: config.host, port: config.port, publicOrigin: config.publicOrigin, extraOrigins });
+  if (originProblem) log[originProblem.level](originProblem.message);
+  // Expired exports are deleted at boot (an in-memory test database has no real share directory).
+  if (config.dbPath !== ":memory:") purgeExpiredShares();
+
   const server = Bun.serve<Session>({
     hostname: config.host,
     port: config.port,
     maxRequestBodySize: 10 * 1024 * 1024 + 65_536,
     async fetch(request, srv) {
+      // DNS rebinding: a page on an attacker's domain that resolves to this
+      // machine still addresses it by the attacker's name. Refuse any name
+      // this server does not answer to, before any route runs.
+      if (!policy.hostAllowed(request.headers.get("host"))) {
+        return new Response("forbidden host", { status: 403 });
+      }
       const url = new URL(request.url);
       if (url.pathname === "/attachments" || url.pathname.startsWith("/attachments/")) {
-        return attachmentRequest(request, db, config.dbPath, router);
+        return attachmentRequest(request, db, config.dbPath, router, policy);
       }
       if (url.pathname === "/backgrounds" || url.pathname.startsWith("/backgrounds/")) {
-        return backgroundRequest(request, db, config.dbPath);
+        return backgroundRequest(request, db, config.dbPath, policy);
       }
       if (url.pathname.startsWith("/debug/")) {
-        return debugRequest(request, db, router, config);
+        return debugRequest(request, db, router, config, policy);
       }
       if (url.pathname === "/health") {
         if (request.method === "OPTIONS") {
-          return new Response(null, { status: 204, headers: CORS_HEADERS });
+          return new Response(null, { status: 204, headers: HEALTH_CORS });
         }
-        return Response.json(healthReport(db, router, frameLog.seq, startedAt), {
-          headers: { ...CORS_HEADERS, "cache-control": "no-store" },
+        // Only a paired device (cookie or bearer token) gets providers, usage and capacity.
+        const credential = requestToken(request);
+        const paired = credential ? await verifyToken(db, credential) : null;
+        return Response.json(paired ? healthReport(db, router, frameLog.seq, startedAt) : liveness(startedAt), {
+          headers: { ...HEALTH_CORS, "cache-control": "no-store" },
         });
       }
       if (url.pathname.startsWith("/auth/")) {
-        return authRequest(request, db, (origin) => allowedOrigin(origin, config.host, config.publicOrigin));
+        return authRequest(request, db, policy.originAllowed);
       }
       if (url.pathname === "/oauth/callback") {
         return handleOAuthCallback(plugins, url);
       }
       // Exported threads. Tokens are opaque file names, validated by the
       // reader, so this route can never be walked out of the share directory.
-      const share = /^\/share\/([0-9a-f]{32})(?:\.html)?$/.exec(url.pathname);
-      if (share) {
-        const html = readShareFile(share[1] ?? "");
-        if (html === null) return new Response("This export no longer exists.", { status: 404 });
-        return new Response(html, {
-          headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
-        });
-      }
+      const shared = await shareRequest(request, db, policy);
+      if (shared) return shared;
       if (url.pathname === "/ws") {
         // Browsers always send Origin; native clients (Mac, CLI) send none.
-        // Refusing foreign origins stops any web page (or a DNS-rebound
-        // name) in the owner's browser from driving the socket.
+        // Refusing foreign origins stops any web page in the owner's browser
+        // from driving the socket.
         const origin = request.headers.get("origin");
-        if (origin !== null && !allowedOrigin(origin, config.host, config.publicOrigin)) {
+        if (origin !== null && !policy.originAllowed(origin)) {
           return new Response("forbidden origin", { status: 403 });
         }
         const session = newSession();
@@ -186,7 +245,9 @@ export function startServer(config: Config, db: Database, router: Router, starte
         if (srv.upgrade(request, { data: session })) return undefined;
         return new Response("websocket upgrade failed", { status: 400 });
       }
-      if (request.method === "GET" || request.method === "HEAD") return webAppRequest(url.pathname);
+      if (request.method === "GET" || request.method === "HEAD") {
+        return webAppRequest(url.pathname, undefined, request.headers.get("host") ?? undefined);
+      }
       return new Response("not found", { status: 404 });
     },
     websocket: {
@@ -216,7 +277,7 @@ export function startServer(config: Config, db: Database, router: Router, starte
                 deliver(socket, frame);
                 return frame;
               },
-              send: (frame) => socket.send(encodeFrame(frame)),
+              send: (frame) => sendIfOpen(socket, frame),
               close: (code, reason) => socket.close(code, reason),
             },
             session,
@@ -225,15 +286,15 @@ export function startServer(config: Config, db: Database, router: Router, starte
         } catch (error) {
           // A throwing handler answers its own connection; it never takes the daemon down.
           log.error(`frame handler failed on ${session.id}`, error);
-          socket.send(encodeFrame(errorFrame(frameLog, "internal", error instanceof Error ? error.message : String(error))));
+          sendIfOpen(socket, errorFrame(frameLog, "internal", error instanceof Error ? error.message : String(error)));
         }
       },
       close(socket) {
         const session = socket.data;
         if (session.helloTimer !== undefined) clearTimeout(session.helloTimer);
         if (session.holdTimer !== undefined) clearTimeout(session.holdTimer);
-        for (const controller of session.aborts.values()) controller.abort();
-        session.aborts.clear();
+        // A turn belongs to the server: it keeps running after its socket closes
+        // (reload, phone lock, network blip) and its frames replay on reconnect.
         sessions.delete(socket);
         log.debug(`connection ${session.id} closed (${sessions.size} open)`);
       },
@@ -248,6 +309,10 @@ export function startServer(config: Config, db: Database, router: Router, starte
     send: () => undefined,
     close: () => undefined,
   };
+  boundPort = server.port ?? config.port;
+  // S1-03: nothing may stay `running` across a restart; do this before any
+  // queued message resumes, or it would glue itself onto the dead turn.
+  recoverInterruptedTurns(db, emit);
   const resumed = resumeQueuedMessages(bootDeps);
   if (resumed > 0) log.warn(`resumed ${resumed} owner message(s) a previous process left queued`);
 
@@ -256,39 +321,47 @@ export function startServer(config: Config, db: Database, router: Router, starte
     url: `ws://${config.host}:${server.port ?? config.port}/ws`,
     plugins,
     emit,
-    stop() {
+    async stop() {
       clearInterval(revocationSweep);
+      // Turns outlive their sockets, but not the server: stop them, and forget the
+      // sockets, so nothing writes to a connection of a server that is gone.
+      markServerStopping(db);
+      cancelAllTurns();
+      sessions.clear();
       chatgpt.stop();
       server.stop(true);
       frameLog.flush();
+      // The cancelled turns write their last rows and frames before the caller closes the database.
+      await whenNoTurnsRunning();
+      // Every frame is out and the counter is final: mark it exact. A caller that closed the
+      // database already gets no marker, which only costs the next boot a reload.
+      try {
+        frameLog.flush();
+        writeMeta(db, SEQ_CLEAN_KEY, String(frameLog.seq));
+      } catch {
+        // database closed under us
+      }
     },
   };
 }
 
+/**
+ * A turn can outlive its connection, so a late frame for a socket that has
+ * closed is normal, not an error: drop it. (The frame is in the log; a
+ * reconnect replays it.)
+ */
+function sendIfOpen(socket: Bun.ServerWebSocket<Session>, frame: ServerFrame): void {
+  if (socket.readyState !== 1) return;
+  socket.send(encodeFrame(frame));
+}
+
 const REVOCATION_SWEEP_MS = 2_000;
+
+/** Meta key a clean stop writes: the final seq, so the next boot knows the persisted one is exact. */
+const SEQ_CLEAN_KEY = "seq_clean";
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 const LOOPBACK_IPS = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
-
-/**
- * Loopback pages, pages served from the daemon's own bound host, and the
- * owner's AGNI_PUBLIC_ORIGIN (e.g. the `tailscale serve` https name).
- */
-export function allowedOrigin(origin: string, host: string, publicOrigin?: string): boolean {
-  let parsed: URL;
-  try {
-    parsed = new URL(origin);
-  } catch {
-    return false;
-  }
-  const bound = host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
-  if (LOOPBACK_HOSTS.has(parsed.hostname) || parsed.hostname === bound) return true;
-  try {
-    return publicOrigin !== undefined && new URL(publicOrigin).origin === parsed.origin;
-  } catch {
-    return false;
-  }
-}
 
 /**
  * The Google OAuth redirect lands here from the system browser: one static
@@ -317,6 +390,8 @@ async function handleOAuthCallback(plugins: PluginService | undefined, url: URL)
   return staticPage(title, body);
 }
 
+const STATIC_PAGE_STYLE = "body{background:#000;color:#fff;font:15px/1.6 ui-sans-serif,-apple-system,sans-serif;display:grid;place-items:center;min-height:100vh;margin:0}main{max-width:420px;padding:24px}p{white-space:pre-line;margin:0}";
+
 function staticPage(title: string, body: string): Response {
   return new Response(
     `<!doctype html>
@@ -325,10 +400,10 @@ function staticPage(title: string, body: string): Response {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${title}</title>
-<style>body{background:#000;color:#fff;font:15px/1.6 ui-sans-serif,-apple-system,sans-serif;display:grid;place-items:center;min-height:100vh;margin:0}main{max-width:420px;padding:24px}p{white-space:pre-line;margin:0}</style>
+<style>${STATIC_PAGE_STYLE}</style>
 </head>
 <body><main><p>${body.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</p></main></body>
 </html>`,
-    { headers: { "content-type": "text/html; charset=utf-8" } },
+    { headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", ...staticPageHeaders(STATIC_PAGE_STYLE) } },
   );
 }

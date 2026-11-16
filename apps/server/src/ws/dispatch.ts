@@ -51,7 +51,6 @@ import {
   activeSession,
   backgroundSession,
   conversationOfAgent,
-  conversationTranscript,
   ensureConversation,
   getConversation,
   type ConversationRow,
@@ -82,6 +81,8 @@ import { scheduleTaskReminder } from "../jobs/task-reminders";
 import type { PluginService } from "../plugins/service";
 import { pluginMailResolver } from "../plugins/credentials";
 import type { FrameLog } from "./frame-log";
+import { buildConversationHistory } from "./history";
+import { cancelTurn, cancelTurnsForDevice, isServerStopping, registerTurn, unregisterTurn } from "./turn-registry";
 import { activateAppearanceProfile, deleteAppearanceProfile, listAppearanceProfiles, saveAppearanceProfile } from "../stores/appearance";
 import { getRoutineByJobID, listRuns, updateRoutineState } from "../stores/routines";
 import { normalizeAllowedDomains } from "../routines/egress";
@@ -98,8 +99,6 @@ export interface Session {
   cookieDevice?: { id: string; name: string };
   agentID: string;
   openThreadID?: string;
-  /** In-flight turns owned by this connection, cancellable via msg.cancel. */
-  aborts: Map<string, AbortController>;
   helloTimer?: ReturnType<typeof setTimeout>;
   /**
    * H32: live frames held after `hello` until this connection's `resync`
@@ -127,7 +126,6 @@ export function newSession(): Session {
     id: newID("conn"),
     authed: false,
     agentID: defaultPersona().id,
-    aborts: new Map(),
   };
 }
 
@@ -164,6 +162,8 @@ export async function dispatch(deps: DispatchDeps, session: Session, raw: string
   if (session.held && frame.type !== "resync" && frame.type !== "hello") releaseHeld(deps, session);
   // M1: a revoked device loses its open sessions too, not just new handshakes.
   if (session.device && isDeviceRevoked(deps.db, session.device.id)) {
+    purgeRevokedQueues(deps.db);
+    cancelTurnsForDevice(session.device.id);
     session.authed = false;
     sendError(deps, session, "unauthorized", "this device was revoked");
     deps.close(4003, "revoked");
@@ -357,16 +357,18 @@ function handleHello(deps: DispatchDeps, session: Session, frame: Extract<Client
       });
     }
     // H36: the same for approval and form cards a turn in this process is still waiting on.
-    for (const approval of deps.db.query<{ id: string; action: string; preview: string }, [string]>(
-      "SELECT id, action, preview FROM approvals WHERE status = 'pending' AND created_at >= ? ORDER BY created_at",
+    // Only a card whose turn is still running can be answered; a dead one stays quiet (S1-05).
+    for (const approval of deps.db.query<{ id: string; action: string; preview: string; thread_id: string | null; turn_id: string | null }, [string]>(
+      "SELECT id, action, preview, thread_id, turn_id FROM approvals WHERE status = 'pending' AND created_at >= ? ORDER BY created_at",
     ).all(PROCESS_STARTED_AT)) {
+      if (!cardIsLive(deps.db, approval.thread_id, approval.turn_id)) continue;
       deps.reply({ type: "approval.request", requestID: approval.id, action: approval.action, preview: approval.preview, buttons: ["once", "always", "reject"] });
     }
     for (const { id } of deps.db.query<{ id: string }, [string]>(
       "SELECT id FROM forms WHERE status = 'pending' AND created_at >= ? ORDER BY created_at",
     ).all(PROCESS_STARTED_AT)) {
       const form = getForm(deps.db, id);
-      if (!form) continue;
+      if (!form || !cardIsLive(deps.db, form.threadID, form.turnID)) continue;
       deps.reply({
         type: "form.request",
         requestID: form.id,
@@ -383,10 +385,25 @@ function handleHello(deps: DispatchDeps, session: Session, frame: Extract<Client
 
 /**
  * Approval and form waiters live in memory, so only rows this process created
- * can still wake a turn. shortcut: a pending row whose turn was aborted in this
- * process is re-sent too; answering it is a no-op. Expose the waiter maps if that matters.
+ * can still wake a turn.
  */
 const PROCESS_STARTED_AT = nowISO();
+
+/**
+ * A card can be answered only while the turn that asked is still running in
+ * this process. A running turn on the thread is not enough: a later turn B
+ * must not revive the card of a cancelled turn A, so the card's turn has to be
+ * the one the thread's session row says is current.
+ */
+function cardIsLive(db: Database, threadID: string | null, turnID: string | null): boolean {
+  if (threadID === null || turnID === null || !isThreadActive(threadID)) return false;
+  const session = db
+    .query<{ turn_id: string }, [string]>("SELECT turn_id FROM agent_sessions WHERE thread_id = ? AND state IN ('running', 'awaiting_approval')")
+    .get(threadID);
+  return session?.turn_id === turnID;
+}
+
+const CARD_EXPIRED = "That request expired or was already answered.";
 
 function handleResync(deps: DispatchDeps, session: Session, frame: Extract<ClientFrame, { type: "resync" }>): void {
   if (!requireAuth(deps, session)) return;
@@ -537,8 +554,36 @@ function dispatchUserMessage(
   }));
 }
 
+/**
+ * A revoked device's words must not run, nor ride a turn credited to another
+ * device. Drops every queued message whose device is revoked, from every
+ * thread, and forgets its on-disk copy. Returns how many.
+ */
+export function purgeRevokedQueues(db: Database): number {
+  const queues = threadQueues.get(db);
+  if (!queues) return 0;
+  let dropped = 0;
+  for (const [threadID, queue] of queues) {
+    const keep = queue.filter((message) => {
+      const revoked = message.session.device !== undefined && isDeviceRevoked(db, message.session.device.id);
+      if (revoked) {
+        forgetOwnerMessages(db, message.rowIDs);
+        dropped += 1;
+      }
+      return !revoked;
+    });
+    if (keep.length === 0) queues.delete(threadID);
+    else queues.set(threadID, keep);
+  }
+  return dropped;
+}
+
 /** After a turn ends, start the next message waiting on that thread. */
 function drainThreadQueue(deps: DispatchDeps, threadID: string): void {
+  // Shutting down: what is queued stays on disk (queued_messages) for the next boot.
+  if (isServerStopping(deps.db)) return;
+  // Before anything merges: a revoked device's message is dropped here, not run.
+  purgeRevokedQueues(deps.db);
   const queues = threadQueues.get(deps.db);
   const queue = queues?.get(threadID);
   if (!queues || !queue || queue.length === 0) return;
@@ -593,12 +638,26 @@ function stopActiveTurn(
   });
 }
 
+/** The longest message (all parts together) the server accepts, in characters. */
+export const MAX_MESSAGE_CHARS = 100_000;
+
 function handleMsgSend(deps: DispatchDeps, session: Session, frame: Extract<ClientFrame, { type: "msg.send" }>): void {
   if (!requireAuth(deps, session)) return;
 
   const parts = frame.texts?.length ? frame.texts : (frame.text.trim() ? [frame.text] : []);
   if (parts.length === 0) return sendError(deps, session, "bad_frame", "msg.send needs text or a non-empty texts array");
   const combined = parts.join("\n\n");
+  // S1-39: `texts: [""]` slips past the schema's non-empty `text`.
+  if (combined.trim().length === 0) return sendError(deps, session, "bad_frame", "msg.send needs some text");
+  // S1-27: one cap on the whole message, checked before anything is stored or echoed.
+  const characters = parts.reduce((total, part) => total + part.length, 0);
+  if (characters > MAX_MESSAGE_CHARS) {
+    return sendError(deps, session, "bad_frame", `That message is too long (${characters.toLocaleString("en-US")} characters). The limit is ${MAX_MESSAGE_CHARS.toLocaleString("en-US")}; split it or attach it as a file.`);
+  }
+  // S1-39: an unknown agent must not get a conversation or a room created for it.
+  if (frame.toAgentId && !resolvePersona(deps.db, frame.toAgentId)) {
+    return sendError(deps, session, "unknown_agent", `no agent ${frame.toAgentId}`);
+  }
   // "stop" is a control message, not a turn — but only while a turn is
   // actually running in the thread the owner is looking at. When nothing is
   // running, it is ordinary text and goes through normally.
@@ -750,7 +809,9 @@ async function runUserMessage(
   }
   const turnID = newID("trn");
   const controller = new AbortController();
-  session.aborts.set(turnID, controller);
+  // Server-wide, not per connection: the turn outlives this socket and any
+  // device may cancel it.
+  registerTurn(turnID, thread.id, controller, session.device?.id);
   const turnSettings = {
     firstTokenTimeoutMs: deps.config.firstTokenTimeoutMs,
     turnTimeoutMs: deps.config.turnTimeoutMs,
@@ -777,10 +838,17 @@ async function runUserMessage(
       // The turn runner reports its own failures through frames; landing here
       // means something unexpected (e.g. the database) failed.
       log.error("turn crashed", error);
-      deps.emit({ type: "error", code: "internal", message: error instanceof Error ? error.message : String(error) });
+      // An error answers the connection that asked, takes no seq, and is not replayed (S1-30).
+      sendError(deps, session, "internal", error instanceof Error ? error.message : String(error));
+      // That connection may be gone, so close the turn for everyone: finish its row and say so.
+      const open = deps.db.query<{ state: string }, [string]>("SELECT state FROM turns WHERE id = ?").get(turnID);
+      if (open?.state === "running") {
+        finishTurn(deps.db, { id: turnID, stopReason: "error" });
+        deps.emit({ type: "turn.end", turnID, threadID: thread.id, stopReason: "error", ...(conversationID ? { conversationID } : {}) });
+      }
     })
     .finally(() => {
-      session.aborts.delete(turnID);
+      unregisterTurn(turnID, controller);
       // Background-first: a message sent during this turn is waiting, so the
       // freed thread starts it now instead of leaving it stranded.
       drainThreadQueue(deps, thread.id);
@@ -887,7 +955,7 @@ async function captureMessage(deps: DispatchDeps, session: Session, thread: Thre
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     try { finishTurn(deps.db, { id: turnID, stopReason: "error" }); } catch { /* turn may not have been created */ }
-    deps.emit({ type: "error", code: "capture_failed", message });
+    sendError(deps, session, "capture_failed", message);
     deps.emit({ type: "turn.end", turnID, threadID, stopReason: "error" });
   }
 }
@@ -1165,6 +1233,9 @@ function handleConversationOpen(
     conversation = getConversation(deps.db, frame.conversationID);
     if (!conversation) return sendError(deps, session, "unknown_conversation", `no conversation ${frame.conversationID}`);
   } else {
+    if (frame.agentID && !resolvePersona(deps.db, frame.agentID)) {
+      return sendError(deps, session, "unknown_agent", `no agent ${frame.agentID}`);
+    }
     conversation = ensureConversation(deps.db, frame.agentID ?? session.agentID);
   }
   const active = activeSession(deps.db, conversation);
@@ -1200,66 +1271,7 @@ function handleConversationHistory(
   if (!getConversation(deps.db, frame.conversationID)) {
     return sendError(deps, session, "unknown_conversation", `no conversation ${frame.conversationID}`);
   }
-  const messages: Array<{
-    id: string; role: string; text: string; createdAt: string; turnID?: string; sessionID?: string;
-    senderName?: string; senderColor?: string; uiHint?: string; attachments?: AttachmentInfo[];
-  }> = conversationTranscript(deps.db, frame.conversationID, frame.limit ?? 200).map((message) => ({
-    id: message.id,
-    role: message.role,
-    text: message.text,
-    attachments: messageAttachments(deps.db, message.id),
-    createdAt: message.created_at,
-    sessionID: message.sessionID,
-  }));
-  const conversation = getConversation(deps.db, frame.conversationID)!;
-  {
-    // `agni` is the legacy id for the same assistant as `ea`; both read and
-    // write the main channel, so normalize before choosing the surface.
-    const channelID = canonicalAgentID(conversation.agent_id) === "ea" ? "main" : `dm:${conversation.agent_id}`;
-    const channelRows = deps.db.query<{
-      id: string; text: string; created_at: string; turn_id: string | null;
-      from_id: string; from_type: string; sender_name: string | null; sender_color: string | null;
-      device_name: string | null; ui_hint: string | null; sender_onboarded: number | null;
-      to_agent_id: string | null;
-    }, [string]>(`SELECT cm.id, cm.text, cm.created_at, cm.turn_id, cm.from_id, cm.from_type,
-      a.display_name AS sender_name, a.avatar_color AS sender_color, d.name AS device_name, cm.ui_hint,
-      a.onboarded AS sender_onboarded, cm.to_agent_id
-      FROM channel_messages cm
-      LEFT JOIN agents a ON a.id = cm.from_id
-      LEFT JOIN devices d ON d.id = cm.from_id
-      WHERE cm.channel_id = ? AND cm.internal = 0 ORDER BY cm.created_at, cm.rowid`).all(channelID);
-    for (const row of channelRows) {
-      // Role comes from `from_type`, not from comparing `from_id` to "user":
-      // a client message stores the *device* id, which made reloaded user
-      // messages render as agent messages named after the device.
-      const role = row.from_type === "user" ? "user" : row.from_type === "system" ? "system" : "assistant";
-      // The name prompt is settled once the agent has a name: the field must
-      // not come back every time the thread is loaded.
-      const uiHint =
-        row.ui_hint === "onboarding_name_prompt" && row.sender_onboarded === 1
-          ? "onboarding_completed"
-          : row.ui_hint ?? undefined;
-      const messageData = {
-        attachments: messageAttachments(deps.db, row.id),
-        id: row.id, role, text: row.text, createdAt: row.created_at, turnID: row.turn_id ?? undefined,
-        senderName: role === "user"
-          ? row.device_name ?? "You"
-          : row.sender_name ?? row.from_id,
-        senderColor: row.sender_color ?? undefined, uiHint,
-        // A handoff notice names the agent it is about, so the client can
-        // make that name a link to that agent's chat.
-        ...(row.to_agent_id ? { toAgentId: row.to_agent_id } : {}),
-      };
-      const duplicateIndex = messages.findIndex((message) =>
-        message.role === role && message.text === row.text
-          && JSON.stringify(message.attachments?.map((file) => file.id) ?? []) === JSON.stringify(messageData.attachments.map((file) => file.id))
-          && Math.abs(Date.parse(message.createdAt) - Date.parse(row.created_at)) < 30_000,
-      );
-      if (duplicateIndex >= 0) messages[duplicateIndex] = { ...messages[duplicateIndex], ...messageData };
-      else messages.push(messageData);
-    }
-    messages.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  }
+  const messages = buildConversationHistory(deps.db, frame.conversationID, frame.limit ?? 200);
   deps.reply({ type: "conversation.history.ok", conversationID: frame.conversationID, messages });
 }
 
@@ -1303,12 +1315,7 @@ function handleThreadExport(
 
 function handleMsgCancel(deps: DispatchDeps, session: Session, frame: Extract<ClientFrame, { type: "msg.cancel" }>): void {
   if (!requireAuth(deps, session)) return;
-  const controller = session.aborts.get(frame.turnID);
-  if (!controller) {
-    log.debug(`cancel for unknown/complete turn ${frame.turnID}`);
-    return;
-  }
-  controller.abort();
+  if (!cancelTurn(frame.turnID)) log.debug(`cancel for unknown/complete turn ${frame.turnID}`);
 }
 
 function handleApproveReply(
@@ -1317,15 +1324,31 @@ function handleApproveReply(
   frame: Extract<ClientFrame, { type: "approve.reply" }>,
 ): void {
   if (!requireAuth(deps, session)) return;
-  const result = deps.db.run(
-    "UPDATE approvals SET status = 'decided', decision = ?, decided_at = ? WHERE id = ? AND status = 'pending'",
-    [frame.decision, nowISO(), frame.requestID],
-  );
-  if (result.changes === 0) {
+  const row = deps.db.query<{ status: string; thread_id: string | null; turn_id: string | null }, [string]>(
+    "SELECT status, thread_id, turn_id FROM approvals WHERE id = ?",
+  ).get(frame.requestID);
+  if (!row) {
     sendError(deps, session, "unknown_request", `no pending approval ${frame.requestID}`);
     return;
   }
+  if (row.status !== "pending") {
+    sendError(deps, session, "unknown_request", CARD_EXPIRED);
+    return;
+  }
+  if (!cardIsLive(deps.db, row.thread_id, row.turn_id)) {
+    // Pending, but the turn that asked is gone: nothing would run on an "Allow".
+    deps.db.run("UPDATE approvals SET status = 'expired', decided_at = ? WHERE id = ? AND status = 'pending'", [nowISO(), frame.requestID]);
+    deps.emit({ type: "approval.closed", requestID: frame.requestID, kind: "approval", reason: "expired" });
+    sendError(deps, session, "unknown_request", CARD_EXPIRED);
+    return;
+  }
+  deps.db.run(
+    "UPDATE approvals SET status = 'decided', decision = ?, decided_at = ? WHERE id = ? AND status = 'pending'",
+    [frame.decision, nowISO(), frame.requestID],
+  );
   resolveApprovalWaiter(frame.requestID, frame.decision);
+  // Every device drops the card, not only the one that answered.
+  deps.emit({ type: "approval.closed", requestID: frame.requestID, kind: "approval", reason: "decided" });
 }
 
 /**
@@ -1342,9 +1365,26 @@ function handleFormAnswer(
   frame: Extract<ClientFrame, { type: "form.answer" }>,
 ): void {
   if (!requireAuth(deps, session)) return;
+  const form = getForm(deps.db, frame.requestID);
+  if (!form) {
+    sendError(deps, session, "unknown_request", `no pending form ${frame.requestID}`);
+    return;
+  }
+  if (form.status !== "pending") {
+    sendError(deps, session, "unknown_request", CARD_EXPIRED);
+    return;
+  }
+  if (!cardIsLive(deps.db, form.threadID, form.turnID)) {
+    deps.db.run("UPDATE forms SET status = 'expired' WHERE id = ? AND status = 'pending'", [frame.requestID]);
+    deps.emit({ type: "approval.closed", requestID: frame.requestID, kind: "form", reason: "expired" });
+    sendError(deps, session, "unknown_request", CARD_EXPIRED);
+    return;
+  }
   if (!answerFormAndWake(deps.db, frame.requestID, frame.answer)) {
     sendError(deps, session, "unknown_request", `no pending form ${frame.requestID}`);
+    return;
   }
+  deps.emit({ type: "approval.closed", requestID: frame.requestID, kind: "form", reason: "decided" });
 }
 
 function handleSecretReply(

@@ -7,17 +7,11 @@
  * Owner-only: every route needs a paired device token, like /attachments.
  */
 import type { Database } from "bun:sqlite";
+import { NO_BROWSER_ORIGINS, type OriginPolicy } from "../auth/origin";
 import { requestToken, verifyToken } from "../auth/tokens";
 import type { Config } from "../config";
 import type { Router } from "../models/router";
 import { dayTotals } from "../stores/usage";
-
-const headers = {
-  "access-control-allow-origin": "*",
-  "access-control-allow-methods": "GET, OPTIONS",
-  "access-control-allow-headers": "authorization, content-type",
-  "cache-control": "no-store",
-};
 
 /** Big tool results and context messages are cut so one turn cannot stall the page. */
 const MAX_TEXT = 20_000;
@@ -30,7 +24,12 @@ function parseJSON(text: string | null): unknown {
   try { return JSON.parse(text); } catch { return text; }
 }
 
-export async function debugRequest(request: Request, db: Database, router: Router, config: Config): Promise<Response> {
+export async function debugRequest(request: Request, db: Database, router: Router, config: Config, policy: OriginPolicy = NO_BROWSER_ORIGINS): Promise<Response> {
+  // A page on another origin gets no answer at all, with or without a token. An
+  // allowed origin is echoed back; there is no wildcard here.
+  const foreign = policy.rejectForeignOrigin(request);
+  if (foreign) return foreign;
+  const headers = { ...policy.cors(request, "GET, OPTIONS", "authorization, content-type"), "cache-control": "no-store" };
   const reply = (data: unknown, status = 200) => Response.json(data, { status, headers });
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers });
   if (request.method !== "GET") return reply({ error: "Read-only." }, 405);

@@ -9,7 +9,7 @@
  * so the document can be used to find out why a turn behaved the way it did.
  */
 import type { Database } from "bun:sqlite";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homePath } from "../home";
 import { dirname, join, resolve } from "node:path";
 import { canonicalAgentID } from "../agent/personas";
@@ -43,15 +43,74 @@ export function sharePath(token: string): string | null {
   return join(shareDir(), `${token}.html`);
 }
 
-/** Read a published export. Returns null for anything that is not a token. */
-export function readShareFile(token: string): string | null {
+/**
+ * How long a share link works: 7 days from the moment it was published.
+ * The clock is the file's own modification time (written once, at publish), so
+ * no schema or sidecar file is needed and a copied-back-in file cannot outlive it.
+ */
+export const SHARE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** A clock this far ahead is skew; further ahead than this, the file's date cannot be trusted. */
+const CLOCK_SKEW_MS = 60_000;
+
+function isExpired(path: string, now: number): boolean {
+  try {
+    const age = now - statSync(path).mtimeMs;
+    // A date in the future would never run out: treat it as expired.
+    return age > SHARE_TTL_MS || age < -CLOCK_SKEW_MS;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Read a published export. Returns null for anything that is not a token, an
+ * export that does not exist, and one past its 7 days (which is deleted).
+ */
+export function readShareFile(token: string, now = Date.now()): string | null {
   const path = sharePath(token);
   if (!path) return null;
+  if (isExpired(path, now)) {
+    removeShare(path);
+    return null;
+  }
   try {
     return readFileSync(path, "utf8");
   } catch {
     return null;
   }
+}
+
+function removeShare(path: string): boolean {
+  try {
+    unlinkSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Revoke a link: delete its file. False when there was nothing to revoke. */
+export function revokeShare(token: string): boolean {
+  const path = sharePath(token);
+  return path !== null && removeShare(path);
+}
+
+/** Delete every export past its 7 days; returns how many. Run at boot. */
+export function purgeExpiredShares(now = Date.now()): number {
+  let removed = 0;
+  let names: string[];
+  try {
+    names = readdirSync(shareDir());
+  } catch {
+    return 0;
+  }
+  for (const name of names) {
+    if (!/^[0-9a-f]{32}\.html$/.test(name)) continue;
+    const path = join(shareDir(), name);
+    if (isExpired(path, now) && removeShare(path)) removed += 1;
+  }
+  return removed;
 }
 
 /** Render and write the document; returns the token and the URL to hand out. */

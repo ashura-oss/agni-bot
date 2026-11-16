@@ -10,8 +10,10 @@
  * someone else, and a gap is only reported when a *shared* frame is no longer
  * available.
  *
- * The counter is persisted (throttled) so ids stay unique across restarts;
- * after a crash the client may see a gap and reload — acceptable at v0.
+ * The counter is persisted (throttled) so ids stay unique across restarts.
+ * After a crash the persisted value can trail frames already sent, so boot
+ * resumes one interval above it (`adoptPersistedSeq`); the ring is empty, so a
+ * client behind that point gets `resync_gap` and reloads.
  */
 import type { ServerFrame, ServerFrameBody } from "@agni/protocol";
 
@@ -25,6 +27,9 @@ interface LoggedFrame {
   frame: ServerFrame;
   replay: boolean;
 }
+
+/** The counter is written to disk every this many frames. */
+export const SEQ_PERSIST_INTERVAL = 32;
 
 export class FrameLog {
   private entries: LoggedFrame[] = [];
@@ -50,6 +55,16 @@ export class FrameLog {
     }
   }
 
+  /**
+   * Seed the counter from the value a previous process persisted. That value
+   * can trail the last seq the process sent by up to one interval (it writes
+   * every `SEQ_PERSIST_INTERVAL` frames), so resume above it: seq never goes
+   * backwards and a client never mistakes a new frame for one it already has.
+   */
+  adoptPersistedSeq(seq: number): void {
+    if (Number.isFinite(seq) && seq >= 0) this.adoptSeq(seq + SEQ_PERSIST_INTERVAL);
+  }
+
   next(body: ServerFrameBody, options: { replay?: boolean } = {}): ServerFrame {
     const frame = { ...body, seq: ++this.lastSeqValue } as ServerFrame;
     this.entries.push({ frame, replay: options.replay ?? true });
@@ -57,7 +72,7 @@ export class FrameLog {
       const evicted = this.entries.shift();
       if (evicted?.replay) this.lastEvictedShared = Math.max(this.lastEvictedShared ?? 0, evicted.frame.seq);
     }
-    if (this.persist && this.lastSeqValue % 32 === 0) this.persist(this.lastSeqValue);
+    if (this.persist && this.lastSeqValue % SEQ_PERSIST_INTERVAL === 0) this.persist(this.lastSeqValue);
     return frame;
   }
 

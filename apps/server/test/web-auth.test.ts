@@ -9,7 +9,7 @@ import type { Config } from "../src/config";
 import { openDatabase } from "../src/db";
 import { HealthTracker } from "../src/models/health";
 import { Router } from "../src/models/router";
-import { allowedOrigin, startServer, type RunningServer } from "../src/ws/server";
+import { startServer, type RunningServer } from "../src/ws/server";
 import { webAppRequest } from "../src/ws/web-app";
 
 /** Browser pairing: one-time codes, the session cookie, cookie-authed sockets. */
@@ -24,18 +24,21 @@ afterEach(() => {
   db = undefined;
 });
 
-function start(): { base: string; db: Database } {
+function start(extra: Partial<Config> = {}): { base: string; db: Database } {
   db = openDatabase(":memory:");
   const config: Config = {
     host: "127.0.0.1", port: 0, dbPath: ":memory:", pidPath: "", logPath: "", providers: [],
     firstTokenTimeoutMs: 1000, turnTimeoutMs: 5000, helloTimeoutMs: 2000, frameLogCapacity: 100,
-    jobPollMs: 1000, maxConcurrentTurns: 4, pluginsPath: "",
+    jobPollMs: 1000, maxConcurrentTurns: 4, pluginsPath: "", ...extra,
   };
   server = startServer(config, db, new Router([], new HealthTracker()));
-  return { base: `http://127.0.0.1:${server.port}`, db };
+  const base = `http://127.0.0.1:${server.port}`;
+  // The page's own origin: the server was bound to an ephemeral port.
+  ORIGIN = { origin: base };
+  return { base, db };
 }
 
-const ORIGIN = { origin: "http://127.0.0.1:8787" };
+let ORIGIN = { origin: "http://127.0.0.1:8787" };
 
 async function pair(base: string, code: string, origin = ORIGIN): Promise<Response> {
   return fetch(`${base}/auth/pair`, {
@@ -117,10 +120,23 @@ describe("/auth", () => {
     expect((await pair(base, code)).status).toBe(200);
   });
 
-  test("a https origin gets a Secure cookie when it is the public origin", () => {
-    expect(allowedOrigin("https://box.tail1.ts.net", "127.0.0.1", "https://box.tail1.ts.net")).toBe(true);
-    expect(allowedOrigin("https://box.tail1.ts.net", "127.0.0.1")).toBe(false);
-    expect(allowedOrigin("https://other.ts.net", "127.0.0.1", "https://box.tail1.ts.net")).toBe(false);
+  test("a https origin gets a Secure cookie when it is the public origin", async () => {
+    const { base, db } = start({ publicOrigin: "https://box.tail1.ts.net" });
+    const origin = { origin: "https://box.tail1.ts.net", host: "box.tail1.ts.net" };
+    const response = await fetch(`${base}/auth/pair`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...origin },
+      body: JSON.stringify({ code: await mintPairCode(db), name: "Phone" }),
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("set-cookie")).toContain("Secure");
+    // Another https name is still a foreign origin.
+    const foreign = await fetch(`${base}/auth/pair`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "https://other.ts.net", host: "box.tail1.ts.net" },
+      body: JSON.stringify({ code: await mintPairCode(db), name: "Phone" }),
+    });
+    expect(foreign.status).toBe(403);
   });
 });
 

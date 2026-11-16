@@ -1,17 +1,17 @@
 import type { Database } from "bun:sqlite";
 import type { Router } from "../models/router";
 import { MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS } from "@agni/protocol";
+import { NO_BROWSER_ORIGINS, type OriginPolicy } from "../auth/origin";
 import { requestToken, verifyToken } from "../auth/tokens";
 import { attachmentInfo, canReadAttachment, deleteDraftAttachment, getAttachment, saveAttachment, validateAttachments } from "./store";
 
-const headers = {
-  "access-control-allow-origin": "*",
-  "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
-  "access-control-allow-headers": "authorization, content-type",
-  "cache-control": "no-store",
-};
 let activeUploads = 0;
-export async function attachmentRequest(request: Request, db: Database, dbPath: string, router: Router): Promise<Response> {
+export async function attachmentRequest(request: Request, db: Database, dbPath: string, router: Router, policy: OriginPolicy = NO_BROWSER_ORIGINS): Promise<Response> {
+  // A page on another origin gets no answer at all, with or without a token. An
+  // allowed origin is echoed back; there is no wildcard here.
+  const foreign = policy.rejectForeignOrigin(request);
+  if (foreign) return foreign;
+  const headers = { ...policy.cors(request, "GET, POST, DELETE, OPTIONS", "authorization, content-type"), "cache-control": "no-store" };
   const reply = (data: unknown, status = 200) => Response.json(data, { status, headers });
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers });
   const token = requestToken(request);
