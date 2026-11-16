@@ -46,6 +46,7 @@ import { audit } from "../policy/audit-sink";
 import { newID, nowISO } from "../util/ids";
 import { isOutsideScratch, resolveWritePath, scratchDir } from "../tools/write-file";
 import type { ToolResource } from "../policy/tool-meta";
+import { normalizeRecipients } from "../mail/smtp";
 
 /** Shell tools: `bash` (see the header) and `run_privileged` (the owner reviews each command and types the secret). */
 const NEVER_REMEMBER = new Set(["bash", "run_privileged"]);
@@ -62,6 +63,8 @@ export interface ApprovalRule {
   approvalID: string | null;
   /** Set on a rule that matches by resource pattern instead of one exact target. */
   resourcePattern: string | null;
+  /** The mailbox a mail pattern rule was made for ("agent" or "owner"); null on every other rule. */
+  account: MailAccount | null;
 }
 
 interface RuleRow {
@@ -84,7 +87,51 @@ const toRule = (row: RuleRow): ApprovalRule => ({
   revokedAt: row.revoked_at,
   approvalID: row.approval_id,
   resourcePattern: row.resource_pattern ?? null,
+  account: row.resource_pattern !== null && row.tool_name === "mail_send" ? accountOfPatternTarget(row.target) : null,
 });
+
+/** The mailboxes a mail send can come from. */
+export type MailAccount = "agent" | "owner";
+
+/** The mailbox a mail call sends from, read the way the mail tool reads it; null for a value the tool would refuse. */
+function mailAccountOf(value: unknown): MailAccount | null {
+  if (value === undefined || value === null) return "agent";
+  const text = typeof value === "string" ? value.trim() : "";
+  return text === "agent" || text === "owner" ? text : null;
+}
+
+/**
+ * A mail call as the sender will see it: its mailbox and its recipients, parsed with the sender's own parser
+ * (`mail/smtp.ts`). Null when either does not parse cleanly (an entry with a comma, a semicolon, a display name or
+ * a line break, a value that is not a string, no recipients, an unknown mailbox): such a call is never matched by a
+ * rule, so it shows its card.
+ */
+export function parseMailCall(args: Record<string, unknown>): { account: MailAccount; to: string[] } | null {
+  const account = mailAccountOf(args.account);
+  if (account === null) return null;
+  let to: string[];
+  try {
+    to = normalizeRecipients(args.to).map(normaliseRecipient);
+  } catch {
+    return null;
+  }
+  return { account, to: [...new Set(to)].sort() };
+}
+
+const PATTERN_TARGET = "pattern:";
+const MAIL_ACCOUNT_MARK = "account=";
+
+/** The key a pattern rule is stored under: one live rule per bot, tool and pattern (and, for mail, mailbox). */
+function patternTarget(toolName: string, pattern: string, account: MailAccount | null): string {
+  return toolName === "mail_send" && account !== null ? `${PATTERN_TARGET}${MAIL_ACCOUNT_MARK}${account}:${pattern}` : `${PATTERN_TARGET}${pattern}`;
+}
+
+function accountOfPatternTarget(target: string): MailAccount | null {
+  const body = target.startsWith(PATTERN_TARGET) ? target.slice(PATTERN_TARGET.length) : "";
+  if (!body.startsWith(MAIL_ACCOUNT_MARK)) return null;
+  const account = body.slice(MAIL_ACCOUNT_MARK.length).split(":", 1)[0];
+  return account === "agent" || account === "owner" ? account : null;
+}
 
 /** What a rule for this call is scoped to, or null when the call cannot be remembered. */
 export function approvalTarget(toolName: string, args: Record<string, unknown>): string | null {
@@ -101,11 +148,9 @@ export function approvalTarget(toolName: string, args: Record<string, unknown>):
       return process.platform === "win32" ? target.toLowerCase() : target;
     }
     case "mail_send": {
-      const account = typeof args.account === "string" && args.account.trim() ? args.account.trim().toLowerCase() : "agent";
-      const raw = Array.isArray(args.to) ? args.to : typeof args.to === "string" ? [args.to] : [];
-      const to = [...new Set(raw.filter((entry): entry is string => typeof entry === "string").map(normaliseRecipient).filter(Boolean))].sort();
-      if (to.length === 0) return null;
-      return canonicalJSON({ account, to });
+      // What the sender will do with the call, or nothing to remember: a list it would refuse is never a rule's target.
+      const mail = parseMailCall(args);
+      return mail ? canonicalJSON({ account: mail.account, to: mail.to }) : null;
     }
     default:
       return canonicalJSON(args);
@@ -141,7 +186,7 @@ export function findApprovalRule(db: Database, agentID: string, toolName: string
  */
 export function addApprovalRule(
   db: Database,
-  rule: { agentID: string; toolName: string; target: string; approvalID?: string | null; resourcePattern?: string | null },
+  rule: { agentID: string; toolName: string; target: string; approvalID?: string | null; resourcePattern?: string | null; account?: string | null },
 ): ApprovalRule | null {
   if (NEVER_REMEMBER.has(rule.toolName)) return null;
   const pattern = rule.resourcePattern ?? null;
@@ -149,8 +194,11 @@ export function addApprovalRule(
     const problem = validateResourcePattern(pattern);
     if (problem) throw new Error(`resource pattern refused: ${problem}`);
   }
-  // A pattern rule's target is its pattern, so the one-live-rule-per-target index also keeps patterns unique.
-  const target = pattern !== null ? `pattern:${pattern}` : rule.target;
+  // A mail pattern rule is for one mailbox: a rule made for the agent's mailbox must not let the owner's mailbox send.
+  const account = rule.account === undefined || rule.account === null ? null : mailAccountOf(rule.account);
+  if (pattern !== null && rule.toolName === "mail_send" && account === null) throw new Error("a mail rule needs the account it is for: agent or owner");
+  // A pattern rule's target is its pattern (and mailbox), so the one-live-rule-per-target index also keeps patterns unique.
+  const target = pattern !== null ? patternTarget(rule.toolName, pattern, account) : rule.target;
   const existing = findApprovalRule(db, rule.agentID, rule.toolName, target);
   if (existing) return existing;
   const id = newID("rul");
@@ -222,14 +270,21 @@ export function matchApprovalRule(
     const exact = findApprovalRule(db, call.agentID, call.toolName, target);
     if (exact) return exact;
   }
-  if (call.resources.length === 0) return null;
-  if (call.toolName === "write_file" && call.resources.some((resource) => resource.kind !== "path" || isOutsideScratch(resource.value, scratchDir()))) return null;
+  // A mail call is matched on what the sender will use, not on the engine's reading of the arguments.
+  const mail = call.toolName === "mail_send" ? parseMailCall(call.args) : null;
+  if (call.toolName === "mail_send" && mail === null) return null;
+  const resources: readonly ToolResource[] = mail ? mail.to.map((value) => ({ kind: "recipient" as const, value })) : call.resources;
+  if (resources.length === 0) return null;
+  if (call.toolName === "write_file" && resources.some((resource) => resource.kind !== "path" || isOutsideScratch(resource.value, scratchDir()))) return null;
   const rows = db
     .query("SELECT * FROM approval_rules WHERE agent_id = ? AND tool_name = ? AND revoked_at IS NULL AND resource_pattern IS NOT NULL ORDER BY created_at, id")
     .all(call.agentID, call.toolName) as RuleRow[];
   for (const row of rows) {
     const pattern = row.resource_pattern;
-    if (pattern && call.resources.every((resource) => matchResourcePattern(pattern, resource))) return toRule(row);
+    const rule = toRule(row);
+    // A mail rule is for the mailbox it was made for; one written without a mailbox matches no mail.
+    if (mail && rule.account !== mail.account) continue;
+    if (pattern && resources.every((resource) => matchResourcePattern(pattern, resource))) return rule;
   }
   return null;
 }

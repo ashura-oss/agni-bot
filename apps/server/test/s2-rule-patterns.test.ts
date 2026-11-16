@@ -115,24 +115,26 @@ describe("validateResourcePattern", () => {
 
 describe("matchApprovalRule", () => {
   const add = (overrides: Partial<Parameters<typeof addApprovalRule>[1]> = {}) =>
-    addApprovalRule(db, { agentID: "ea", toolName: "mail_send", target: "", resourcePattern: "*@example.com", ...overrides })!;
+    addApprovalRule(db, { agentID: "ea", toolName: "mail_send", target: "", account: "owner", resourcePattern: "*@example.com", ...overrides })!;
   const call = (overrides: Partial<Parameters<typeof matchApprovalRule>[1]> = {}) =>
-    matchApprovalRule(db, { agentID: "ea", toolName: "mail_send", args: { to: ["a@example.com"], subject: "s", body: "b" }, resources: [recipient("a@example.com")], ...overrides });
+    matchApprovalRule(db, { agentID: "ea", toolName: "mail_send", args: { account: "owner", to: ["a@example.com"], subject: "s", body: "b" }, resources: [recipient("a@example.com")], ...overrides });
 
   test("a pattern rule allows a call whose every resource fits", () => {
     const rule = add();
     expect(call()?.id).toBe(rule.id);
-    expect(call({ resources: [recipient("a@example.com"), recipient("b@example.com")] })?.id).toBe(rule.id);
+    expect(call({ args: { account: "owner", to: ["a@example.com", "b@example.com"], subject: "s", body: "b" }, resources: [recipient("a@example.com"), recipient("b@example.com")] })?.id).toBe(rule.id);
   });
 
   test("one resource outside the pattern means no match", () => {
     add();
-    expect(call({ resources: [recipient("a@example.com"), recipient("b@other.org")] })).toBeNull();
+    expect(call({ args: { account: "owner", to: ["a@example.com", "b@other.org"], subject: "s", body: "b" }, resources: [recipient("a@example.com"), recipient("b@other.org")] })).toBeNull();
   });
 
   test("a call with no resources matches no pattern", () => {
     add();
-    expect(call({ resources: [] })).toBeNull();
+    expect(call({ args: { account: "owner", to: [], subject: "s", body: "b" }, resources: [] })).toBeNull();
+    // A tool that is not mail uses the resources the engine gave.
+    expect(call({ toolName: "calendar_create", resources: [] })).toBeNull();
   });
 
   test("it is still one bot and one tool", () => {
@@ -175,8 +177,8 @@ describe("matchApprovalRule", () => {
 
 describe("storing pattern rules", () => {
   test("a rule is listed with its pattern, and adding the same one twice returns the first", () => {
-    const first = addApprovalRule(db, { agentID: "ea", toolName: "mail_send", target: "", resourcePattern: "*@example.com" })!;
-    const again = addApprovalRule(db, { agentID: "ea", toolName: "mail_send", target: "", resourcePattern: "*@example.com" })!;
+    const first = addApprovalRule(db, { agentID: "ea", toolName: "mail_send", target: "", account: "owner", resourcePattern: "*@example.com" })!;
+    const again = addApprovalRule(db, { agentID: "ea", toolName: "mail_send", target: "", account: "owner", resourcePattern: "*@example.com" })!;
     expect(again.id).toBe(first.id);
     const listed = listApprovalRules(db);
     expect(listed).toHaveLength(1);
@@ -184,8 +186,8 @@ describe("storing pattern rules", () => {
   });
 
   test("a different pattern for the same bot and tool is its own rule", () => {
-    addApprovalRule(db, { agentID: "ea", toolName: "mail_send", target: "", resourcePattern: "*@example.com" });
-    addApprovalRule(db, { agentID: "ea", toolName: "mail_send", target: "", resourcePattern: "*@example.org" });
+    addApprovalRule(db, { agentID: "ea", toolName: "mail_send", target: "", account: "owner", resourcePattern: "*@example.com" });
+    addApprovalRule(db, { agentID: "ea", toolName: "mail_send", target: "", account: "owner", resourcePattern: "*@example.org" });
     expect(listApprovalRules(db)).toHaveLength(2);
   });
 
