@@ -9,8 +9,9 @@
  * relative paths are relative to scratch, symlinks are followed.
  */
 import { appendFileSync, lstatSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { dirname, resolve, sep } from "node:path";
 import { homePath } from "../home";
+import { foldKey, realPathOf } from "../policy/path-key";
 
 const MAX_BYTES = 1024 * 1024;
 
@@ -21,6 +22,8 @@ const MAX_BYTES = 1024 * 1024;
  * a different rule target (it asks again), which is the safe direction.
  */
 const CASE_INSENSITIVE = process.platform === "win32";
+/** The platform whose case folding `foldKey` applies here: Windows folds, macOS stays case-sensitive (see above). */
+const FOLD_AS: NodeJS.Platform = CASE_INSENSITIVE ? "win32" : "linux";
 
 /**
  * The tree the owner has declared safe for ungated writes. Defaults to
@@ -40,26 +43,27 @@ export function isInsidePath(parent: string, child: string, caseInsensitive = CA
   return target === base || target.startsWith(base.endsWith(separator) ? base : base + separator);
 }
 
+/** Is there a dangling link in `target`, or in the nearest part of it that exists? Its real target cannot be known. */
+function hasDanglingLink(target: string): boolean {
+  for (let current = target; ; current = dirname(current)) {
+    try {
+      realpathSync.native(current);
+      return false;
+    } catch {
+      try { lstatSync(current); return true; } catch { /* missing: walk up */ }
+    }
+    if (dirname(current) === current) return false;
+  }
+}
+
 /**
- * The real path `path` names: symlinks are followed through its nearest
- * existing ancestor, and the missing tail is appended. Null for a dangling
- * symlink, whose real target cannot be known. A relative path resolves
- * against `base`.
+ * The real path `path` names, in the spelling on disk: the one walk a refusal's key uses (policy/path-key.ts `realPathOf`:
+ * symlinks, junctions, 8.3 short names and the on-disk case all end at one spelling, the missing tail appended). Null for a
+ * dangling symlink. A relative path resolves against `base`.
  */
 function realTarget(path: string, base: string): string | null {
-  let target = resolve(base, path);
-  const tail: string[] = [];
-  for (;;) {
-    try {
-      return join(realpathSync(target), ...tail.reverse());
-    } catch {
-      try { lstatSync(target); return null; } catch { /* missing: walk up */ }
-    }
-    const parent = dirname(target);
-    if (parent === target) return join(target, ...tail.reverse());
-    tail.push(basename(target));
-    target = parent;
-  }
+  const target = resolve(base, path);
+  return hasDanglingLink(target) ? null : realPathOf(target);
 }
 
 /**
@@ -83,7 +87,8 @@ export function isOutsideScratch(path: string, base: string = process.cwd()): bo
   const target = realTarget(path, base);
   const scratch = realTarget(scratchDir(), base);
   if (!target || !scratch) return true;
-  return !isInsidePath(scratch, target);
+  // Both sides are real paths folded the way a refusal's key folds them (policy/path-key.ts), then compared as they are.
+  return !isInsidePath(foldKey(scratch, FOLD_AS), foldKey(target, FOLD_AS), false);
 }
 
 /** The real path of `path` (relative to scratch), or a throw when it escapes the scratch tree. */

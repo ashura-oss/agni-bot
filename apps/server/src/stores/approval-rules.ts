@@ -145,6 +145,8 @@ export function approvalTarget(toolName: string, args: Record<string, unknown>):
       if (isOutsideScratch(args.path, scratchDir())) return null;
       const target = resolveWritePath(args.path);
       if (!target) return null;
+      // The rule target folds case on Windows by itself, not through policy/path-key.ts `foldKey`: a rule is a standing
+      // "yes", so it must not fold where a refusal does (macOS). Ruled acceptable in the Sprint 2 review; leave it as it is.
       return process.platform === "win32" ? target.toLowerCase() : target;
     }
     case "mail_send": {
