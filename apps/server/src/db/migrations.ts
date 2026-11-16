@@ -1116,4 +1116,15 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE approvals ADD COLUMN rule_id TEXT;
     `,
   },
+  {
+    id: 51,
+    name: "revoke_shell_rules",
+    sql: `
+      -- Shell commands are never remembered (stores/approval-rules.ts). Retire any
+      -- rule an earlier build stored for a shell tool, so none can ever match.
+      UPDATE approval_rules
+        SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+        WHERE tool_name IN ('bash', 'run_privileged') AND revoked_at IS NULL;
+    `,
+  },
 ];

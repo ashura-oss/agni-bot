@@ -4,11 +4,12 @@
  * widen: not to another bot, another tool, or a near-miss target.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import type { Database } from "bun:sqlite";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { Database } from "bun:sqlite";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openDatabase } from "../src/db";
+import { migrate, openDatabase } from "../src/db";
+import { MIGRATIONS } from "../src/db/migrations";
 import { ApprovalBroker, type Decision } from "../src/agent/approval-broker";
 import { createThread, createTurn } from "../src/stores/threads";
 import {
@@ -33,6 +34,9 @@ afterEach(() => {
   else process.env.AGNI_SCRATCH_DIR = savedScratch;
   rmSync(root, { recursive: true, force: true });
 });
+
+/** For tests of rules that may be stored: a null here is a failure. */
+const addRule = (...args: Parameters<typeof addApprovalRule>) => addApprovalRule(...args)!;
 
 describe("approvalTarget: what a rule is scoped to", () => {
   test("bash is never remembered, whatever the command or working directory", () => {
@@ -109,6 +113,14 @@ describe("approvalTarget: what a rule is scoped to", () => {
     expect(approvalTarget("run_privileged", { command: "sudo ls", purpose: "list" })).toBeNull();
   });
 
+  test("write_file outside scratch has no target; inside scratch it does", () => {
+    expect(approvalTarget("write_file", { path: join(root, "outside", "x.txt"), content: "x" })).toBeNull();
+    expect(approvalTarget("write_file", { path: "../outside/x.txt", content: "x" })).toBeNull();
+    expect(approvalTarget("write_file", { path: join(root, "scratch-sibling", "x.txt"), content: "x" })).toBeNull();
+    expect(approvalTarget("write_file", { path: "inside/x.txt", content: "x" })).not.toBeNull();
+    expect(approvalTarget("write_file", { path: join(root, "scratch", "x.txt"), content: "x" })).not.toBeNull();
+  });
+
   test("a write_file whose path cannot be resolved has no target", () => {
     expect(approvalTarget("write_file", { path: "", content: "x" })).toBeNull();
     expect(approvalTarget("write_file", { content: "x" })).toBeNull();
@@ -116,39 +128,39 @@ describe("approvalTarget: what a rule is scoped to", () => {
 });
 
 describe("the rule store", () => {
-  const rule = { agentID: "ea", toolName: "bash", target: "rm -rf build" };
+  const rule = { agentID: "ea", toolName: "mcp_files_delete", target: "rm -rf build" };
 
   test("an added rule is found by its exact bot, tool and target, and by nothing else", () => {
-    const added = addApprovalRule(db, rule);
+    const added = addRule(db, rule);
     expect(added.id).toStartWith("rul_");
-    expect(findApprovalRule(db, "ea", "bash", "rm -rf build")?.id).toBe(added.id);
-    expect(findApprovalRule(db, "other-bot", "bash", "rm -rf build")).toBeNull();
+    expect(findApprovalRule(db, "ea", "mcp_files_delete", "rm -rf build")?.id).toBe(added.id);
+    expect(findApprovalRule(db, "other-bot", "mcp_files_delete", "rm -rf build")).toBeNull();
     expect(findApprovalRule(db, "ea", "write_file", "rm -rf build")).toBeNull();
-    expect(findApprovalRule(db, "ea", "bash", "rm -rf build ")).toBeNull();
-    expect(findApprovalRule(db, "ea", "bash", "rm -rf")).toBeNull();
-    expect(findApprovalRule(db, "ea", "bash", "rm -rf build && ls")).toBeNull();
-    expect(findApprovalRule(db, "ea", "bash", "RM -RF BUILD")).toBeNull();
+    expect(findApprovalRule(db, "ea", "mcp_files_delete", "rm -rf build ")).toBeNull();
+    expect(findApprovalRule(db, "ea", "mcp_files_delete", "rm -rf")).toBeNull();
+    expect(findApprovalRule(db, "ea", "mcp_files_delete", "rm -rf build && ls")).toBeNull();
+    expect(findApprovalRule(db, "ea", "mcp_files_delete", "RM -RF BUILD")).toBeNull();
   });
 
   test("target text is data: SQL wildcards and quotes match nothing extra", () => {
-    addApprovalRule(db, { agentID: "ea", toolName: "bash", target: "ls %" });
-    addApprovalRule(db, { agentID: "ea", toolName: "bash", target: "it's" });
-    expect(findApprovalRule(db, "ea", "bash", "ls anything")).toBeNull();
-    expect(findApprovalRule(db, "ea", "bash", "ls %")).not.toBeNull();
-    expect(findApprovalRule(db, "ea", "bash", "it's")).not.toBeNull();
-    expect(findApprovalRule(db, "ea", "bash", "' OR '1'='1")).toBeNull();
+    addRule(db, { agentID: "ea", toolName: "mcp_files_delete", target: "ls %" });
+    addRule(db, { agentID: "ea", toolName: "mcp_files_delete", target: "it's" });
+    expect(findApprovalRule(db, "ea", "mcp_files_delete", "ls anything")).toBeNull();
+    expect(findApprovalRule(db, "ea", "mcp_files_delete", "ls %")).not.toBeNull();
+    expect(findApprovalRule(db, "ea", "mcp_files_delete", "it's")).not.toBeNull();
+    expect(findApprovalRule(db, "ea", "mcp_files_delete", "' OR '1'='1")).toBeNull();
   });
 
   test("adding the same active rule twice keeps one rule", () => {
-    const first = addApprovalRule(db, rule);
-    const second = addApprovalRule(db, rule);
+    const first = addRule(db, rule);
+    const second = addRule(db, rule);
     expect(second.id).toBe(first.id);
     expect(listApprovalRules(db)).toHaveLength(1);
   });
 
   test("listApprovalRules returns active rules; revoked ones only on request", () => {
-    const a = addApprovalRule(db, rule);
-    const b = addApprovalRule(db, { ...rule, target: "ls" });
+    const a = addRule(db, rule);
+    const b = addRule(db, { ...rule, target: "ls" });
     expect(listApprovalRules(db).map((r) => r.id).sort()).toEqual([a.id, b.id].sort());
     expect(revokeApprovalRule(db, a.id)).toBe(true);
     expect(listApprovalRules(db).map((r) => r.id)).toEqual([b.id]);
@@ -159,19 +171,59 @@ describe("the rule store", () => {
   });
 
   test("a revoked rule no longer matches, and revoking twice or an unknown id is false", () => {
-    const a = addApprovalRule(db, rule);
+    const a = addRule(db, rule);
     expect(revokeApprovalRule(db, a.id)).toBe(true);
-    expect(findApprovalRule(db, "ea", "bash", "rm -rf build")).toBeNull();
+    expect(findApprovalRule(db, "ea", "mcp_files_delete", "rm -rf build")).toBeNull();
     expect(revokeApprovalRule(db, a.id)).toBe(false);
     expect(revokeApprovalRule(db, "rul_nope")).toBe(false);
   });
 
   test("after a revoke the owner can allow the same thing again as a fresh rule", () => {
-    const a = addApprovalRule(db, rule);
+    const a = addRule(db, rule);
     revokeApprovalRule(db, a.id);
-    const again = addApprovalRule(db, rule);
+    const again = addRule(db, rule);
     expect(again.id).not.toBe(a.id);
-    expect(findApprovalRule(db, "ea", "bash", "rm -rf build")?.id).toBe(again.id);
+    expect(findApprovalRule(db, "ea", "mcp_files_delete", "rm -rf build")?.id).toBe(again.id);
+  });
+
+  test("a tool that is never remembered cannot be stored or found, whoever calls", () => {
+    for (const toolName of ["bash", "run_privileged"]) {
+      expect(addApprovalRule(db, { agentID: "ea", toolName, target: "ls" })).toBeNull();
+      expect(db.query("SELECT count(*) AS n FROM approval_rules WHERE tool_name = ?").get(toolName)).toEqual({ n: 0 });
+      // A row that got in some other way is never found either.
+      db.run("INSERT INTO approval_rules (id, agent_id, tool_name, target, created_at) VALUES (?, 'ea', ?, 'ls', ?)", [`rul_old_${toolName}`, toolName, new Date().toISOString()]);
+      expect(findApprovalRule(db, "ea", toolName, "ls")).toBeNull();
+    }
+  });
+});
+
+describe("migration 51 retires shell rules", () => {
+  test("rules already stored for bash and run_privileged are revoked; the rest are untouched", () => {
+    const old = new Database(":memory:");
+    old.exec("CREATE TABLE schema_migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL);");
+    for (const migration of MIGRATIONS.filter((entry) => entry.id <= 50)) {
+      old.transaction(() => {
+        old.exec(migration.sql);
+        old.run("INSERT INTO schema_migrations (id, name, applied_at) VALUES (?, ?, ?)", [migration.id, migration.name, "test"]);
+      })();
+    }
+    const insert = (id: string, tool: string, revokedAt: string | null) =>
+      old.run("INSERT INTO approval_rules (id, agent_id, tool_name, target, created_at, revoked_at) VALUES (?, 'ea', ?, ?, 'then', ?)", [id, tool, id, revokedAt]);
+    insert("r_bash", "bash", null);
+    insert("r_priv", "run_privileged", null);
+    insert("r_write", "write_file", null);
+    insert("r_mcp", "mcp_files_delete", null);
+    insert("r_bash_already", "bash", "earlier");
+
+    expect(migrate(old)).toEqual(MIGRATIONS.filter((entry) => entry.id > 50).map((entry) => entry.id));
+    const state = Object.fromEntries((old.query("SELECT id, revoked_at FROM approval_rules").all() as Array<{ id: string; revoked_at: string | null }>).map((r) => [r.id, r.revoked_at]));
+    expect(state.r_bash).not.toBeNull();
+    expect(state.r_priv).not.toBeNull();
+    expect(state.r_bash_already).toBe("earlier");
+    expect(state.r_write).toBeNull();
+    expect(state.r_mcp).toBeNull();
+    expect(MIGRATIONS.find((entry) => entry.id === 51)?.name).toBe("revoke_shell_rules");
+    old.close();
   });
 });
 
@@ -271,13 +323,39 @@ describe("the broker uses rules", () => {
     expect(h.frames).toHaveLength(2);
   });
 
-  test("always on write_file remembers the resolved path, not the content", async () => {
-    mkdirSync(join(root, "outside"), { recursive: true });
-    const target = join(root, "outside", "notes.md");
+  test("always on write_file inside scratch remembers the resolved path, not the content", async () => {
+    const scratch = join(root, "scratch");
+    writeFileSync(join(scratch, "notes.md"), "v0");
+    writeFileSync(join(scratch, "other.md"), "v0");
     const h = harness(["always", "reject"]);
-    await h.ask("write_file", { path: target, content: "v1" });
-    expect(await h.ask("write_file", { path: target, content: "v2 entirely different" })).toBe("always");
-    expect(await h.ask("write_file", { path: join(root, "outside", "other.md"), content: "v1" })).toBe("reject");
+    await h.ask("write_file", { path: "notes.md", content: "v1" });
+    // The same file by absolute path, with different content: the rule answers.
+    expect(await h.ask("write_file", { path: join(scratch, "notes.md"), content: "v2 entirely different" })).toBe("always");
+    expect(await h.ask("write_file", { path: "other.md", content: "v1" })).toBe("reject");
+    expect(h.frames.map((f) => f.buttons.join())).toEqual(["once,always,reject", "once,always,reject"]);
+  });
+
+  test("a write outside scratch is never remembered: no 'always' button, nothing stored, asks every time", async () => {
+    mkdirSync(join(root, "outside"), { recursive: true });
+    const target = join(root, "outside", "startup.cmd");
+    const h = harness(["always", "once", "reject"]);
+    expect(await h.ask("write_file", { path: target, content: "v1" })).toBe("always");
+    expect(listApprovalRules(db)).toHaveLength(0);
+    expect(await h.ask("write_file", { path: target, content: "v2" })).toBe("once");
+    expect(await h.ask("write_file", { path: "../outside/startup.cmd", content: "v3" })).toBe("reject");
+    expect(h.frames).toHaveLength(3);
+    expect(h.frames.every((f) => f.buttons.join() === "once,reject")).toBe(true);
+  });
+
+  test("a rule row for a path outside scratch is ignored at match time", async () => {
+    mkdirSync(join(root, "outside"), { recursive: true });
+    const target = join(root, "outside", "config.env");
+    db.run("INSERT INTO approval_rules (id, agent_id, tool_name, target, created_at) VALUES ('rul_old', 'ea', 'write_file', ?, ?)", [
+      process.platform === "win32" ? target.toLowerCase() : target, new Date().toISOString(),
+    ]);
+    const h = harness(["reject"]);
+    expect(await h.ask("write_file", { path: target, content: "x" })).toBe("reject");
+    expect(h.frames).toHaveLength(1);
   });
 
   test("always on a tool that is never remembered stores nothing", async () => {
@@ -321,7 +399,7 @@ describe("the broker uses rules", () => {
       ["once", "reject"],
       ["once", "reject"],
       ["once", "reject"],
-      ["once", "always", "reject"],
+      ["once", "reject"], // a write outside scratch
     ]);
   });
 
@@ -336,7 +414,7 @@ describe("the broker uses rules", () => {
   test("a bash rule row already in the database is ignored at match time", async () => {
     // Rows written by an earlier build, or by hand: the broker never consults them for a shell command.
     for (const command of ["ls -la", "cat notes.txt", "rm -rf build"]) {
-      addApprovalRule(db, { agentID: "ea", toolName: "bash", target: command });
+      db.run("INSERT INTO approval_rules (id, agent_id, tool_name, target, created_at) VALUES (?, 'ea', 'bash', ?, ?)", [`rul_old_${command}`, command, new Date().toISOString()]);
     }
     const h = harness(["reject", "reject", "reject"]);
     for (const command of ["ls -la", "cat notes.txt", "rm -rf build"]) {
