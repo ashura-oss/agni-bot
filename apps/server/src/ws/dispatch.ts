@@ -93,7 +93,7 @@ import { activateAppearanceProfile, deleteAppearanceProfile, listAppearanceProfi
 import { getRoutineByJobID, listRuns, updateRoutineState } from "../stores/routines";
 import { normalizeAllowedDomains } from "../routines/egress";
 import { deleteRoutineJob } from "../tools/routines-tool";
-import { removeSubscription, saveSubscription, type PushService } from "../push/web-push";
+import { removeSubscription, saveSubscription, subscriptionProblem, type PushService } from "../push/web-push";
 import { getProactivity, setProactivity } from "../stores/proactivity";
 import { listApprovalRules, revokeApprovalRule } from "../stores/approval-rules";
 import { loadCardMeta } from "../agent/pending-cards";
@@ -319,6 +319,11 @@ export async function dispatch(deps: DispatchDeps, session: Session, raw: string
       return handleAgentCreate(deps, session, frame);
     case "push.subscribe":
       if (!requireAuth(deps, session)) return;
+      {
+        // The server will POST to this address: refuse one that is not https at a public host, or whose keys are malformed.
+        const problem = subscriptionProblem(frame.subscription);
+        if (problem) return sendError(deps, session, "bad_subscription", problem);
+      }
       saveSubscription(deps.db, session.device!.id, frame.subscription);
       return;
     case "push.unsubscribe":
