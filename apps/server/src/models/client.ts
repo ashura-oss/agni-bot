@@ -180,6 +180,8 @@ export async function streamChat(request: ChatRequest): Promise<ChatResult> {
         ...(request.maxTokens !== undefined ? { max_tokens: request.maxTokens } : {}),
       }),
       signal: controller.signal,
+      // The request carries the provider key and the whole conversation: a redirect is an error, never followed.
+      redirect: "error",
     });
   } catch (error) {
     cleanup();

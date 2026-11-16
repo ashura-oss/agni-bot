@@ -27,7 +27,8 @@ export function createGoogleTools(
     try {
       const token = await pluginAccessToken(pluginsPath, pluginID, fetchImpl);
       const headers = { ...(init.headers as Record<string, string> | undefined), authorization: `Bearer ${token}` };
-      const res = await fetchImpl(url, { ...init, headers, signal: AbortSignal.timeout(15_000) });
+      // The owner's token goes with this request: a redirect is an error, never followed.
+      const res = await fetchImpl(url, { ...init, headers, signal: AbortSignal.timeout(15_000), redirect: "error" });
       if (!res.ok) return { error: `Google answered ${res.status}` };
       return res;
     } catch (err) {
@@ -102,7 +103,7 @@ export function createGoogleTools(
       if (!plugin) return { error: 'account must be exactly "agent" or "owner"' };
       if (typeof a.eventId !== "string" || !/^[\w-]+$/.test(a.eventId)) return { error: "invalid eventId" };
       if (Array.isArray(a.attendees) && a.attendees.length && modeFor(plugin, "share") === "off") return { error: "inviting people is switched off" };
-      const res = await google(plugin, "modify", `${CAL}/${a.eventId}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(eventBody(a)) });
+      const res = await google(plugin, "modify", `${CAL}/${encodeURIComponent(a.eventId)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(eventBody(a)) });
       if ("error" in res) return res;
       return { updated: true, event: slim(await res.json()) };
     },
@@ -132,16 +133,16 @@ export function createGoogleTools(
     timeoutMs: 30_000,
     handler: async (a: any) => {
       if (typeof a.fileId !== "string" || !/^[\w-]+$/.test(a.fileId)) return { error: "invalid fileId" };
-      const meta = await google("drive", "read", `${DRIVE}/${a.fileId}?fields=name,mimeType,size`);
+      const meta = await google("drive", "read", `${DRIVE}/${encodeURIComponent(a.fileId)}?fields=name,mimeType,size`);
       if ("error" in meta) return meta;
       const info = (await meta.json()) as { name?: string; mimeType?: string; size?: string };
       const mime = info.mimeType ?? "";
       let url: string;
-      if (mime === "application/vnd.google-apps.spreadsheet") url = `${DRIVE}/${a.fileId}/export?mimeType=text%2Fcsv`;
-      else if (mime.startsWith("application/vnd.google-apps.")) url = `${DRIVE}/${a.fileId}/export?mimeType=text%2Fplain`;
+      if (mime === "application/vnd.google-apps.spreadsheet") url = `${DRIVE}/${encodeURIComponent(a.fileId)}/export?mimeType=text%2Fcsv`;
+      else if (mime.startsWith("application/vnd.google-apps.")) url = `${DRIVE}/${encodeURIComponent(a.fileId)}/export?mimeType=text%2Fplain`;
       else if (mime.startsWith("text/") || mime === "application/json") {
         if (Number(info.size ?? 0) > MAX_DRIVE_BYTES) return { error: "file is too large to read" };
-        url = `${DRIVE}/${a.fileId}?alt=media`;
+        url = `${DRIVE}/${encodeURIComponent(a.fileId)}?alt=media`;
       } else return { error: `cannot read ${mime || "this file type"} as text` };
       const res = await google("drive", "read", url);
       if ("error" in res) return res;

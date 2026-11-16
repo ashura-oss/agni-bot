@@ -58,6 +58,8 @@ export async function embedText(
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ model: config.model, input: body }),
       signal: AbortSignal.timeout(config.timeoutMs),
+      // The body is the owner's memory text: a redirect is an error, never followed.
+      redirect: "error",
     });
     if (!response.ok) {
       log.warn(`embedder ${config.model} answered ${response.status}`);

@@ -134,6 +134,8 @@ export async function fetchHealth(
     const token = localDeviceToken(env);
     const response = await fetch(healthURL(config), {
       signal: AbortSignal.timeout(timeoutMs),
+      // The device token goes with this request: a redirect is an error, never followed.
+      redirect: "error",
       ...(token ? { headers: { authorization: `Bearer ${token}` } } : {}),
     });
     if (!response.ok) return null;

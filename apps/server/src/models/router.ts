@@ -203,6 +203,8 @@ export class Router {
     const response = await this.fetchFn(`${provider.baseUrl.replace(/\/$/, "")}/models`, {
       headers: { Authorization: `Bearer ${provider.apiKey}` },
       signal: AbortSignal.timeout(10_000),
+      // The request carries the provider key: a redirect is an error, never followed.
+      redirect: "error",
     });
     if (!response.ok) throw new Error(`Provider model list returned HTTP ${response.status}.`);
     const payload = await response.json() as { data?: Array<{ id?: unknown }> };
