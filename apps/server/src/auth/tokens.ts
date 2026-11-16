@@ -82,15 +82,29 @@ export function listDevices(db: Database): Device[] {
 /** The HttpOnly cookie a paired browser carries; its value is a device token. */
 export const SESSION_COOKIE = "agni_session";
 
+/** How long a browser keeps the session cookie after its last renewal: 30 days, renewed whenever the page checks in. */
+export const SESSION_MAX_AGE_S = 30 * 24 * 60 * 60;
+
+/** The session cookie's value, if the request carries one. */
+export function cookieToken(request: Request): string | undefined {
+  for (const part of (request.headers.get("cookie") ?? "").split(";")) {
+    const [name, ...value] = part.trim().split("=");
+    if (name === SESSION_COOKIE && value.length > 0) {
+      try {
+        return decodeURIComponent(value.join("="));
+      } catch {
+        return undefined;
+      }
+    }
+  }
+  return undefined;
+}
+
 /** A device token from `Authorization: Bearer` (Mac, CLI) or the session cookie (browser). */
 export function requestToken(request: Request): string | undefined {
   const bearer = /^Bearer (.+)$/i.exec(request.headers.get("authorization") ?? "")?.[1];
   if (bearer) return bearer;
-  for (const part of (request.headers.get("cookie") ?? "").split(";")) {
-    const [name, ...value] = part.trim().split("=");
-    if (name === SESSION_COOKIE && value.length > 0) return decodeURIComponent(value.join("="));
-  }
-  return undefined;
+  return cookieToken(request);
 }
 
 // 32 symbols, no 0/O/1/I: a byte % 32 is unbiased and the code is easy to type.

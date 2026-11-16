@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { newID, nowISO } from "../util/ids";
+import { redact } from "../util/redact";
 
 export interface ThreadRow {
   id: string;
@@ -46,7 +47,7 @@ export function createThread(
   const row: ThreadRow = {
     id: newID("thr"),
     agent_id: agentID,
-    title: title ?? null,
+    title: title == null ? null : redact(title),
     created_at: nowISO(),
     updated_at: nowISO(),
     conversation_id: options?.conversationID ?? null,
@@ -114,7 +115,8 @@ export function touchThread(db: Database, id: string): void {
 
 /** Set the thread title from the first user message if it has none yet. */
 export function titleThreadFromFirstMessage(db: Database, threadID: string, text: string): void {
-  const title = text.trim().replace(/\s+/g, " ").slice(0, 60);
+  // Redact before cutting to 60 characters, so a secret split by the cut cannot slip through.
+  const title = redact(text).trim().replace(/\s+/g, " ").slice(0, 60);
   db.run("UPDATE threads SET title = ?, updated_at = ? WHERE id = ? AND (title IS NULL OR title = '')", [
     title,
     nowISO(),
@@ -169,7 +171,7 @@ export function appendMessage(
     thread_id: params.threadID,
     turn_id: params.turnID ?? null,
     role: params.role,
-    text: params.text,
+    text: redact(params.text),
     created_at: nowISO(),
     kind: params.kind ?? null,
   };
