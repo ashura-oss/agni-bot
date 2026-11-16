@@ -13,7 +13,7 @@ import { entry } from "../agent/card-text";
 import { log } from "../log";
 import { nowISO } from "../util/ids";
 import { audit } from "./audit-sink";
-import { addTaint, unpackTaint } from "./context";
+import { addTaint, readTaint } from "./context";
 import type { RunContext, TaintSource } from "./types";
 
 /**
@@ -47,19 +47,36 @@ export function markRun(run: Pick<RunContext, "taint" | "bot" | "turnID" | "jobI
   return true;
 }
 
-/** What a delegated task's run read, as stored when it ended. Empty for a task that read nothing outside, and for one that has not ended. */
+/**
+ * What a delegated task's run has read so far. Fails closed: a task with no record, an unreadable record,
+ * or no such task reads as having read outside text. Only a stored empty list means it read nothing.
+ */
 export function taskTaint(db: Database, taskID: string | null | undefined): TaintSource[] {
-  if (!taskID) return [];
+  if (!taskID) return readTaint(undefined, "a result with no task behind it");
   const row = db.query<{ taint: string | null }, [string]>("SELECT taint FROM tasks WHERE id = ?").get(taskID);
-  if (!row?.taint) return [];
+  if (!row?.taint) return readTaint(undefined, "a task with no record of what it read");
   try {
-    return unpackTaint(JSON.parse(row.taint));
+    return readTaint(JSON.parse(row.taint), "a task with no record of what it read");
   } catch {
-    return [];
+    return readTaint(undefined, "a task with no record of what it read");
   }
 }
 
-/** Write down what a task's run read, when it ends. Replaces what was there. */
+/**
+ * Write down what a task's run has read. Monotonic: what was already recorded stays, whatever is
+ * passed, so a later or partial save can only add. A task with no record yet takes what is passed.
+ */
 export function saveTaskTaint(db: Database, taskID: string, sources: readonly TaintSource[]): void {
-  db.run("UPDATE tasks SET taint = ? WHERE id = ?", [sources.length > 0 ? JSON.stringify(sources) : null, taskID]);
+  const row = db.query<{ taint: string | null }, [string]>("SELECT taint FROM tasks WHERE id = ?").get(taskID);
+  if (!row) return;
+  let merged: TaintSource[] = [...sources];
+  if (row.taint) {
+    try {
+      const before = readTaint(JSON.parse(row.taint));
+      merged = [...before, ...sources.filter((source) => !before.some((known) => known.kind === source.kind && known.label === source.label))];
+    } catch {
+      merged = [...sources, ...readTaint(undefined, "a task with no record of what it read")];
+    }
+  }
+  db.run("UPDATE tasks SET taint = ? WHERE id = ?", [JSON.stringify(merged), taskID]);
 }

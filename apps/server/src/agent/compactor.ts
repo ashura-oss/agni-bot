@@ -27,7 +27,7 @@ const retryAfterByDB = new WeakMap<Database, Map<string, number>>();
  * the tagger (`jobs/tagger.ts`), which reads the same messages and is given
  * the existing keys, so a fact supersedes instead of being stored twice.
  */
-export async function compactChannelHistory(db: Database, router: Router, channelID: string, _agentID: string, peerInput = false): Promise<void> {
+export async function compactChannelHistory(db: Database, router: Router, channelID: string, agentID: string, peerInput = false): Promise<void> {
   if (peerInput) return;
   const inFlight = inFlightByDB.get(db) ?? new Set<string>();
   inFlightByDB.set(db, inFlight);
@@ -57,6 +57,7 @@ export async function compactChannelHistory(db: Database, router: Router, channe
       firstTokenTimeoutMs: AUX_FIRST_TOKEN_MS,
       maxTokens: AUX_MAX_TOKENS,
       onDelta: () => {},
+      purpose: "compaction", agentID, kind: "side",
     });
     const parsed = extractJSONObject(result.text) as { updated_summary?: unknown } | null;
     if (typeof parsed?.updated_summary !== "string" || !parsed.updated_summary.trim()) {

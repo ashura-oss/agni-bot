@@ -173,6 +173,11 @@ export function putAgentMemory(db: Database, input: AgentMemoryInput): AgentMemo
     )
       .get(effectiveScope, effectiveAgentID ?? "", normalizedKeySlug);
   const live = existing && (existing.valid_to === null || existing.valid_to > timestamp) ? existing : null;
+  // A note kept from outside text may not take the place of one the owner or a trusted source wrote: that is how
+  // a page would rewrite what the bot believes. It may only replace another note of its own kind.
+  if (source === "untrusted" && live && live.source !== "untrusted") {
+    throw new Error("not saved: that note comes from outside content and may not replace a fact you already hold; save it under a different key or tell the owner");
+  }
 
   if (existing) {
     // MEM-002: a changed fact supersedes the old one; it is never silently

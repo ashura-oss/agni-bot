@@ -10,6 +10,10 @@ import type { Migration } from "../migrations";
  *    with, so the bot that reads the result carries them.
  *  - `channel_messages.tainted`: a bot's group post came from a run that had
  *    read outside text, so another bot reading the room carries that taint.
+ *  - `agent_sessions.taint`: what a running session has read, saved as it is read, so a session that
+ *    resumes after a restart comes back as tainted as it was (and tainted if the record is missing).
+ *  - `owner_words`: what the owner typed in a thread, kept apart from the rows of the thread itself,
+ *    so "the owner named this address" cannot be satisfied by text a routine, a peer or a log left behind.
  *  - `approvals.card_meta`: what the card said besides its text (tier, kind
  *    of risk, sources, whether "always" was offered), so a card replayed after
  *    a reconnect is the same card.
@@ -34,5 +38,13 @@ export const migration: Migration | null = {
     ALTER TABLE tasks ADD COLUMN taint TEXT;
     ALTER TABLE channel_messages ADD COLUMN tainted INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE approvals ADD COLUMN card_meta TEXT;
+    ALTER TABLE agent_sessions ADD COLUMN taint TEXT;
+    CREATE TABLE owner_words (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      thread_id TEXT NOT NULL,
+      text TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX idx_owner_words_thread ON owner_words(thread_id, id);
   `,
 };

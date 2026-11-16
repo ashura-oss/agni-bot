@@ -18,7 +18,7 @@ import { canonicalAgentID, defaultResolvedPersona, getPersona, resolvePersona, t
 import { DEFAULT_VISIBILITY, MISSING_AGENT_VISIBILITY, RESULT_MAX_CHARS, redactResultForCaller } from "../agent/visibility";
 import { rootGuardrail } from "../agent/guardrails";
 import { asksWhenClean } from "../policy/metadata";
-import { unpackTaint } from "../policy/context";
+import { readTaint, unknownTaint } from "../policy/context";
 import { saveTaskTaint, taskTaint } from "../policy/carry";
 import type { TaintSource } from "../policy/types";
 import type { Router } from "../models/router";
@@ -198,12 +198,20 @@ export function registerTurnJob(runner: JobRunner, deps: TurnJobDeps): void {
 
     const startedAt = nowISO();
     let result: Awaited<ReturnType<typeof runTurn>>;
+    // The task has a record of what it read from the moment it starts, and keeps it whatever happens next.
+    if (delegationTaskID) saveTaskTaint(deps.db, delegationTaskID, startTaint(payload));
     try {
       result = await runTurn(deps, payload, persona, threadID, conversation, text, job.attempts > 1, job.id);
     } catch (error) {
       // S1-12: a cancelled task ends here, whatever the aborted turn threw.
       if (delegationTaskID && isDelegationCancelled(deps.db, delegationTaskID)) return { result: "cancelled" };
       throw giveUpIfSideEffects(deps.db, threadID, startedAt, error instanceof Error ? error.message : String(error)) ?? error;
+    } finally {
+      // Whatever the run did, its task has a record; one that never got one reads as tainted. (What the run read is
+      // saved as it is read, so a run that failed keeps it.)
+      if (delegationTaskID && deps.db.query<{ taint: string | null }, [string]>("SELECT taint FROM tasks WHERE id = ?").get(delegationTaskID)?.taint == null) {
+        saveTaskTaint(deps.db, delegationTaskID, [unknownTaint("a task that ended with no record of what it read")]);
+      }
     }
 
     // S1-12: the owner cancelled while the child ran. The cancelled state, not
@@ -497,11 +505,17 @@ export function buildWakeText(results: Array<{ taskID: string; agentID: string; 
   ].join("\n");
 }
 
+/** What a delegated task starts with: what its sender read, or unknown when the job does not say. */
+function startTaint(payload: TurnJobPayload): TaintSource[] {
+  return payload.taint === undefined ? [unknownTaint("a task whose sender did not say what it had read")] : readTaint(payload.taint);
+}
+
 /** A wake is told about finished tasks; if one of them read outside text, so has the bot that reads it. */
 function wakeTaint(db: Database, results: TurnJobPayload["results"]): TaintSource[] {
   const out: TaintSource[] = [];
   for (const item of results ?? []) {
-    if (unpackTaint(item.taint).length === 0) continue;
+    // A result with no taint record reads as tainted.
+    if (readTaint(item.taint).length === 0) continue;
     const name = resolvePersona(db, item.agentID)?.name ?? item.agentID;
     out.push({ kind: "peer", label: name.slice(0, 60), tool: "wake", at: nowISO() });
   }
@@ -542,8 +556,7 @@ function wakeParent(deps: TurnJobDeps, taskID: string, summary: string, parentDe
     agentID: owner,
     summary: visible.text ?? "",
     redacted: visible.redacted,
-    // A private bot's result is a receipt: nothing it read reaches the parent in words.
-    taint: visible.redacted ? [] : taskTaint(deps.db, task.id),
+    taint: taskTaint(deps.db, task.id),
   };
   claimResultDelivery(deps.db, task.id, () => {
     const existing = findQueuedJobByPayloadKey(deps.db, "turn", wakeKey);
@@ -616,7 +629,8 @@ async function runTurn(
       ...(payload.wakeKey ? { wake: true } : {}),
       policy: {
         // The brief's taint rides down; a wake starts with the taint of the results it is told about.
-        taint: [...unpackTaint(payload.taint), ...wakeTaint(deps.db, payload.results)],
+        // undefined says the sender did not say what it had read (a bot that starts from it is tainted); a list, even empty, says it did.
+        ...(payload.taint !== undefined || payload.wakeKey ? { taint: [...(payload.taint !== undefined ? readTaint(payload.taint) : []), ...wakeTaint(deps.db, payload.results)] } : {}),
         ...(payload.rootTurnID ? { rootTurnID: payload.rootTurnID, rootJob: payload.rootJob ?? null } : {}),
         jobID: jobID ?? null,
       },

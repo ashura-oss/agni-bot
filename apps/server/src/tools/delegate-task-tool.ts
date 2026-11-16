@@ -28,8 +28,8 @@ import { appendChannelMessage } from "../stores/channels";
 import { MAX_DEPTH } from "../agent/guardrails";
 import { listTaskNotes } from "../stores/task-notes";
 import { getArtifact } from "../stores/artifacts";
-import { isTainted, packTaint } from "../policy/context";
-import { carryTaint, taskTaint } from "../policy/carry";
+import { packTaint, unknownTaint } from "../policy/context";
+import { carryTaint, saveTaskTaint, taskTaint } from "../policy/carry";
 import { denialScope } from "../policy/denials";
 import { MAX_CONCURRENT_DELEGATIONS } from "../policy/limits";
 
@@ -63,9 +63,9 @@ function botName(db: Database, agentID: string | null | undefined): string {
  * The run that reads a finished task's result takes on what the task's run read from outside text,
  * unless the result is withheld from it (a private bot hands back a receipt, not words).
  */
-function carryFromTask(ctx: ToolContext, db: Database, task: TaskRow, view: Record<string, unknown>): void {
-  if (view.resultRedacted === true) return;
-  if (task.delegate_state !== "done" && task.delegate_state !== "failed") return;
+function carryFromTask(ctx: ToolContext, db: Database, task: TaskRow, _view: Record<string, unknown>): void {
+  // Whatever of the task comes back (a result, notes, a question, a partial answer, or only a receipt) carries what
+  // its run had read so far; a task with no record reads as having read outside text.
   carryTaint(ctx.run, botName(db, task.owner_agent_id), taskTaint(db, task.id), "delegate_task");
 }
 
@@ -216,12 +216,15 @@ export function registerDelegateTaskTool(registry: ToolRegistry, deps: DelegateT
           delegationTaskID: task.id,
           depth: depth + 1,
           // What this run has read goes with the brief, and the child shares this run's root (S2-06).
-          ...(ctx.run && isTainted(ctx.run) ? { taint: packTaint(ctx.run) } : {}),
+          // The list is always there when the sender is known: an empty one says "read nothing outside"; none says "unknown".
+          ...(ctx.run ? { taint: packTaint(ctx.run) } : {}),
           ...(ctx.run ? { rootTurnID: ctx.run.rootTurnID, rootJob: ctx.run.rootJob } : {}),
           rootKey,
         },
       });
       setDelegationJob(deps.db, task.id, job.id);
+      // The task starts with what its sender had read; its own run adds to it as it goes.
+      saveTaskTaint(deps.db, task.id, ctx.run ? packTaint(ctx.run) : [unknownTaint("a task whose sender did not say what it had read")]);
 
       deps.emit({
         type: "status.update",

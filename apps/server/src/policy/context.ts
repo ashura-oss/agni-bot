@@ -74,14 +74,33 @@ export function isTainted(run: Pick<RunContext, "taint">): boolean {
 }
 
 /** Add a source the run has now read. Returns true when it is new (same kind and label read twice counts once). */
-export function addTaint(run: Pick<RunContext, "taint">, source: TaintSource): boolean {
+export function addTaint(run: Pick<RunContext, "taint"> & { onTaint?: RunContext["onTaint"] }, source: TaintSource): boolean {
   if (run.taint.sources.some((known) => known.kind === source.kind && known.label === source.label)) return false;
   run.taint.sources.push(source);
+  // Saved before anything else happens: the mark outlives a crash, a restart and an error.
+  run.onTaint?.(run.taint.sources);
   return true;
 }
 
+/** The one source a record that is missing or unreadable stands for: the run cannot say what it read, so it is treated as having read outside text. */
+export function unknownTaint(label = "something with no record of what it read"): TaintSource {
+  return { kind: "unknown", label, at: nowISO() };
+}
+
+/**
+ * Read a stored taint record, failing closed. A missing, malformed or entirely unreadable record is one
+ * unknown source (tainted); only an explicit empty list means "read nothing outside". Every reader of
+ * a stored record (a task row, a job payload, a wake's results, a saved session) goes through here.
+ */
+export function readTaint(value: unknown, label?: string): TaintSource[] {
+  if (!Array.isArray(value)) return [unknownTaint(label)];
+  if (value.length === 0) return [];
+  const sources = unpackTaint(value);
+  return sources.length > 0 ? sources : [unknownTaint(label)];
+}
+
 /** Take on the sources a child run (or a delegated result) carries. Returns the ones that were new. */
-export function mergeTaint(run: Pick<RunContext, "taint">, sources: readonly TaintSource[] | undefined): TaintSource[] {
+export function mergeTaint(run: Pick<RunContext, "taint"> & { onTaint?: RunContext["onTaint"] }, sources: readonly TaintSource[] | undefined): TaintSource[] {
   const added: TaintSource[] = [];
   for (const source of sources ?? []) if (addTaint(run, source)) added.push(source);
   return added;

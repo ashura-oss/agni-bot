@@ -8,7 +8,9 @@ import { ApprovalBroker, waitForApprovalDecision } from "./approval-broker";
 import { gateToolCall } from "./tool-gate";
 import { abortReasonOf } from "./abort-reason";
 import { markRun } from "../policy/carry";
-import { createRunContext, isTainted, packTaint } from "../policy/context";
+import { createRunContext, isTainted, packTaint, readTaint, unknownTaint } from "../policy/context";
+import { ownerWordsOf, recordOwnerWords } from "../policy/owner-words";
+import { saveTaskTaint } from "../policy/carry";
 import { decide } from "../policy/engine";
 import { policyHooks } from "../policy/hooks";
 import { policyFor, taintFrom } from "../policy/metadata";
@@ -339,7 +341,7 @@ export async function runTaskTurn(db: Database, router: Router, settings: TaskTu
 async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTurnSettings, run: TaskTurnRun): Promise<TaskTurnResult> {
   const { threadID, persona } = run;
   const now = nowISO();
-  const existing = db.query("SELECT turn_id, state, message_log, summary, step_count, token_count FROM agent_sessions WHERE thread_id = ?").get(threadID) as { turn_id: string; state: string; message_log: string; summary: string | null; step_count: number; token_count: number } | null;
+  const existing = db.query("SELECT turn_id, state, message_log, summary, step_count, token_count, taint FROM agent_sessions WHERE thread_id = ?").get(threadID) as { turn_id: string; state: string; message_log: string; summary: string | null; step_count: number; token_count: number; taint: string | null } | null;
   // A session parked on a question is resumed, not restarted: the answer
   // continues the same conversation.
   const recovering =
@@ -524,10 +526,11 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
     capabilities: callableTools,
     registry,
     isUnloaded: (name) => deferred.includes(name) && !loadedTools.has(name),
-    // The owner's own words, for "send only where the owner said". A peer's brief, a job's text and a
-    // routine's saved state are not the owner's words.
+    // The owner's own words, for "send only where the owner said": what the owner typed in this thread (kept in its
+    // own table), this message when the owner sent it, and the owner's part of a routine. Never the thread's rows or a
+    // session's log: a peer's brief, a routine's prompt, a group block, a wake and the model's own words are in those.
     ownerText: [
-      ...(principal.kind === "peer" ? [] : priorHistory.filter((message) => message.role === "user").map((message) => message.content)),
+      ...(principal.kind === "owner" || principal.kind === "job" || principal.kind === "wake" ? ownerWordsOf(db, threadID) : []),
       ...(principal.kind === "owner" ? [run.text] : []),
       ...(run.queryText ? [run.queryText] : []),
     ],
@@ -535,11 +538,27 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
     allowedDomains: run.allowedDomains,
     taint: [
       ...(run.policy?.taint ?? []),
+      // A run another bot started is tainted unless the sender said it had read nothing outside (an empty list).
+      ...(principal.kind === "peer" && run.policy?.taint === undefined ? [unknownTaint(`a brief from ${run.peer?.from ?? "another bot"}, which did not say what it had read`)] : []),
+      // A session that comes back from a restart has read what it had read, or something unknown if nothing was saved.
+      ...(recovering ? restoredTaint(existing?.taint ?? null) : []),
       ...(principal.kind === "routine" ? [{ kind: "routine" as const, label: "saved routine state", at: nowISO() }] : []),
       ...(run.attachmentIDs?.length ? [{ kind: "attachment" as const, label: attachmentLabel(db, inputMessage.id), at: nowISO() }] : []),
       ...(run.groupContext !== undefined && run.channelID ? groupTaint(db, run.channelID, persona.id) : []),
     ],
   });
+  // What this run reads is saved with its session (and its task) the moment it is read: a restart or a crash cannot lose it.
+  const saveTaint = (sources: readonly TaintSource[]): void => {
+    try {
+      db.run("UPDATE agent_sessions SET taint = ? WHERE thread_id = ? AND turn_id = ?", [JSON.stringify(sources), threadID, turnID]);
+      if (run.delegation?.taskID) saveTaskTaint(db, run.delegation.taskID, sources);
+    } catch (error) {
+      log.warn(`turn ${turnID}: could not save what the run has read: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+  saveTaint(runCtx.taint.sources);
+  runCtx.onTaint = saveTaint;
+  if (principal.kind === "owner") recordOwnerWords(db, threadID, run.text);
   const delegationPrefix = buildDelegationPrefix({
     persona,
     facts,
@@ -649,6 +668,10 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
       const tools = taskToolSpecs(registry, callableTools.filter((name) => !deferred.includes(name) || loadedTools.has(name)), "static");
       const stepMessages = await withAttachmentContent(db, requestMessages);
       const routeStep = (maxTokens: number | undefined) => router.route({
+        // Who this call is for, so the ledger counts it once under the right bot, job and root.
+        purpose: "chat", kind: "turn", agentID: persona.id,
+        ...(runCtx.jobID ? { jobID: runCtx.jobID } : {}),
+        ...(runCtx.rootJob ? { rootJobID: runCtx.rootJob } : {}),
         messages: stepMessages,
         signal: controller.signal,
         firstTokenTimeoutMs: settings.firstTokenTimeoutMs,
@@ -1223,6 +1246,8 @@ async function executeTool(
     const message = error instanceof Error ? error.message : String(error);
     const content = JSON.stringify({ error: truncate(message, 500) });
     // The abort's own error has its own code; a tool's message that equals a loop code is prefixed (see closure.ts).
+    // What the tool threw reaches the model; an abort cut it off before anything came back.
+    if (!(error instanceof AbortedMidCall)) noteTaint(hooks.run, tool, args, { error: message });
     storeResult(content, false, error instanceof AbortedMidCall ? ABORTED_MID_CALL : toolErrorCode(message));
     emit({ type: "tool.end", callID: call.id, ok: false, preview: truncate(message, 120) });
     return { content, awaiting: false };
@@ -1234,10 +1259,20 @@ async function executeTool(
 
 /** Mark the run when a tool brought outside text into it, and write the change down. A failed audit row never un-marks the run. */
 function noteTaint(run: RunContext, tool: { name: string; meta?: ToolMeta }, args: Record<string, unknown>, result: unknown): void {
-  const failed = typeof result === "object" && result !== null && typeof (result as { error?: unknown }).error === "string";
-  if (failed) return;
+  // An error result reaches the model like any other: an outside reader's failure text can carry the page, the mail or the
+  // server's own words, so it marks the run too.
   const source = taintFrom(policyFor(tool.name, tool.meta), tool.name, args, result, nowISO());
   if (source) markRun(run, source);
+}
+
+/** What a resumed session had read. No record, or one that cannot be read, is tainted. */
+function restoredTaint(raw: string | null): TaintSource[] {
+  if (raw === null) return readTaint(undefined, "a session restored with no record of what it had read");
+  try {
+    return readTaint(JSON.parse(raw), "a session restored with no record of what it had read");
+  } catch {
+    return readTaint(undefined, "a session restored with no record of what it had read");
+  }
 }
 
 /** Who started this run, in the policy's terms. */

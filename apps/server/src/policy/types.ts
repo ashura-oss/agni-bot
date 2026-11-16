@@ -101,6 +101,8 @@ export interface RunContext {
   /** Nobody is watching (a job or routine run): cards wait longer, and `ask` is not possible. */
   unattended: boolean;
   services: RunServices;
+  /** Told every time the run is marked, with all it has read so far, so the mark can be saved before the run goes on (a crash must not lose it). */
+  onTaint?: (sources: readonly TaintSource[]) => void;
 }
 
 // ---------------------------------------------------------------------------

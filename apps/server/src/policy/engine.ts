@@ -109,11 +109,11 @@ function judge(run: RunContext, input: PolicyInput, record: boolean): Decision {
   }
   if (!asks) return { action: "run", via: "free", reason: why, assessment };
 
-  // 6. stored rules. Outside content never rides on an old "always": what the owner approved
-  // was one address, not whatever this run now wants to put in the message.
+  // 6. stored rules. A run that has read outside content never rides on an old "always", for any call: what the owner
+  // approved was one thing, once, not whatever this run now wants done after reading a page.
   const target = approvalTarget(tool, args);
   const canRemember = !tainted && target !== null;
-  if (target !== null && (!tainted || assessment.egress === "none")) {
+  if (target !== null && !tainted) {
     const rule = findApprovalRule(run.services.db, run.bot, tool, target);
     if (rule) return { action: "run", via: "rule", reason: `stored rule ${rule.id}`, assessment: { ...assessment, tier }, ruleID: rule.id, rule: { id: rule.id, agentID: rule.agentID, toolName: rule.toolName, createdAt: rule.createdAt } };
   }

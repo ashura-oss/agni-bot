@@ -127,10 +127,10 @@ describe("delegate_task: the brief carries the taint, the task keeps it, the wak
     expect(payload.rootTurnID).toBe("trn_root");
   });
 
-  test("a clean parent sends no taint", async () => {
+  test("a clean parent sends an empty list, which says it read nothing outside", async () => {
     db = openDatabase(":memory:");
     const { jobID } = await delegate(db, parentRun(db));
-    expect(payloadOf(db, jobID).taint).toBeUndefined();
+    expect(payloadOf(db, jobID).taint).toEqual([]);
   });
 
   test("when the task ends its run's taint is saved on the task, and a wake carries it to the parent", async () => {

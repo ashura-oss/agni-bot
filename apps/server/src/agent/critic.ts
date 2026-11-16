@@ -21,6 +21,7 @@ export function criticReview(
     const critic = resolvePersona(db, criticID);
     if (!critic) return null;
     const result = await router.route({
+      purpose: "critic", agentID: drafter.id, kind: "side",
       messages: [
         { role: "system", content: critic.systemPrompt },
         {
