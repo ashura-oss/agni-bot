@@ -35,18 +35,12 @@ afterEach(() => {
 });
 
 describe("approvalTarget: what a rule is scoped to", () => {
-  test("bash is the exact command, normalised only for line endings and outer space", () => {
-    expect(approvalTarget("bash", { command: "  rm -rf build\r\n" })).toBe("rm -rf build");
-    // Inner whitespace is part of the command: a different string is a different target.
-    expect(approvalTarget("bash", { command: "echo  a" })).not.toBe(approvalTarget("bash", { command: "echo a" }));
-    expect(approvalTarget("bash", { command: "rm -rf build" })).not.toBe(approvalTarget("bash", { command: "rm -rf build2" }));
-  });
-
-  test("bash in another working directory is a different target", () => {
-    const here = approvalTarget("bash", { command: "rm -rf build" });
-    const there = approvalTarget("bash", { command: "rm -rf build", cwd: join(root, "elsewhere") });
-    expect(there).not.toBe(here);
-    expect(there).toContain("elsewhere");
+  test("bash is never remembered, whatever the command or working directory", () => {
+    for (const command of ["rm -rf build", "ls -la", "cat notes.txt", "echo hi", "pwd", "  cat notes.txt\r\n"]) {
+      expect({ command, target: approvalTarget("bash", { command }) }).toEqual({ command, target: null });
+      expect(approvalTarget("bash", { command, cwd: join(root, "elsewhere") })).toBeNull();
+    }
+    expect(approvalTarget("bash", {})).toBeNull();
   });
 
   test("write_file is the resolved absolute path, so relative and absolute spellings agree", () => {
@@ -87,7 +81,7 @@ describe("approvalTarget: what a rule is scoped to", () => {
     expect(approvalTarget("mcp_files_delete", { path: "/y", opts: { b: 1, a: [2, 1] } })).not.toBe(a);
   });
 
-  test("bash commands that are not plainly non-executing are never remembered", () => {
+  test("no bash command is ever remembered: runners, redirects, metacharacters, even plain read-only ones", () => {
     // An interpreter, shell, script or build/test tool runs whatever the files
     // it names say today; a file the bot can append to would turn a rule into
     // a shell without asking. Checked per command segment, not just the first.
@@ -104,19 +98,11 @@ describe("approvalTarget: what a rule is scoped to", () => {
       "jest", "vitest run", "poetry run x", "pipenv run x", "conda run x", "docker run x", "cscript a.vbs", "wscript a.vbs", "mshta x", "gcc x.c", "sed e", "sed -n p",
       "ls > run.py", "echo hi > run.cmd", "echo x >> a.bat", "cat a >run.sh", "ls < in", "cat a | python", "cat a | py", "rm -rf build; py x.py", "ls && py x.py",
       "LS", "ls.exe", "'ls' x", "FOO=1 ls", "mkdir -p out && node x", "unknowntool --flag",
+      // The plain, read-only commands an earlier design remembered.
+      "rm -rf build", "ls -la", "dir", "cat notes.md", "type notes.md", "head -n 5 a.txt", "tail -f a.log", "wc -l a", "mkdir -p out/x", "cp a b", "copy a b",
+      "mv old new", "move old new", "del old.txt", "touch a", "echo python", "echo hi there", "ls -la | wc -l", "mv old new && ls", "ls; pwd", "pwd", "echo hi",
     ];
     for (const command of runsCode) expect({ command, target: approvalTarget("bash", { command }) }).toEqual({ command, target: null });
-  });
-
-  test("only plain file and read-only git commands are remembered", () => {
-    const plain = [
-      "rm -rf build", "ls -la", "dir", "cat notes.md", "type notes.md", "head -n 5 a.txt", "tail -f a.log", "wc -l a", "mkdir -p out/x", "cp a b", "copy a b",
-      "mv old new", "move old new", "del old.txt", "touch a", "echo python", "echo hi there", "ls -la | wc -l", "mv old new && ls", "ls; pwd",
-      "rm 'my file.txt'", "del C:\work\old.txt",
-    ];
-    for (const command of plain) {
-      expect({ command, remembered: approvalTarget("bash", { command }) !== null }).toEqual({ command, remembered: true });
-    }
   });
 
   test("run_privileged is never remembered: the owner reviews each command", () => {
@@ -220,26 +206,26 @@ describe("the broker uses rules", () => {
 
   test("answering always stores a rule; the same call then runs without a card", async () => {
     const h = harness(["always"]);
-    expect(await h.ask("bash", { command: "rm -rf build" })).toBe("always");
+    expect(await h.ask("mcp_files_delete", { path: "build" })).toBe("always");
     expect(h.frames).toHaveLength(1);
     expect(listApprovalRules(db)).toHaveLength(1);
-    expect(listApprovalRules(db)[0]).toMatchObject({ agentID: "ea", toolName: "bash", target: "rm -rf build" });
+    expect(listApprovalRules(db)[0]).toMatchObject({ agentID: "ea", toolName: "mcp_files_delete", target: '{"path":"build"}' });
 
-    expect(await h.ask("bash", { command: "rm -rf build" })).toBe("always");
+    expect(await h.ask("mcp_files_delete", { path: "build" })).toBe("always");
     expect(h.frames).toHaveLength(1); // no second card
     expect(h.asked).toBe(1); // and nobody was waited on
   });
 
   test("an auto-approved call is still an approval row that says a rule matched", async () => {
     const h = harness(["always"]);
-    await h.ask("bash", { command: "rm -rf build" });
-    await h.ask("bash", { command: "rm -rf build" });
+    await h.ask("mcp_files_delete", { path: "build" });
+    await h.ask("mcp_files_delete", { path: "build" });
     const [first, second] = rows();
     const rule = listApprovalRules(db)[0]!;
     expect(first).toMatchObject({ status: "decided", decision: "always", rule_id: null });
-    expect(second).toMatchObject({ status: "decided", decision: "always", rule_id: rule.id, tool_name: "bash" });
+    expect(second).toMatchObject({ status: "decided", decision: "always", rule_id: rule.id, tool_name: "mcp_files_delete" });
     expect(second!.decided_at).toBeTruthy();
-    expect(String(second!.action)).toContain("rm -rf build");
+    expect(String(second!.action)).toContain("build");
     expect(String(second!.action)).toContain("standing rule");
     expect(String(second!.preview)).toContain(rule.id);
     expect(String(second!.preview)).toContain("Auto-approved");
@@ -247,41 +233,41 @@ describe("the broker uses rules", () => {
 
   test("once and reject never create a rule", async () => {
     const h = harness(["once", "reject", "once"]);
-    await h.ask("bash", { command: "rm -rf build" });
-    await h.ask("bash", { command: "rm -rf build" });
-    await h.ask("bash", { command: "rm -rf build" });
+    await h.ask("mcp_files_delete", { path: "build" });
+    await h.ask("mcp_files_delete", { path: "build" });
+    await h.ask("mcp_files_delete", { path: "build" });
     expect(listApprovalRules(db)).toHaveLength(0);
     expect(h.frames).toHaveLength(3);
   });
 
   test("a cancelled wait (null) never creates a rule", async () => {
     const h = harness([]);
-    expect(await h.ask("bash", { command: "rm -rf build" })).toBeNull();
+    expect(await h.ask("mcp_files_delete", { path: "build" })).toBeNull();
     expect(listApprovalRules(db)).toHaveLength(0);
   });
 
   test("a rule for one bot does not approve another bot", async () => {
     const a = harness(["always"], "ea");
-    await a.ask("bash", { command: "rm -rf build" });
+    await a.ask("mcp_files_delete", { path: "build" });
     const b = harness(["reject"], "researcher");
-    expect(await b.ask("bash", { command: "rm -rf build" })).toBe("reject");
+    expect(await b.ask("mcp_files_delete", { path: "build" })).toBe("reject");
     expect(b.frames).toHaveLength(1);
   });
 
   test("a rule does not approve a different tool or a different target", async () => {
     const h = harness(["always", "reject", "reject", "reject"]);
-    await h.ask("bash", { command: "rm -rf build" });
-    expect(await h.ask("bash", { command: "rm -rf build2" })).toBe("reject");
-    expect(await h.ask("bash", { command: "rm -rf build; rm -rf /" })).toBe("reject");
-    expect(await h.ask("some_other_tool", { command: "rm -rf build" })).toBe("reject");
+    await h.ask("mcp_files_delete", { path: "build" });
+    expect(await h.ask("mcp_files_delete", { path: "build2" })).toBe("reject");
+    expect(await h.ask("mcp_files_delete", { path: "build; rm -rf /" })).toBe("reject");
+    expect(await h.ask("some_other_tool", { path: "build" })).toBe("reject");
     expect(h.frames).toHaveLength(4);
   });
 
   test("a revoked rule asks again", async () => {
     const h = harness(["always", "once"]);
-    await h.ask("bash", { command: "rm -rf build" });
+    await h.ask("mcp_files_delete", { path: "build" });
     revokeApprovalRule(db, listApprovalRules(db)[0]!.id);
-    expect(await h.ask("bash", { command: "rm -rf build" })).toBe("once");
+    expect(await h.ask("mcp_files_delete", { path: "build" })).toBe("once");
     expect(h.frames).toHaveLength(2);
   });
 
@@ -305,7 +291,7 @@ describe("the broker uses rules", () => {
   test("a turn the server cannot attribute to a bot never matches or stores a rule", async () => {
     const h = harness(["always", "always"]);
     // No turn row, no thread row: there is no bot to scope the rule to.
-    const orphan = (id: string) => h.broker.request("thr_missing", "trn_missing", "bash", id, { command: "ls x" }, new AbortController().signal);
+    const orphan = (id: string) => h.broker.request("thr_missing", "trn_missing", "mcp_files_delete", id, { path: "x" }, new AbortController().signal);
     await orphan("call_a");
     await orphan("call_b");
     expect(listApprovalRules(db)).toHaveLength(0);
@@ -315,17 +301,18 @@ describe("the broker uses rules", () => {
   test("a rule is read from the turn's bot, so a handoff turn does not borrow the thread owner's rules", async () => {
     // One thread owned by "ea"; a handoff child turn in it belongs to "researcher".
     const h = harness(["always", "reject"], "ea");
-    await h.ask("bash", { command: "rm -rf build" });
+    await h.ask("mcp_files_delete", { path: "build" });
     createTurn(db, { id: "trn_child", threadID: h.thread.id, agentID: "researcher" });
-    const decision = await h.broker.request(h.thread.id, "trn_child", "bash", "call_child", { command: "rm -rf build" }, new AbortController().signal);
+    const decision = await h.broker.request(h.thread.id, "trn_child", "mcp_files_delete", "call_child", { path: "build" }, new AbortController().signal);
     expect(decision).toBe("reject");
   });
 
-  test("a card offers 'always' only when a rule could be stored", async () => {
-    const h = harness(["once", "once", "once", "once", "once"]);
+  test("a card offers 'always' only when a rule could be stored: never for a shell command", async () => {
+    const h = harness(["once", "once", "once", "once", "once", "once"]);
+    await h.ask("mcp_files_delete", { path: "build" });
     await h.ask("bash", { command: "rm -rf build" });
+    await h.ask("bash", { command: "ls -la" });
     await h.ask("bash", { command: "python3 run.py" });
-    await h.ask("bash", { command: "./run.sh" });
     await h.ask("run_privileged", { command: "sudo ls", purpose: "list" });
     await h.ask("write_file", { path: join(root, "outside", "x.md"), content: "x" });
     expect(h.frames.map((f) => f.buttons)).toEqual([
@@ -333,22 +320,37 @@ describe("the broker uses rules", () => {
       ["once", "reject"],
       ["once", "reject"],
       ["once", "reject"],
+      ["once", "reject"],
       ["once", "always", "reject"],
     ]);
   });
 
-  test("'always' on a command that runs code stores nothing, so the next call asks again", async () => {
+  test("'always' on a bash command stores nothing, so the next call asks again", async () => {
     const h = harness(["always", "once"]);
-    await h.ask("bash", { command: "python3 run.py" });
+    expect(await h.ask("bash", { command: "ls -la" })).toBe("always");
     expect(listApprovalRules(db)).toHaveLength(0);
-    expect(await h.ask("bash", { command: "python3 run.py" })).toBe("once");
+    expect(await h.ask("bash", { command: "ls -la" })).toBe("once");
     expect(h.frames).toHaveLength(2);
+  });
+
+  test("a bash rule row already in the database is ignored at match time", async () => {
+    // Rows written by an earlier build, or by hand: the broker never consults them for a shell command.
+    for (const command of ["ls -la", "cat notes.txt", "rm -rf build"]) {
+      addApprovalRule(db, { agentID: "ea", toolName: "bash", target: command });
+    }
+    const h = harness(["reject", "reject", "reject"]);
+    for (const command of ["ls -la", "cat notes.txt", "rm -rf build"]) {
+      expect({ command, decision: await h.ask("bash", { command }) }).toEqual({ command, decision: "reject" });
+    }
+    expect(h.frames).toHaveLength(3);
+    expect(h.frames.every((f) => f.buttons.join() === "once,reject")).toBe(true);
+    expect(rows().every((r) => r.rule_id === null)).toBe(true);
   });
 
   test("an approval note from the integration appears in the preview, and only when there is one", async () => {
     const h = harness(["once", "once", "always", "once"], "ea", (tool) => (tool === "mcp_gh_delete" ? "Runs on the GitHub connector: deletes a repo." : undefined));
     await h.ask("mcp_gh_delete", { repo: "x" });
-    await h.ask("bash", { command: "rm -rf build" });
+    await h.ask("bash", { command: "ls x" });
     expect(h.frames[0]!.preview).toContain("Runs on the GitHub connector: deletes a repo.");
     expect(h.frames[1]!.preview).not.toContain("GitHub");
     // The auto-approved audit row keeps the note too.

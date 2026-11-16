@@ -9,11 +9,6 @@
  *
  * The target is the thing the owner was actually shown and agreed to, per tool:
  *
- *   bash            the exact command, with CRLF turned into LF and outer
- *                   whitespace trimmed (inner whitespace is significant). When
- *                   the call names a `cwd`, the target is `cd '<abs cwd>' &&
- *                   <command>`, which does exactly what the call does, so the
- *                   same command in another directory is a different target.
  *   write_file      the resolved absolute real path (relative paths resolve
  *                   against scratch, symlinks are followed; folded to lower
  *                   case on Windows). Never the content.
@@ -26,21 +21,21 @@
  *                   and every plugin tool: only the very same call is
  *                   remembered, so an event id alone never allows a new edit.
  *
- * Some calls are never remembered: `run_privileged` (its approval is the point
- * of the tool), and any bash command that is not made only of plain,
- * non-executing programs (`isPlainCommand`, an allowlist: "always" on a command
- * that runs code would be a shell without asking, because the files it runs can
- * change after the owner looked). `approvalTarget` returns null for those, and
- * for a call whose target cannot be worked out; null means "ask every time",
- * and the card does not offer "always".
+ * Shell tools are never remembered: `bash` and `run_privileged` always ask.
+ * Whether a command is safe depends on the files it runs, the programs PATH
+ * finds and the directory it runs in, all of which can change after the owner
+ * looked, and no check made here can see them as the shell will. So an
+ * "always" answer on a shell command stores nothing, and its card does not
+ * offer "always". Rules for the other tools are unaffected. `approvalTarget`
+ * also returns null for a call whose target cannot be worked out; null means
+ * "ask every time".
  */
 import type { Database } from "bun:sqlite";
-import { resolve } from "node:path";
 import { newID, nowISO } from "../util/ids";
 import { resolveWritePath } from "../tools/write-file";
 
-/** `run_privileged`: the owner reviews each privileged command and types the secret themselves. */
-const NEVER_REMEMBER = new Set(["run_privileged"]);
+/** Shell tools: `bash` (see the header) and `run_privileged` (the owner reviews each command and types the secret). */
+const NEVER_REMEMBER = new Set(["bash", "run_privileged"]);
 
 export interface ApprovalRule {
   id: string;
@@ -78,12 +73,6 @@ const toRule = (row: RuleRow): ApprovalRule => ({
 export function approvalTarget(toolName: string, args: Record<string, unknown>): string | null {
   if (NEVER_REMEMBER.has(toolName)) return null;
   switch (toolName) {
-    case "bash": {
-      const command = typeof args.command === "string" ? args.command.replace(/\r\n/g, "\n").trim() : "";
-      if (!command || !isPlainCommand(command)) return null;
-      if (typeof args.cwd === "string" && args.cwd.trim()) return `cd ${shellQuote(resolve(args.cwd))} && ${command}`;
-      return command;
-    }
     case "write_file": {
       if (typeof args.path !== "string" || !args.path.trim()) return null;
       const target = resolveWritePath(args.path);
@@ -147,47 +136,10 @@ export function revokeApprovalRule(db: Database, id: string): boolean {
   return result.changes > 0;
 }
 
-/** Programs that only touch files or print, and never run what they are given. */
-const PLAIN_PROGRAMS = new Set([
-  "ls", "dir", "cat", "type", "head", "tail", "wc", "pwd", "mkdir", "cp", "copy", "mv", "move", "rm", "del", "touch", "echo",
-]);
-/**
- * An allowlist, not a denylist: "always" may be remembered for a bash command
- * only when every simple command in it is a plain, non-executing program. A
- * remembered command is re-run on a match without a card, so anything that
- * could run code (an interpreter nobody listed, a shell keyword, a script a
- * path names, a variable that expands to a program, a redirect that creates
- * a script) must ask every time.
- *
- * The whole command may not contain `$`, a backtick, parentheses, braces,
- * `<`, `>` or `!`: no expansion, no substitution, no subshell, no redirection.
- * It is split on `;`, `&`, `|` and newlines, and each segment must start with a
- * bare program name from `PLAIN_PROGRAMS`. Quotes, backslash-escaped names,
- * `.exe` suffixes, paths and `VAR=x` prefixes fail the bare-name test.
- */
-function isPlainCommand(command: string): boolean {
-  if (/[$`(){}<>!]/.test(command)) return false;
-  for (const segment of command.split(/[;&|\n\r]/)) {
-    const words = segment.trim().split(/\s+/).filter(Boolean);
-    if (words.length === 0) continue;
-    const program = words[0]!;
-    if (!/^[A-Za-z]+$/.test(program)) return false;
-    // Exact match: "LS" is not a program this list vouches for. git is not on
-    // it: a repo's own config (core.fsmonitor, diff.external) can make even
-    // `git status` run a program, and a bot can write that config in scratch.
-    if (!PLAIN_PROGRAMS.has(program)) return false;
-  }
-  return true;
-}
-
 function normaliseRecipient(entry: string): string {
   const address = entry.trim();
   const at = address.lastIndexOf("@");
   return at < 0 ? address : `${address.slice(0, at)}@${address.slice(at + 1).toLowerCase()}`;
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 /** JSON with object keys sorted at every level, so equal arguments give equal text. */
