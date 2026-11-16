@@ -14,9 +14,38 @@ import type { ServerFrameBody } from "@agni/protocol";
 import { log } from "../log";
 import { appendChannelMessage, ensureDMChannel } from "../stores/channels";
 import { canonicalAgentID } from "../agent/personas";
+import { appendMessage } from "../stores/threads";
 import { nowISO } from "../util/ids";
 
 export const INTERRUPTED_NOTICE = "This reply was interrupted by a restart.";
+
+/**
+ * What the model reads in the thread where the dead turn's request is still
+ * unanswered. Without it the next turn sees that request as open, answers it
+ * as well as the new message, and runs its tool calls again.
+ */
+export const INTERRUPTED_REQUEST_NOTE = "[This request was interrupted by a restart and was not completed.]";
+
+/**
+ * The session log of a dead turn without the tool calls that never got a
+ * result (and without a bare assistant step that held only those), so nothing
+ * unfinished is left in it to be carried on from.
+ */
+function withoutUnfinishedCalls(raw: string): string {
+  let log: unknown;
+  try { log = JSON.parse(raw); } catch { return raw; }
+  if (!Array.isArray(log)) return raw;
+  const answered = new Set(log.flatMap((entry) => (entry?.role === "tool" && typeof entry.toolCallID === "string" ? [entry.toolCallID as string] : [])));
+  const kept = log.flatMap((entry) => {
+    if (entry?.role !== "assistant" || !Array.isArray(entry.toolCalls)) return [entry];
+    const calls = entry.toolCalls.filter((call: { id?: string }) => call.id !== undefined && answered.has(call.id));
+    if (calls.length === entry.toolCalls.length) return [entry];
+    if (calls.length === 0 && !String(entry.content ?? "").trim()) return [];
+    const { toolCalls: _dropped, ...rest } = entry;
+    return [calls.length > 0 ? { ...rest, toolCalls: calls } : rest];
+  });
+  return JSON.stringify(kept);
+}
 
 export interface RecoveryResult {
   /** Agent sessions that were `running` or `awaiting_approval`. */
@@ -37,6 +66,12 @@ export function recoverInterruptedTurns(db: Database, emit: (body: ServerFrameBo
 
   const result: RecoveryResult = { sessions: stale.length, approvals: 0, forms: 0 };
   db.transaction(() => {
+    for (const { thread_id, turn_id } of stale) {
+      const log = db.query<{ message_log: string }, [string]>("SELECT message_log FROM agent_sessions WHERE thread_id = ?").get(thread_id)?.message_log;
+      if (log !== undefined) db.run("UPDATE agent_sessions SET message_log = ? WHERE thread_id = ?", [withoutUnfinishedCalls(log), thread_id]);
+      // The request stays in the thread; close it there too, so the next turn answers only what comes next.
+      appendMessage(db, { threadID: thread_id, turnID: turn_id, role: "assistant", text: INTERRUPTED_REQUEST_NOTE });
+    }
     db.run("UPDATE agent_sessions SET state = 'failed', updated_at = ? WHERE state IN ('running', 'awaiting_approval')", [now]);
     // No turn can be running at boot, whether or not it had a session row.
     db.run("UPDATE turns SET state = 'done', stop_reason = 'error', ended_at = ? WHERE state = 'running'", [now]);
