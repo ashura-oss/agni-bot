@@ -20,7 +20,7 @@ import { registerHandoffTool } from "../tools/handoff-tool";
 import { registerDelegateTaskTool } from "../tools/delegate-task-tool";
 import { registerAskTool, registerDraftEmailTool } from "../tools/ask-tool";
 import { registerRequestOwnerInputTool } from "../tools/needs-input-tool";
-import { registerArtifactTool } from "../tools/artifact-tool";
+import { LONG_TOOL_RESULT_JSON_CHARS, registerArtifactTool } from "../tools/artifact-tool";
 import { registerSecureExecTool } from "../tools/secure-exec-tool";
 import { registerSayTool } from "../tools/say-tool";
 import { criticReview } from "./critic";
@@ -147,7 +147,7 @@ const MAX_TOOL_RESULT_CHARS = 4_000;
  */
 const LONG_RESULT_TOOLS: ReadonlySet<string> = new Set(["read_artifact", "task_status", "delegate_wait", "delegate_task", "handoff"]);
 const LONG_RESULT_TEXT_CHARS = 4_000;
-const MAX_LONG_TOOL_RESULT_CHARS = 6_000;
+const MAX_LONG_TOOL_RESULT_CHARS = LONG_TOOL_RESULT_JSON_CHARS;
 const MAX_HISTORY_MESSAGES = 16;
 /** The owner's own messages are kept longer than tool output; a longer one is cut with a notice. */
 const MAX_USER_MESSAGE_CHARS = 48_000;

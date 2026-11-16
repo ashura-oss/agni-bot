@@ -26,6 +26,14 @@ const stringProp = { type: "string", minLength: 1 };
 /** One page of a result: the most a single call returns, and the default. */
 export const ARTIFACT_PAGE_CHARS = 4_000;
 
+/**
+ * The longest a long-result tool's answer may be as JSON text before the loop
+ * starts shrinking it (the task loop's cap for these tools). A page is sized
+ * so its whole answer fits: quotes and newlines double in JSON, so a page of
+ * 4,000 characters can serialise to far more.
+ */
+export const LONG_TOOL_RESULT_JSON_CHARS = 6_000;
+
 export function registerArtifactTool(registry: ToolRegistry, deps: ArtifactToolDeps): void {
   if (registry.get("read_artifact")) return;
   registry.register({
@@ -53,19 +61,47 @@ export function registerArtifactTool(registry: ToolRegistry, deps: ArtifactToolD
       // Paging runs over what the caller may see, never over the stored text.
       const offset = pageNumber(input.offset, 0, 0);
       const limit = Math.min(pageNumber(input.limit, ARTIFACT_PAGE_CHARS, 1), ARTIFACT_PAGE_CHARS);
-      const total = visible.text?.length ?? 0;
-      const end = offset + limit;
-      return {
+      const envelope = {
         artifactRef: artifact.id,
         agentID: artifact.agent_id,
         kind: artifact.kind,
-        text: visible.text === null ? null : visible.text.slice(offset, end),
         redacted: visible.redacted,
         visibility: visible.mode,
-        ...(visible.text === null ? {} : { totalChars: total, offset, ...(end < total ? { nextOffset: end } : {}) }),
+      };
+      if (visible.text === null) return { ...envelope, text: null };
+      const total = visible.text.length;
+      // What the answer needs besides the text, counted with the widest numbers it can hold.
+      const fixed = JSON.stringify({ ...envelope, text: "", totalChars: total, offset, nextOffset: total }).length;
+      const end = pageEnd(visible.text, offset, limit, LONG_TOOL_RESULT_JSON_CHARS - fixed - 64);
+      return {
+        ...envelope,
+        text: visible.text.slice(offset, end),
+        totalChars: total,
+        offset,
+        ...(end < total ? { nextOffset: end } : {}),
       };
     },
   });
+}
+
+/**
+ * Where a page starting at `offset` ends: at most `limit` characters, and few
+ * enough that the text, escaped as JSON, takes at most `budget` characters.
+ * Never between the halves of a surrogate pair. Always at least one character
+ * on, so reading cannot stall.
+ */
+function pageEnd(text: string, offset: number, limit: number, budget: number): number {
+  const stop = Math.min(text.length, offset + limit);
+  let used = 0;
+  let end = offset;
+  while (end < stop) {
+    const width = text.charCodeAt(end) >= 0xd800 && text.charCodeAt(end) <= 0xdbff && end + 1 < text.length ? 2 : 1;
+    const cost = JSON.stringify(text.slice(end, end + width)).length - 2;
+    if (used + cost > budget && end > offset) break;
+    used += cost;
+    end += width;
+  }
+  return end;
 }
 
 /** A whole number from the model, or the fallback when it is missing or not usable. */

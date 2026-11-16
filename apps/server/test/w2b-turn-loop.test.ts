@@ -15,7 +15,7 @@ import { runTaskTurn } from "../src/agent/task-loop";
 import type { ResolvedPersona } from "../src/agent/personas";
 import { mcpHub } from "../src/plugins/mcp";
 import { resetSecretBroker, resolveSecret } from "../src/agent/secret-broker";
-import { resolveApprovalWaiter } from "../src/agent/approval-broker";
+import { ApprovalBroker, resolveApprovalWaiter } from "../src/agent/approval-broker";
 import { createThread } from "../src/stores/threads";
 import { DEFAULT_AGENT_TOOLS } from "../src/agent/personas";
 import { ToolRegistry } from "../src/tools/registry";
@@ -318,5 +318,66 @@ describe("W2-B 3 (follow-up): the task view carries a 4,000-character result int
     expect(view.result).toBe(text);
     const sent = JSON.parse(fitToolResult(view, 6_000, 4_000)) as { result: string };
     expect(sent.result).toBe(text);
+  });
+});
+
+describe("W2-B review 1: read_artifact pages are sized by their serialised length", () => {
+  test("JSON-heavy text pages without a gap: every page fits the loop's cap whole and nextOffset follows what was returned", async () => {
+    db = openDatabase(":memory:");
+    const registry = new ToolRegistry();
+    registerArtifactTool(registry, { db, currentAgentID: "ea" });
+    // Quotes and newlines double in JSON text: a 4,000-character page of this is ~6,000+ serialised.
+    const full = '"q"\n'.repeat(4_000).trim();
+    expect(full.length).toBeGreaterThan(12_000);
+    // A default page of this is 4,000 characters and about 7,000 as JSON.
+    const artifact = saveArtifact(db, { agentID: "ea", content: full });
+    const handler = registry.get("read_artifact")!.handler as unknown as (a: Record<string, unknown>, c: unknown) => Promise<{ text: string; nextOffset?: number }>;
+    const ctx = { threadID: "t", turnID: "u", signal: new AbortController().signal };
+    let offset = 0;
+    let rebuilt = "";
+    for (let i = 0; i < 100; i++) {
+      const page = await handler({ artifactRef: artifact.id, offset }, ctx);
+      const sent = JSON.parse(fitToolResult(page, 6_000, 4_000)) as { text: string; truncated?: boolean };
+      // What the model receives is the whole page, uncut.
+      expect(sent.truncated).toBeUndefined();
+      expect(sent.text).toBe(page.text);
+      rebuilt += sent.text;
+      if (page.nextOffset === undefined) break;
+      expect(page.nextOffset).toBe(offset + page.text.length);
+      offset = page.nextOffset;
+    }
+    expect(rebuilt).toBe(full);
+  });
+});
+
+describe("W2-B review 3: an approval card shows the whole call", () => {
+  const frames = async (tool: string, args: Record<string, unknown>): Promise<{ action: string; preview: string }> => {
+    db = openDatabase(":memory:");
+    const seen: Array<{ action: string; preview: string }> = [];
+    const broker = new ApprovalBroker({ db, emit: (frame) => seen.push(frame), waitForDecision: async () => "once" });
+    await broker.request("thr_x", "trn_x", tool, "call_1", args, new AbortController().signal);
+    return seen[0]!;
+  };
+
+  test("a padded description cannot hide an attendee: they are listed at the top and the arguments are shown in full", async () => {
+    const card = await frames("calendar_create", {
+      account: "owner", summary: "Lunch", description: "pad ".repeat(150), attendees: ["x@evil.example"], start: "2026-12-01T12:00:00Z", end: "2026-12-01T13:00:00Z",
+    });
+    expect(card.preview.split("\n")[0]).toBe("Attendees: x@evil.example");
+    expect(card.preview).toContain('"attendees"');
+    expect(card.preview).toContain("2026-12-01T13:00:00Z");
+    expect(card.preview).not.toContain("chars omitted");
+  });
+
+  test("mail_send lists its recipients first, and a padded body does not push them out", async () => {
+    const card = await frames("mail_send", { account: "owner", to: ["a@example.com", "b@evil.example"], subject: "Hi", body: "pad ".repeat(2_000) });
+    expect(card.preview.split("\n")[0]).toBe("To: a@example.com, b@evil.example");
+  });
+
+  test("arguments past 4,000 characters are cut in the middle with the argument names and sizes listed", async () => {
+    const card = await frames("some_mcp_tool", { first: "a".repeat(3_000), second: "b".repeat(3_000), attendees: ["z@evil.example"] });
+    expect(card.preview).toContain("chars omitted");
+    expect(card.preview).toContain("first (3000 chars)");
+    expect(card.preview).toContain("attendees");
   });
 });
