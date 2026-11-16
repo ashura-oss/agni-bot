@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BashRefusal, bashCwdProblem, MAX_OUTPUT_BYTES, runBash } from "../src/tools/bash";
+import { BashRefusal, bashCwdProblem, isReadOnlyCommand, MAX_OUTPUT_BYTES, runBash } from "../src/tools/bash";
 import { isProcessAlive, startDaemon } from "../src/daemon";
 import type { Config } from "../src/config";
 
@@ -96,6 +96,26 @@ describe("server-chosen working directory", () => {
   });
 });
 
+describe("isReadOnlyCommand and date", () => {
+  test("bare date and date +FORMAT are read-only", () => {
+    expect(isReadOnlyCommand("date")).toBe(true);
+    expect(isReadOnlyCommand("date +%Y-%m-%d")).toBe(true);
+    expect(isReadOnlyCommand("date +%s")).toBe(true);
+  });
+
+  test("any option can set the clock or read files, so it needs the owner's click", () => {
+    for (const command of ["date -s 2030-01-01", "date --set=2030-01-01", "date -u", "date -d tomorrow", "date --date=tomorrow", "date -r somefile", "date --utc", "date -I", "date -f dates.txt", "date -u +%s", "date +%s -s x", "date 010112002030", "date +%Y %m"]) {
+      expect(isReadOnlyCommand(command)).toBe(false);
+    }
+  });
+
+  test("the other read-only programs keep working", () => {
+    expect(isReadOnlyCommand("pwd")).toBe(true);
+    expect(isReadOnlyCommand("ls -la")).toBe(true);
+    expect(isReadOnlyCommand("cat /etc/passwd")).toBe(false);
+  });
+});
+
 describe("process-tree kill", () => {
   test("a timeout kills the grandchild too", async () => {
     const pidFile = join(scratch, "grandchild.pid");
@@ -140,6 +160,33 @@ describe("process-tree kill", () => {
     spawnedPids.push(pid);
     expect(await waitFor(() => !isProcessAlive(pid), 5_000)).toBe(true);
   }, 25_000);
+
+  test("a background process does not outlive the command that started it (nohup, with the pipes still inherited)", async () => {
+    const pidFile = join(scratch, "nohup-sleep.pid");
+    const seconds = 600 + Math.floor(Math.random() * 100);
+    const command = `nohup sleep ${seconds} & sleep 0.5; (cat /proc/$!/winpid 2>/dev/null || echo $!) > '${sh(pidFile)}'; echo done`;
+    const started = Date.now();
+    const result = await runBash({ command, timeoutMs: 30_000 });
+    expect(result.exitCode).toBe(0);
+    expect(result.timedOut).toBe(false);
+    expect(result.stdout).toContain("done");
+    expect(Date.now() - started).toBeLessThan(15_000); // not held open by the sleeper's copy of the pipe
+    const pid = Number(readFileSync(pidFile, "utf8").trim());
+    expect(pid).toBeGreaterThan(0);
+    spawnedPids.push(pid);
+    expect(await waitFor(() => !isProcessAlive(pid), 5_000)).toBe(true);
+  }, 40_000);
+
+  test("a background process with its output redirected away does not survive either", async () => {
+    const pidFile = join(scratch, "bg-quiet.pid");
+    const seconds = 700 + Math.floor(Math.random() * 100);
+    const command = `sleep ${seconds} > /dev/null 2>&1 & sleep 0.5; (cat /proc/$!/winpid 2>/dev/null || echo $!) > '${sh(pidFile)}'`;
+    const result = await runBash({ command, timeoutMs: 30_000 });
+    expect(result.exitCode).toBe(0);
+    const pid = Number(readFileSync(pidFile, "utf8").trim());
+    spawnedPids.push(pid);
+    expect(await waitFor(() => !isProcessAlive(pid), 5_000)).toBe(true);
+  }, 40_000);
 
   test("a signal that is already aborted runs nothing", async () => {
     const marker = join(scratch, "should-not-exist.txt");

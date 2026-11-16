@@ -20,10 +20,10 @@ const WIN_SOURCE = {
   RANDOM_THING: "x", NPM_CONFIG_USERCONFIG: "C:\\npmrc", GITHUB_TOKEN: FAKE,
 };
 const GIT = "C:\\Program Files\\Git";
-const WIN_PATH = [
-  `${GIT}\\usr\\bin`, `${GIT}\\bin`,
-  "C:\\Windows\\System32", "C:\\Windows", "C:\\Windows\\System32\\Wbem",
-].join(";");
+const SYSTEM_DIRS = ["C:\\Windows\\System32", "C:\\Windows", "C:\\Windows\\System32\\Wbem", "C:\\Windows\\System32\\WindowsPowerShell\\v1.0"];
+const GIT_DIRS = [`${GIT}\\usr\\bin`, `${GIT}\\bin`];
+// System directories first, then Git for Windows, then whatever the owner adds.
+const WIN_PATH = [...SYSTEM_DIRS, ...GIT_DIRS].join(";");
 
 describe("childPath", () => {
   test("Windows: Git for Windows from the fixed root, then the system directories; the server's PATH is ignored", () => {
@@ -31,13 +31,31 @@ describe("childPath", () => {
   });
 
   test("Windows without Git: system directories only; without SystemRoot nothing is guessed", () => {
-    expect(childPath({ source: WIN_SOURCE, platform: "win32", gitRoot: null })).toBe("C:\\Windows\\System32;C:\\Windows;C:\\Windows\\System32\\Wbem");
-    expect(childPath({ source: {}, platform: "win32", gitRoot: GIT })).toBe(`${GIT}\\usr\\bin;${GIT}\\bin`);
+    expect(childPath({ source: WIN_SOURCE, platform: "win32", gitRoot: null })).toBe(SYSTEM_DIRS.join(";"));
+    expect(childPath({ source: {}, platform: "win32", gitRoot: GIT })).toBe(GIT_DIRS.join(";"));
   });
 
   test("POSIX: the system directories only, never what the server inherited", () => {
     expect(childPath({ source: { PATH: "/tmp/evil:." }, platform: "linux" })).toBe("/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin");
-    expect(childPath({ platform: "darwin" })).toBe("/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin");
+    // Homebrew's folders belong to the user, so they come after the system ones.
+    expect(childPath({ platform: "darwin" })).toBe("/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/opt/homebrew/sbin");
+  });
+
+  test("AGNI_SHELL_EXTRA_PATH: the owner's absolute directories come after the system and Git ones, never before", () => {
+    const source = { ...WIN_SOURCE, AGNI_SHELL_EXTRA_PATH: "C:\\Program Files\\nodejs;relative\\x;.;;D:\\py" };
+    expect(childPath({ source, platform: "win32", gitRoot: GIT })).toBe([...SYSTEM_DIRS, ...GIT_DIRS, "C:\\Program Files\\nodejs", "D:\\py"].join(";"));
+    const posix = childPath({ source: { AGNI_SHELL_EXTRA_PATH: "/opt/tools/bin:rel:/home/o/.bun/bin:.:" }, platform: "linux" });
+    expect(posix).toBe("/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/tools/bin:/home/o/.bun/bin");
+    // A system directory named again as an extra is not repeated, and cannot move to the front.
+    expect(childPath({ source: { AGNI_SHELL_EXTRA_PATH: "/usr/bin:/opt/x" }, platform: "linux" })).toBe("/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/x");
+  });
+
+  test("the extra directories reach the shell child only through PATH, not as a variable; the PDF worker gets none", () => {
+    const source = { ...WIN_SOURCE, AGNI_SHELL_EXTRA_PATH: "D:\\py" };
+    const shell = childEnv("shell", { source, platform: "win32", gitRoot: GIT });
+    expect(shell.PATH).toBe([...SYSTEM_DIRS, ...GIT_DIRS, "D:\\py"].join(";"));
+    expect(shell.AGNI_SHELL_EXTRA_PATH).toBeUndefined();
+    expect(childEnv("pdf-worker", { source, platform: "win32" }).PATH).toBe(SYSTEM_DIRS.join(";"));
   });
 
   test("never an empty, '.', or relative entry, even if one is asked for", () => {
@@ -99,6 +117,18 @@ describe("childEnv allowlist", () => {
     expect(env.SystemRoot).toBe("C:\\Windows");
     expect(env.OPENROUTER_API_KEY).toBeUndefined();
     expect(env.AGNI_HOME).toBeUndefined();
+  });
+
+  test("shell: proxy settings, certificate bundles and the ssh agent socket pass, in either case", () => {
+    const source = {
+      HTTP_PROXY: "http://p:1", HTTPS_PROXY: "http://p:2", NO_PROXY: "localhost", http_proxy: "http://p:3", https_proxy: "http://p:4", no_proxy: "x",
+      SSL_CERT_FILE: "/c/ca.pem", SSL_CERT_DIR: "/c/certs", NODE_EXTRA_CA_CERTS: "/c/extra.pem", SSH_AUTH_SOCK: "/tmp/agent.sock",
+      HTTPS_PROXY_X: "no", SSH_ASKPASS: "no",
+    };
+    const env = childEnv("shell", { source, platform: "linux" });
+    expect(Object.keys(env).sort()).toEqual(
+      ["HTTP_PROXY", "HTTPS_PROXY", "NODE_EXTRA_CA_CERTS", "NO_PROXY", "PATH", "SSH_AUTH_SOCK", "SSL_CERT_DIR", "SSL_CERT_FILE", "http_proxy", "https_proxy", "no_proxy"].sort(),
+    );
   });
 
   test("shell: AGNI_* settings and unlisted variables never pass, including AGNI_TOKEN", () => {

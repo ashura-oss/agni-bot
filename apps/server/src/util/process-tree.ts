@@ -13,14 +13,20 @@
  *    started. A plain `taskkill /T` is not enough on its own: Git Bash's MSYS
  *    runtime starts programs through fork/exec, which leaves a program whose
  *    parent process is already gone, and `taskkill /T` follows parent links.
- *    Only a process that leaves the job on purpose (`CREATE_BREAKAWAY`) is out
- *    of reach, and a job cannot be set up for a process that ran code before
- *    the assignment (the shell starts its children well after it).
+ *    The job also has `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, so closing the
+ *    handle (`release()`, or the server exiting) ends whatever is left.
  *    If the job cannot be made, the handle falls back to `taskkill /T /F`,
  *    called by absolute path under `%SystemRoot%\System32` so PATH cannot
  *    choose it.
+ *
+ * This is housekeeping, not containment. It ends what a command started the
+ * ordinary way (background jobs, `nohup`, helpers) so nothing lingers after
+ * the command or a timeout. A process can still leave on purpose: a
+ * scheduled task (`schtasks`), WMI, a service, `setsid` or a second process
+ * group, or a job breakaway. Stopping that needs the Sprint 7 sandbox. Nothing
+ * here may be read as a reason to relax an approval gate.
  */
-import { dlopen, FFIType } from "bun:ffi";
+import { dlopen, FFIType, ptr } from "bun:ffi";
 import { spawn } from "node:child_process";
 import { win32 } from "node:path";
 import { envValue, isWindowsDrivePath } from "./env-lookup";
@@ -45,6 +51,7 @@ type Handle = number | bigint;
 
 interface Kernel32 {
   CreateJobObjectW(attributes: null, name: null): Handle | null;
+  SetInformationJobObject(job: Handle, infoClass: number, info: number, size: number): number;
   OpenProcess(access: number, inherit: number, pid: number): Handle | null;
   AssignProcessToJobObject(job: Handle, process: Handle): number;
   TerminateJobObject(job: Handle, exitCode: number): number;
@@ -61,6 +68,7 @@ function loadKernel32(): Kernel32 | null {
   try {
     const { symbols } = dlopen("kernel32.dll", {
       CreateJobObjectW: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.ptr },
+      SetInformationJobObject: { args: [FFIType.ptr, FFIType.i32, FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
       OpenProcess: { args: [FFIType.u32, FFIType.i32, FFIType.u32], returns: FFIType.ptr },
       AssignProcessToJobObject: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.i32 },
       TerminateJobObject: { args: [FFIType.ptr, FFIType.u32], returns: FFIType.i32 },
@@ -75,6 +83,11 @@ function loadKernel32(): Kernel32 | null {
 
 const PROCESS_TERMINATE = 0x0001;
 const PROCESS_SET_QUOTA = 0x0100;
+/** JOBOBJECT_EXTENDED_LIMIT_INFORMATION on 64-bit Windows: 144 bytes, with LimitFlags (a DWORD) at offset 16. */
+const EXTENDED_LIMIT_INFORMATION_SIZE = 144;
+const LIMIT_FLAGS_OFFSET = 16;
+const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9;
+const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
 
 /** A new Job Object holding `pid`, or null when any step fails (the caller falls back to taskkill). */
 function jobFor(pid: number): Handle | null {
@@ -85,6 +98,11 @@ function jobFor(pid: number): Handle | null {
   try {
     job = api.CreateJobObjectW(null, null);
     if (!job) return null;
+    // Closing the last handle ends every process still in the job. If this fails the job still
+    // works for an explicit TerminateJobObject; only the end-of-command cleanup is weaker.
+    const limits = new Uint8Array(EXTENDED_LIMIT_INFORMATION_SIZE);
+    new DataView(limits.buffer).setUint32(LIMIT_FLAGS_OFFSET, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, true);
+    api.SetInformationJobObject(job, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS, ptr(limits), limits.length);
     processHandle = api.OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
     if (!processHandle || api.AssignProcessToJobObject(job, processHandle) === 0) {
       api.CloseHandle(job);
@@ -125,11 +143,20 @@ function signalGroup(pid: number, signal: NodeJS.Signals): void {
   }
 }
 
+function groupExists(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Track `child` and its descendants so they can be stopped together. Call it
  * immediately after spawning. POSIX: SIGTERM to the group, then SIGKILL to it
- * after `graceMs` (sent even if the leader already exited, because a member
- * may have ignored the first signal).
+ * if members are still there after `graceMs` (the group is signalled even if
+ * its leader already exited, because a member may have outlived it).
  */
 export function trackTree(child: KillableChild, graceMs = 2_000): TreeHandle {
   const pid = child.pid;
@@ -154,8 +181,11 @@ export function trackTree(child: KillableChild, graceMs = 2_000): TreeHandle {
     async kill(): Promise<void> {
       if (!pid) return;
       signalGroup(pid, "SIGTERM");
-      await new Promise((resolve) => setTimeout(resolve, graceMs));
-      signalGroup(pid, "SIGKILL");
+      // Wait for the group to empty, up to the grace period; only then escalate. An empty
+      // group (the normal case at the end of a command) costs no wait.
+      const deadline = Date.now() + graceMs;
+      while (groupExists(pid) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+      if (groupExists(pid)) signalGroup(pid, "SIGKILL");
     },
     release(): void {},
   };

@@ -4,7 +4,14 @@
  * A per-user install is used only when no other account can write to it.
  */
 import { describe, expect, test } from "bun:test";
-import { findGitBash, gitInstallCandidates, isOwnerSystemOnly, sddlWritableByOthers } from "../src/util/git-bash";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { restrictToOwnerOnWindows, windowsSystemTool } from "../src/util/windows-acl";
+import {
+  cachedUserInstallCheck, findGitBash, gitInstallCandidates, inspectPathAcl, isOwnerSystemOnly, ownerSidTrusted, resetGitInstallCache, sddlWritableByOthers,
+} from "../src/util/git-bash";
 
 const ENV = {
   ProgramW6432: "C:\\Program Files",
@@ -37,33 +44,47 @@ describe("gitInstallCandidates", () => {
 describe("findGitBash", () => {
   test("picks the machine install and ignores a Git planted on PATH", () => {
     const exists = (path: string): boolean => path === MACHINE_BASH || path.startsWith("D:\\evil");
-    const found = findGitBash({ env: ENV, exists, userInstallTrusted: () => true });
+    const found = findGitBash({ env: ENV, exists, userInstallCheck: () => "ok" });
     expect(found).toEqual({ root: "C:\\Program Files\\Git", bash: MACHINE_BASH, scope: "machine" });
   });
 
   test("falls back to usr\\bin\\bash.exe when bin\\bash.exe is missing", () => {
     const usr = "C:\\Program Files\\Git\\usr\\bin\\bash.exe";
-    expect(findGitBash({ env: ENV, exists: (path) => path === usr, userInstallTrusted: () => false }).bash).toBe(usr);
+    expect(findGitBash({ env: ENV, exists: (path) => path === usr, userInstallCheck: () => "writable" }).bash).toBe(usr);
   });
 
   test("a per-user install is used only when its ACL is owner/system only", () => {
     const exists = (path: string): boolean => path === USER_BASH;
-    expect(findGitBash({ env: ENV, exists, userInstallTrusted: () => true })).toEqual({
+    expect(findGitBash({ env: ENV, exists, userInstallCheck: () => "ok" })).toEqual({
       root: "C:\\Users\\o\\AppData\\Local\\Programs\\Git", bash: USER_BASH, scope: "user",
     });
-    expect(() => findGitBash({ env: ENV, exists, userInstallTrusted: () => false })).toThrow(/other accounts can change|writable by other/i);
+    expect(() => findGitBash({ env: ENV, exists, userInstallCheck: () => "writable" })).toThrow(/other accounts can change|writable by other/i);
   });
 
   test("the refusal names the folder and says how to fix it", () => {
     const exists = (path: string): boolean => path === USER_BASH;
     let message = "";
-    try { findGitBash({ env: ENV, exists, userInstallTrusted: () => false }); } catch (error) { message = (error as Error).message; }
+    try { findGitBash({ env: ENV, exists, userInstallCheck: () => "writable" }); } catch (error) { message = (error as Error).message; }
     expect(message).toContain("C:\\Users\\o\\AppData\\Local\\Programs\\Git");
     expect(message).toMatch(/for all users|Program Files/);
   });
 
+  test("the three refusals say different things: writable, wrong owner, and could not check", () => {
+    const exists = (path: string): boolean => path === USER_BASH;
+    const messageFor = (status: "writable" | "owner" | "unverifiable"): string => {
+      try { findGitBash({ env: ENV, exists, userInstallCheck: () => status }); } catch (error) { return (error as Error).message; }
+      return "";
+    };
+    expect(messageFor("writable")).toMatch(/other accounts can change/);
+    expect(messageFor("owner")).toMatch(/owned by another account/);
+    const unverifiable = messageFor("unverifiable");
+    expect(unverifiable).toMatch(/could not check/i);
+    expect(unverifiable).not.toMatch(/other accounts can change/);
+    expect(unverifiable).toContain("C:\\Users\\o\\AppData\\Local\\Programs\\Git");
+  });
+
   test("no Git anywhere: the message says Git for Windows is required", () => {
-    expect(() => findGitBash({ env: ENV, exists: () => false, userInstallTrusted: () => true })).toThrow(/Shell tools on Windows require Git Bash/);
+    expect(() => findGitBash({ env: ENV, exists: () => false, userInstallCheck: () => "ok" })).toThrow(/Shell tools on Windows require Git Bash/);
   });
 });
 
@@ -100,12 +121,72 @@ describe("sddlWritableByOthers", () => {
   });
 });
 
+describe("ownerSidTrusted", () => {
+  test("the current user, SYSTEM, Administrators and service accounts own a trusted install; anyone else does not", () => {
+    for (const sid of [OWN, "S-1-5-18", "S-1-5-32-544", "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464", "SY", "BA"]) {
+      expect(ownerSidTrusted(sid, OWN)).toBe(true);
+    }
+    for (const sid of ["S-1-5-21-1-2-3-1003", "S-1-1-0", "S-1-5-32-545", "WD", "BU", ""]) expect(ownerSidTrusted(sid, OWN)).toBe(false);
+  });
+});
+
+describe("the per-user install check is remembered for the process", () => {
+  test("a success is looked up once", () => {
+    resetGitInstallCache();
+    let calls = 0;
+    const inspect = (): "ok" => { calls++; return "ok"; };
+    expect(cachedUserInstallCheck("C:\\u\\Git", inspect)).toBe("ok");
+    expect(cachedUserInstallCheck("C:\\u\\Git", inspect)).toBe("ok");
+    expect(cachedUserInstallCheck("c:\\U\\git", inspect)).toBe("ok"); // Windows paths ignore case
+    expect(calls).toBe(1);
+  });
+
+  test("a failure, including 'could not check', is remembered too", () => {
+    resetGitInstallCache();
+    let calls = 0;
+    const inspect = (): "unverifiable" => { calls++; return "unverifiable"; };
+    expect(cachedUserInstallCheck("C:\\u\\Git", inspect)).toBe("unverifiable");
+    expect(cachedUserInstallCheck("C:\\u\\Git", inspect)).toBe("unverifiable");
+    expect(calls).toBe(1);
+  });
+
+  test("a different folder is checked on its own", () => {
+    resetGitInstallCache();
+    let calls = 0;
+    const inspect = (): "ok" => { calls++; return "ok"; };
+    cachedUserInstallCheck("C:\\u\\Git", inspect);
+    cachedUserInstallCheck("D:\\other\\Git", inspect);
+    expect(calls).toBe(2);
+  });
+});
+
+describe("inspectPathAcl on this machine", () => {
+  test.skipIf(process.platform !== "win32")("a path that cannot be read is 'unverifiable', not 'writable'", () => {
+    expect(inspectPathAcl("C:\\definitely\\not\\here\\agni-test")).toBe("unverifiable");
+  });
+
+  test.skipIf(process.platform !== "win32")("a system folder is ok (its owner is TrustedInstaller)", () => {
+    const programFiles = process.env.ProgramW6432 || process.env.ProgramFiles || "C:\\Program Files";
+    expect(inspectPathAcl(`${programFiles}\\Windows NT`)).toBe("ok");
+  });
+
+  test.skipIf(process.platform !== "win32")("a folder only its owner can use is ok; once Users may write to it, it is writable", () => {
+    const dir = mkdtempSync(join(tmpdir(), "agni-acl-probe-"));
+    try {
+      restrictToOwnerOnWindows(dir, true);
+      expect(inspectPathAcl(dir)).toBe("ok");
+      execFileSync(windowsSystemTool("icacls"), [dir, "/grant", "*S-1-5-32-545:(OI)(CI)M", "/q"], { stdio: "pipe", windowsHide: true });
+      expect(inspectPathAcl(dir)).toBe("writable");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("isOwnerSystemOnly on this machine", () => {
-  test.skipIf(process.platform !== "win32")("the system Git install passes and the shared Windows temp folder fails", () => {
+  test.skipIf(process.platform !== "win32")("a system folder passes", () => {
     const programFiles = process.env.ProgramW6432 || process.env.ProgramFiles || "C:\\Program Files";
     expect(isOwnerSystemOnly(`${programFiles}\\Windows NT`)).toBe(true);
-    const shared = `${process.env.SystemRoot ?? "C:\\Windows"}\\Temp`;
-    expect(isOwnerSystemOnly(shared)).toBe(false);
   });
 
   test.skipIf(process.platform !== "win32")("a path that does not exist is not trusted", () => {

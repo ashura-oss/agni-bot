@@ -116,6 +116,8 @@ const READ_ONLY_PROGRAMS = new Set(["ls", "cat", "head", "tail", "wc", "pwd", "e
 /** Plain words only: no quotes, `$`, `~`, globs, redirection, pipes, or separators. */
 const SAFE_WORD = /^[A-Za-z0-9._,:@%+\/-]+$/;
 const SAFE_FLAG = /^--?[A-Za-z0-9-]+$/;
+/** `date +FORMAT`: the word starts with "+" and then only plain characters. */
+const DATE_FORMAT = /^\+[A-Za-z0-9%._,:@+\/-]*$/;
 
 /**
  * True only for one simple command whose program is read-only and whose
@@ -128,6 +130,9 @@ export function isReadOnlyCommand(command: string, cwd?: string): boolean {
   if (isOutsideScratch(dir)) return false;
   const words = command.trim().split(/[ \t]+/);
   if (!READ_ONLY_PROGRAMS.has(words[0] ?? "")) return false;
+  // `date` can set the clock (-s, --set) and read files (-f, -r), and other options change nothing
+  // worth a free pass: only the bare command and one `+FORMAT` word are read-only.
+  if (words[0] === "date") return words.length === 1 || (words.length === 2 && DATE_FORMAT.test(words[1] ?? ""));
   return words.slice(1).every((word) =>
     word.startsWith("-") ? SAFE_FLAG.test(word) : SAFE_WORD.test(word) && !isOutsideScratch(resolve(dir, word)));
 }
@@ -286,8 +291,7 @@ export async function runBash(args: BashArgs): Promise<BashResult> {
       // `sudo -S` and friends read the password from stdin; askpass covers
       // brew/ssh/git. A command that never reads stdin gets EPIPE, ignored.
       child.stdin.on("error", () => {});
-      child.stdin.end(`${secret}
-`);
+      child.stdin.end(`${secret}\n`);
     } else {
       child.stdin.end();
     }
@@ -313,18 +317,28 @@ export async function runBash(args: BashArgs): Promise<BashResult> {
       });
     };
 
-    // Stop the command and everything it started. If a grandchild somehow
-    // keeps the pipes open after that, stop waiting for them.
-    const stop = (reason: "timeout" | "abort"): void => {
-      if (settled || stopping) return;
-      stopping = true;
-      if (reason === "timeout") timedOut = true; else aborted = true;
+    // End the command's whole process tree. This is housekeeping, not
+    // containment: it stops what the command started the ordinary way
+    // (background jobs, nohup, helpers) so nothing lingers after it, but a
+    // process can still leave the tree on purpose (schtasks, WMI, setsid, a
+    // service) until the Sprint 7 sandbox. If a process somehow keeps the
+    // pipes open after the kill, stop waiting for them.
+    let reaped = false;
+    const reap = (): void => {
+      if (settled || reaped) return;
+      reaped = true;
       void tree.kill().catch(() => {});
       settleTimer = setTimeout(() => {
         child.stdout.destroy();
         child.stderr.destroy();
         finish(null, "SIGKILL");
       }, KILL_SETTLE_MS);
+    };
+    const stop = (reason: "timeout" | "abort"): void => {
+      if (settled || stopping) return;
+      stopping = true;
+      if (reason === "timeout") timedOut = true; else aborted = true;
+      reap();
     };
     const onAbort = (): void => stop("abort");
     const timer = setTimeout(() => stop("timeout"), timeoutMs);
@@ -337,6 +351,9 @@ export async function runBash(args: BashArgs): Promise<BashResult> {
       // A process that never started has no pipes to wait for.
       if (child.pid === undefined) finish(null, null);
     });
+    // The shell has finished: whatever it left running ends now, so a
+    // background process cannot hold the output pipes open or outlive the command.
+    child.on("exit", reap);
     child.on("close", (code, signal) => finish(code, signal));
   });
 }

@@ -21,6 +21,7 @@
  * same way.
  */
 import { win32 } from "node:path";
+import { log } from "../log";
 import { providerKeyEnvNames } from "../models/providers";
 import { envValue, isWindowsDrivePath, type Env } from "./env-lookup";
 import { gitInstall } from "./git-bash";
@@ -40,8 +41,12 @@ const WINDOWS_PLATFORM_NAMES = [
 ];
 const POSIX_IDENTITY_NAMES = ["USER", "LOGNAME"];
 
-/** The server only: network settings and the certificate bundles its HTTPS calls need. */
-const DAEMON_NETWORK_NAMES = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"];
+/** Proxy settings and certificate bundles: a shell command behind a proxy (git, curl, npm) fails without them. */
+const NETWORK_NAMES = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"];
+/** Only the address of the owner's ssh agent, so `git` and `ssh` can use the keys it already holds. */
+const SSH_AGENT_NAMES = ["SSH_AUTH_SOCK"];
+/** The server only: also the SOCKS/all-protocol proxy. */
+const DAEMON_NETWORK_NAMES = [...NETWORK_NAMES, "ALL_PROXY"];
 /** The server only: its own settings, mail settings, and each provider's base URL and model (`GROQ_MODEL`, `OPENROUTER_BASE_URL`, ...). */
 const DAEMON_PATTERNS = [/^AGNI_/i, /^GMAIL_/i, /^[A-Z0-9]+_(?:BASE_URL|MODEL)$/i];
 
@@ -50,7 +55,7 @@ function lowerSet(names: string[]): Set<string> {
 }
 
 const CORE = lowerSet(CORE_NAMES);
-const SHELL_EXTRA = lowerSet([...WINDOWS_PLATFORM_NAMES, ...POSIX_IDENTITY_NAMES]);
+const SHELL_EXTRA = lowerSet([...WINDOWS_PLATFORM_NAMES, ...POSIX_IDENTITY_NAMES, ...NETWORK_NAMES, ...SSH_AGENT_NAMES]);
 const DAEMON_EXTRA = lowerSet([...WINDOWS_PLATFORM_NAMES, ...POSIX_IDENTITY_NAMES, ...DAEMON_NETWORK_NAMES]);
 
 function isAllowed(kind: ChildKind, name: string): boolean {
@@ -85,16 +90,62 @@ export interface ChildPathOptions {
   platform?: NodeJS.Platform;
   /** The Git for Windows root. `null`: none. Omitted: the install found on this machine, if any. */
   gitRoot?: string | null;
-  /** Directories to put first (the privileged shell's askpass folder). Anything not absolute is dropped. */
+  /**
+   * Directories to put first. Only for a private folder the server itself just
+   * made (the privileged shell's askpass folder, which holds the `sudo`
+   * wrapper). Anything not absolute is dropped.
+   */
   prepend?: string[];
+  /** Add the owner's `AGNI_SHELL_EXTRA_PATH` directories at the end. Default true; the PDF worker turns it off. */
+  ownerDirs?: boolean;
+}
+
+/** The environment variable the owner sets (in `~/.agni/config.env`) to put Node, Python, gh and the like on the shell's PATH. */
+export const SHELL_EXTRA_PATH_VARIABLE = "AGNI_SHELL_EXTRA_PATH";
+
+const reportedOwnerDirs = new Set<string>();
+
+function reportOnce(level: "info" | "warn", key: string, message: string): void {
+  if (reportedOwnerDirs.has(key)) return;
+  reportedOwnerDirs.add(key);
+  log[level](message);
 }
 
 /**
- * The PATH a shell child gets: the system directories, plus Git for Windows'
- * `usr\bin` and `bin` from its fixed install path on Windows. The server's own
- * PATH is never read. Only absolute entries survive, so `.`, an empty entry
- * (which means the current directory on some systems) and a relative path can
- * never be on it.
+ * The owner's extra directories: absolute entries of `AGNI_SHELL_EXTRA_PATH`.
+ * Each one is logged the first time it is used, and a rejected one is warned
+ * about once. They are appended after the system directories, so a program
+ * with a system name can never be replaced by one from a folder the owner (or
+ * anything running as the owner) can write to.
+ */
+function ownerDirs(source: Env, windows: boolean): string[] {
+  const raw = envValue(source, SHELL_EXTRA_PATH_VARIABLE);
+  if (!raw) return [];
+  const accepted: string[] = [];
+  for (const entry of raw.split(windows ? ";" : ":")) {
+    if (entry === "") continue;
+    if (!validDir(entry, windows)) {
+      reportOnce("warn", `bad:${entry}`, `${SHELL_EXTRA_PATH_VARIABLE}: ignoring "${entry}" (only absolute folders are allowed)`);
+      continue;
+    }
+    reportOnce("info", `ok:${entry}`, `shell PATH: adding ${entry} from ${SHELL_EXTRA_PATH_VARIABLE}`);
+    accepted.push(entry);
+  }
+  return accepted;
+}
+
+/**
+ * The PATH a shell child gets, in this order:
+ *  1. a private folder the server made for this one command (`prepend`);
+ *  2. the system directories (Windows: System32, the Windows folder, Wbem,
+ *     Windows PowerShell; POSIX: `/usr/local/bin`, `/usr/bin`, `/bin`, ...);
+ *  3. Git for Windows' `usr\bin` and `bin` from its fixed install path, or
+ *     Homebrew's folders on macOS;
+ *  4. the owner's `AGNI_SHELL_EXTRA_PATH`.
+ * Folders a user can write to (a per-user Git, Homebrew, the owner's tools)
+ * therefore never come before the system ones. The server's own PATH is never
+ * read. Only absolute entries survive, so `.`, an empty entry (which means the
+ * current directory on some systems) and a relative path can never be on it.
  */
 export function childPath(options: ChildPathOptions = {}): string {
   const platform = options.platform ?? process.platform;
@@ -102,14 +153,20 @@ export function childPath(options: ChildPathOptions = {}): string {
   const source = options.source ?? process.env;
   const dirs: string[] = [...(options.prepend ?? [])];
   if (windows) {
+    const root = systemRoot(source);
+    if (root) {
+      dirs.push(
+        win32.join(root, "System32"), root, win32.join(root, "System32", "Wbem"),
+        win32.join(root, "System32", "WindowsPowerShell", "v1.0"),
+      );
+    }
     const git = options.gitRoot === undefined ? detectGitRoot() : options.gitRoot;
     if (git && isWindowsDrivePath(git)) dirs.push(win32.join(git, "usr", "bin"), win32.join(git, "bin"));
-    const root = systemRoot(source);
-    if (root) dirs.push(win32.join(root, "System32"), root, win32.join(root, "System32", "Wbem"));
   } else {
-    if (platform === "darwin") dirs.push(...MACOS_EXTRA_DIRS);
     dirs.push(...POSIX_SYSTEM_DIRS);
+    if (platform === "darwin") dirs.push(...MACOS_EXTRA_DIRS);
   }
+  if (options.ownerDirs !== false) dirs.push(...ownerDirs(source, windows));
   return unique(dirs.filter((dir) => validDir(dir, windows)), windows).join(windows ? ";" : ":");
 }
 
@@ -162,10 +219,12 @@ export function childEnv(kind: ChildKind, options: ChildEnvOptions = {}): Record
     const inherited = inheritedPath(source, platform === "win32");
     if (inherited) env.PATH = inherited;
   } else {
-    // The PDF worker is Bun running a script: it never needs Git's tools.
-    const gitRoot = kind === "pdf-worker" ? null : options.gitRoot;
+    // The PDF worker is Bun running a script: it needs neither Git's tools nor the owner's.
+    const worker = kind === "pdf-worker";
+    const gitRoot = worker ? null : options.gitRoot;
     env.PATH = childPath({
       source, platform,
+      ...(worker ? { ownerDirs: false } : {}),
       ...(gitRoot !== undefined ? { gitRoot } : {}),
       ...(options.pathPrepend ? { prepend: options.pathPrepend } : {}),
     });
