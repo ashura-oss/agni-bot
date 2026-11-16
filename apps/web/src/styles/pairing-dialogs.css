@@ -89,6 +89,12 @@
   line-height: 1.45;
 }
 
+/* The icon keeps its size when the text beside it wraps. */
+.pairing-hint > svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
 .pairing-command {
   display: flex;
   align-items: center;
