@@ -5,3 +5,4 @@ export * from "./health";
 export * from "./transport";
 export * from "./connection";
 export * from "./conversation";
+export * from "./jobs";
