@@ -2,9 +2,8 @@ import type { Migration } from "../migrations";
 
 /**
  * Policy settings (S2-11): a small key/value table for the owner's caps (spend
- * and run limits). Values are JSON text. The `agents.disabled` column that the
- * spec also lists under 55 belongs to S2-13 and is added to this same
- * migration by whoever merges it (one id, one file).
+ * and run limits). Values are JSON text. The `agents.disabled` column the spec
+ * once listed under 55 is added by migration 59 (S2-13), with the pause switch.
  */
 export const migration: Migration | null = {
   id: 55,
