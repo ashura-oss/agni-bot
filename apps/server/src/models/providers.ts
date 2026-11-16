@@ -104,6 +104,15 @@ const SPECS: ProviderSpec[] = [
   },
 ];
 
+/**
+ * Every environment variable that carries a catalog provider's API key. The
+ * shell scrub reads this, so a provider added to `SPECS` is covered the day it
+ * is added, whatever its variable is called.
+ */
+export function providerKeyEnvNames(): string[] {
+  return SPECS.flatMap((spec) => (spec.envKey ? [spec.envKey] : []));
+}
+
 /** Public metadata for the providers the authenticated app can configure. */
 export function providerCredentialTarget(id: string): { id: string; label: string; envKey: string; envModel: string } | null {
   const spec = SPECS.find((candidate) => candidate.id === id);

@@ -15,7 +15,7 @@ import type { Database } from "bun:sqlite";
 import type { ServerFrameBody } from "@agni/protocol";
 import { runTaskTurn, isThreadActive, type TaskTurnSettings } from "../agent/task-loop";
 import { canonicalAgentID, defaultResolvedPersona, getPersona, resolvePersona, type ResolvedPersona } from "../agent/personas";
-import { DEFAULT_VISIBILITY, redactForCaller } from "../agent/visibility";
+import { DEFAULT_VISIBILITY, RESULT_MAX_CHARS, redactResultForCaller } from "../agent/visibility";
 import { rootGuardrail } from "../agent/guardrails";
 import { ApprovalBroker } from "../agent/approval-broker";
 import type { Router } from "../models/router";
@@ -232,7 +232,8 @@ export function registerTurnJob(runner: JobRunner, deps: TurnJobDeps): void {
       // workspace; the task row keeps a short summary, and only the summary
       // enters the caller's context.
       const full = result.text.trim();
-      const summary = summarizeResult(full);
+      // The artifact is saved first so the summary can point at it.
+      let artifactID: string | undefined;
       try {
         const artifact = saveArtifact(deps.db, {
           taskID: delegationTaskID,
@@ -241,9 +242,11 @@ export function registerTurnJob(runner: JobRunner, deps: TurnJobDeps): void {
           content: full,
         });
         setDelegationArtifact(deps.db, delegationTaskID, artifact.id);
+        artifactID = artifact.id;
       } catch {
         // A result too large to store is still a summary.
       }
+      const summary = summarizeResult(full, artifactID);
       setDelegationState(deps.db, delegationTaskID, "done", summary);
       announceTask(deps, delegationTaskID);
       wakeParent(deps, delegationTaskID, summary, Math.max(1, (payload.depth ?? 2) - 1));
@@ -395,10 +398,15 @@ function firstLine(text: string): string {
  * The short summary that belongs in the caller's context. The full result
  * lives in an artifact (DEL-004); the summary is what wakes the parent.
  */
-export function summarizeResult(text: string, maxChars = 400): string {
+export function summarizeResult(text: string, artifactID?: string, maxChars = RESULT_MAX_CHARS): string {
   const cleaned = text.replace(/\s+/g, " ").trim();
   if (!cleaned) return "(no output)";
-  return truncate(cleaned, maxChars);
+  if (cleaned.length <= maxChars) return cleaned;
+  // A cut result says where the whole of it is, inside the same limit.
+  // `truncate` adds the ellipsis after the cut, so the cut leaves room for it.
+  if (!artifactID) return truncate(cleaned, maxChars - 1);
+  const pointer = `full result: read_artifact ${artifactID}`;
+  return `${truncate(cleaned, maxChars - pointer.length - 2)} ${pointer}`;
 }
 
 /** The note the parent agent reads when a delegated task finishes. */
@@ -444,7 +452,7 @@ function wakeParent(deps: TurnJobDeps, taskID: string, summary: string, parentDe
   if (!parentThreadID || !parentAgentID) return; // nobody to wake
   const owner = task.owner_agent_id ?? "";
   const visibility = owner ? resolvePersona(deps.db, owner)?.visibility ?? DEFAULT_VISIBILITY : DEFAULT_VISIBILITY;
-  const visible = redactForCaller(summary, owner, parentAgentID, visibility);
+  const visible = redactResultForCaller(summary, owner, parentAgentID, visibility);
   const wakeKey = `wake:${parentThreadID}`;
   const item = {
     taskID: task.id,

@@ -29,8 +29,10 @@ describe("deferred tools", () => {
     expect(small.length).toBeLessThanOrEqual(DEFER_TOOLS_ABOVE);
     expect(deferredTools(registry, small)).toEqual([]);
 
-    const big = [...CORE_TOOLS, "grep", "glob", "read_file", "not_a_tool", "bash", "mail_search"];
-    expect(big.length).toBeGreaterThan(DEFER_TOOLS_ABOVE);
+    // The threshold counts registered tools a bot was given, so use real ones.
+    const real = registry.list().map((tool) => tool.name).filter((name) => !CORE_TOOLS.has(name)).slice(0, DEFER_TOOLS_ABOVE + 1);
+    const big = [...CORE_TOOLS, ...real, "grep", "glob", "read_file", "not_a_tool", "bash", "mail_search"];
+    expect(real.length).toBeGreaterThan(DEFER_TOOLS_ABOVE);
     const deferred = deferredTools(registry, big);
     expect(deferred).toEqual(big.filter((n) => !CORE_TOOLS.has(n) && registry.get(n)));
     expect(deferred).toContain("grep");

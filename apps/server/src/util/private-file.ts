@@ -118,18 +118,22 @@ export function secureDirectory(dir: string, onFailure: "throw" | "warn"): void 
  */
 export function isOwnerOnlyDirectory(dir: string): boolean {
   if (process.platform !== "win32") return true;
-  const scratch = mkdtempSync(join(tmpdir(), "agni-acl-"));
+  let scratch: string | undefined;
   try {
+    // A missing or unwritable temp folder is a warning, not a crash: the
+    // directory then counts as "not secured" and the caller applies the ACL.
+    scratch = mkdtempSync(join(tmpdir(), "agni-acl-"));
     const out = join(scratch, "acl.txt");
     execFileSync(windowsSystemTool("icacls"), [win32.resolve(dir), "/save", out, "/q"], { stdio: "pipe", windowsHide: true });
     const sddl = readFileSync(out, "utf16le").match(/^D:(.*)$/m)?.[1]?.trim() ?? "";
     const flags = sddl.slice(0, sddl.indexOf("("));
     const entries = sddl.match(/\([^)]*\)/g) ?? [];
     return flags.includes("P") && entries.length === 1 && entries[0] === `(A;OICI;FA;;;${currentUserSid()})`;
-  } catch {
+  } catch (error) {
+    if (scratch === undefined) log.warn(`could not check the access rules on ${dir}: the temporary folder is not usable (${reason(error)})`);
     return false;
   } finally {
-    rmSync(scratch, { recursive: true, force: true });
+    if (scratch !== undefined) rmSync(scratch, { recursive: true, force: true });
   }
 }
 

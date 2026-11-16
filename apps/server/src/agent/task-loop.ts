@@ -20,7 +20,7 @@ import { registerHandoffTool } from "../tools/handoff-tool";
 import { registerDelegateTaskTool } from "../tools/delegate-task-tool";
 import { registerAskTool, registerDraftEmailTool } from "../tools/ask-tool";
 import { registerRequestOwnerInputTool } from "../tools/needs-input-tool";
-import { registerArtifactTool } from "../tools/artifact-tool";
+import { LONG_TOOL_RESULT_JSON_CHARS, registerArtifactTool } from "../tools/artifact-tool";
 import { registerSecureExecTool } from "../tools/secure-exec-tool";
 import { registerSayTool } from "../tools/say-tool";
 import { criticReview } from "./critic";
@@ -41,6 +41,7 @@ import { appendChannelMessage, getChannelSummary } from "../stores/channels";
 import { compactChannelHistory } from "./compactor";
 import { GuardrailError, MAX_DEPTH, enterDelegation, rootGuardrail, stepGuardrail, type GuardrailState } from "./guardrails";
 import type { MailAccountResolver } from "../plugins/credentials";
+import { mcpApprovalNote } from "../plugins/mcp";
 import { domainAllowed } from "../routines/egress";
 import { log } from "../log";
 import { TurnTimer } from "./turn-timer";
@@ -139,6 +140,14 @@ export interface TaskTurnResult { turnID: string; text: string; stopReason: Stop
  */
 const MAX_PROMPT_CHARS = 40_000;
 const MAX_TOOL_RESULT_CHARS = 4_000;
+/**
+ * Tools whose whole point is a long text: a delegated result, a handoff
+ * answer, an artifact page. Their strings pass up to 4,000 characters intact
+ * and the result as a whole gets room for the fields around that text.
+ */
+const LONG_RESULT_TOOLS: ReadonlySet<string> = new Set(["read_artifact", "task_status", "delegate_wait", "delegate_task", "handoff"]);
+const LONG_RESULT_TEXT_CHARS = 4_000;
+const MAX_LONG_TOOL_RESULT_CHARS = LONG_TOOL_RESULT_JSON_CHARS;
 const MAX_HISTORY_MESSAGES = 16;
 /** The owner's own messages are kept longer than tool output; a longer one is cut with a notice. */
 const MAX_USER_MESSAGE_CHARS = 48_000;
@@ -423,6 +432,10 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
     db,
     emit: (frame) => run.emit(frame as ServerFrameBody),
     waitForDecision: (requestID, signal) => waitForApprovalDecision(db, requestID, signal),
+    // A call the tool will refuse for its arguments raises no card, and an MCP
+    // connector's own claim about a tool rides with the card as information.
+    validate: (name, args) => registry.validateArgs(name, args),
+    approvalNote: mcpApprovalNote,
   });
   const controller = new AbortController();
   let timedOut = false;
@@ -1114,6 +1127,16 @@ async function executeTool(  db: Database, threadID: string, turnID: string, cal
       return { content, awaiting: true };
     }
   }
+  // `run_privileged` waits on the owner inside the call (a password prompt or
+  // the system dialog), so the turn's clock stops for it as it does for an
+  // approval card, and no longer than the owner-wait ceiling. The call's own
+  // timeout still bounds the command.
+  let releaseOwnerWait: (() => void) | undefined;
+  let ownerWaitCeiling: ReturnType<typeof setTimeout> | undefined;
+  if (call.function.name === "run_privileged") {
+    releaseOwnerWait = hooks.hold();
+    ownerWaitCeiling = setTimeout(releaseOwnerWait, hooks.ownerWaitMs);
+  }
   try {
     const parsed = JSON.parse(call.function.arguments) as unknown;
     const timeout = AbortSignal.timeout(tool.timeoutMs);
@@ -1141,7 +1164,9 @@ async function executeTool(  db: Database, threadID: string, turnID: string, cal
         return domainAllowed((item as { url: string }).url, allowedDomains);
       }) };
     }
-    const content = fitToolResult(safeResult);
+    const content = LONG_RESULT_TOOLS.has(call.function.name)
+      ? fitToolResult(safeResult, MAX_LONG_TOOL_RESULT_CHARS, LONG_RESULT_TEXT_CHARS)
+      : fitToolResult(safeResult);
     storeResult(content, true, null);
     emit({ type: "tool.end", callID: call.id, ok: true, preview: toolPreview(result) });
     return { content, awaiting: false };
@@ -1151,6 +1176,9 @@ async function executeTool(  db: Database, threadID: string, turnID: string, cal
     storeResult(content, false, message);
     emit({ type: "tool.end", callID: call.id, ok: false, preview: truncate(message, 120) });
     return { content, awaiting: false };
+  } finally {
+    clearTimeout(ownerWaitCeiling);
+    releaseOwnerWait?.();
   }
 }
 
@@ -1207,7 +1235,7 @@ function clipUserMessage(content: string): string {
 export function compact(messages: ChatMessage[], previousSummary: string | null): { messages: ChatMessage[]; summary: string | null } {
   let normalized = messages.map((message) => ({
     ...message,
-    content: message.role === "user" ? clipUserMessage(message.content) : truncate(message.content, message.role === "tool" ? MAX_TOOL_RESULT_CHARS : 12_000),
+    content: message.role === "user" ? clipUserMessage(message.content) : truncate(message.content, message.role === "tool" ? MAX_LONG_TOOL_RESULT_CHARS : 12_000),
     ...(message.toolCalls ? { toolCalls: message.toolCalls.map((call) => call.function.arguments.length > 8_000
       ? { ...call, function: { ...call.function, arguments: "{}" } } : call) } : {}),
   }));
@@ -1254,10 +1282,10 @@ export function compact(messages: ChatMessage[], previousSummary: string | null)
  * A tool result that fits the prompt and is still valid JSON: long strings
  * and arrays are cut step by step, and the result is marked truncated.
  */
-export function fitToolResult(value: unknown, max = MAX_TOOL_RESULT_CHARS): string {
+export function fitToolResult(value: unknown, max = MAX_TOOL_RESULT_CHARS, keepChars = 1_000): string {
   const full = JSON.stringify(value) ?? "null";
   if (full.length <= max) return full;
-  for (const [items, chars] of [[20, 1_000], [10, 400], [5, 200], [3, 80]] as const) {
+  for (const [items, chars] of [[20, keepChars], [10, 400], [5, 200], [3, 80]] as const) {
     const text = JSON.stringify({ truncated: true, result: shrinkValue(value, items, chars) });
     if (text.length <= max) return text;
   }

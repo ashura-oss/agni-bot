@@ -15,7 +15,7 @@ const runFile = promisify(execFile);
  * drive that is not the system drive could hold a planted executable.
  */
 export function windowsSystemTool(
-  name: "whoami" | "icacls",
+  name: "whoami" | "icacls" | "rundll32",
   env: Record<string, string | undefined> = process.env,
 ): string {
   const root = [env.SystemRoot, env.windir, env.SYSTEMROOT, env.WINDIR].find((value) => value && /^[A-Za-z]:[\\/]/.test(value));

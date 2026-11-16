@@ -318,7 +318,7 @@ describe("S1-21: a result the parent already read is not announced again", () =>
 describe("S1-13: a background job that needed approval is never reported done", () => {
   // mail_send is a deferred tool for the assistant: the model loads it first, then calls it.
   const load = { tool: "load_tools", args: { names: ["mail_send"] } } as const;
-  const mail = { tool: "mail_send", args: { account: "owner@example.com", to: "a@example.com", subject: "Hi", body: "Hello" } } as const;
+  const mail = { tool: "mail_send", args: { account: "owner", to: "a@example.com", subject: "Hi", body: "Hello" } } as const;
   const job = (database: Database) => enqueueJob(database, { kind: "turn", payload: { text: "Email the owner's report.", agentID: "ea", inputRole: "system" } });
 
   /** What the owner's client does: record the decision on the card, then answer the waiting turn. */

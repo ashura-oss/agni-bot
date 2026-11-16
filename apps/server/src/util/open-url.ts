@@ -1,4 +1,3 @@
-import { win32 } from "node:path";
 import { windowsSystemTool } from "./windows-acl";
 
 /**
@@ -6,9 +5,10 @@ import { windowsSystemTool } from "./windows-acl";
  *
  * Windows has no `xdg-open`. It runs the shell's own URL handler,
  * `rundll32 url.dll,FileProtocolHandler`, by absolute path under
- * `%SystemRoot%\System32` (resolved the way `windowsSystemTool` resolves
- * `whoami` and `icacls`): a bare name would let a planted executable earlier on
- * PATH run with the owner's rights. macOS keeps `open`; Linux keeps `xdg-open`.
+ * `%SystemRoot%\System32` (`windowsSystemTool("rundll32")`, resolved the way
+ * it resolves `whoami` and `icacls`): a bare name would let a planted
+ * executable earlier on PATH run with the owner's rights. macOS keeps `open`;
+ * Linux keeps `xdg-open`.
  *
  * Only http and https addresses are accepted. The Windows handler will also
  * launch a file path or a protocol handler, and the address is never a thing
@@ -22,8 +22,7 @@ export function browserOpenCommand(
   if (!/^https?:\/\/\S+$/i.test(url)) throw new Error("Only http and https addresses can be opened in the browser.");
   if (platform === "win32") {
     // windowsSystemTool throws unless SystemRoot is an absolute drive path.
-    const system32 = win32.dirname(windowsSystemTool("whoami", env));
-    return [win32.join(system32, "rundll32.exe"), "url.dll,FileProtocolHandler", url];
+    return [windowsSystemTool("rundll32", env), "url.dll,FileProtocolHandler", url];
   }
   return [platform === "darwin" ? "open" : "xdg-open", url];
 }
