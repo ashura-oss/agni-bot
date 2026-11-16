@@ -10,8 +10,8 @@
 import type { Database } from "bun:sqlite";
 import { PEER_INTENTS, PeerIntentSchema, type PeerIntent, type ServerFrameBody } from "@agni/protocol";
 import type { ToolRegistry } from "./registry";
-import { assertTeammate, resolvePersona } from "../agent/personas";
-import { DEFAULT_VISIBILITY, RESULT_MAX_CHARS, redactStoredForCaller } from "../agent/visibility";
+import { assertTeammate, canonicalAgentID, resolvePersona } from "../agent/personas";
+import { DEFAULT_VISIBILITY, RESULT_MAX_CHARS, redactStoredForCaller, type Visibility } from "../agent/visibility";
 import {
   createDelegationTask,
   setDelegationJob,
@@ -231,11 +231,18 @@ function taskView(task: TaskRow, deps: DelegateTaskToolDeps): Record<string, unk
   // The result is the deliverable of work this caller asked for, so a
   // `summary` bot's answer comes back in full up to RESULT_MAX_CHARS; the
   // task's notes (its working) keep the short cap.
-  const redacted = redactStoredForCaller(artifact?.content ?? task.result, owner, deps.currentAgentID, visibility, RESULT_MAX_CHARS, true);
-  const result = { value: clipResult(redacted.value, task.artifact_id), redacted: redacted.redacted };
+  // Only the bot that delegated the task (and the one that did the work) reads its full result. Any other
+  // bot that comes by a task ID gets the short summary the visibility rule allows, nothing more.
+  const asker = canonicalAgentID(deps.currentAgentID);
+  const involved = !task.parent_agent_id || asker === canonicalAgentID(task.parent_agent_id) || (owner !== "" && asker === canonicalAgentID(owner));
+  const shownVisibility: Visibility = involved || visibility === "private" ? visibility : "summary";
+  const redacted = involved
+    ? redactStoredForCaller(artifact?.content ?? task.result, owner, deps.currentAgentID, shownVisibility, RESULT_MAX_CHARS, true)
+    : redactStoredForCaller(artifact?.content ?? task.result, owner, deps.currentAgentID, shownVisibility);
+  const result = { value: involved ? clipResult(redacted.value, task.artifact_id) : redacted.value, redacted: redacted.redacted };
   // The task's scratchpad crosses to the caller through the same filter.
-  const noteText = listTaskNotes(deps.db, task.id).map((note) => `- ${note.text}`).join("\n");
-  const notes = redactStoredForCaller(noteText, owner, deps.currentAgentID, visibility);
+  const noteText = involved ? listTaskNotes(deps.db, task.id).map((note) => `- ${note.text}`).join("\n") : "";
+  const notes = redactStoredForCaller(noteText, owner, deps.currentAgentID, shownVisibility);
   return {
     taskID: task.id,
     agentID: task.owner_agent_id,
@@ -246,10 +253,10 @@ function taskView(task: TaskRow, deps: DelegateTaskToolDeps): Record<string, unk
     visibility,
     // DEL-004: the full result lives in an artifact. The reference is only
     // useful to a caller that may read it.
-    artifactRef: result.redacted ? null : task.artifact_id,
+    artifactRef: result.redacted || !involved ? null : task.artifact_id,
     ...(notes.value ? { notes: notes.value } : {}),
-    question: task.pending_question,
-    questionID: task.pending_question_id,
+    question: involved ? task.pending_question : null,
+    questionID: involved ? task.pending_question_id : null,
     terminal: task.delegate_state === "done" || task.delegate_state === "failed",
     jobID: task.job_id,
     updatedAt: task.updated_at,
