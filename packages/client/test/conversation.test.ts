@@ -460,6 +460,80 @@ describe("transcript", () => {
     expect(conversation.apply(wire({ type: "approval.rule.revoke.ok", seq: 2, id: "rul_1" }))).toEqual([]);
   });
 
+  test("another bot's streaming reply never shows in this chat (exit test P2)", () => {
+    // Open chat: bot B, bound to its conversation, block not yet known.
+    const chat = new Conversation("bot_b");
+    chat.bind("cnv_b", "bot_b", null);
+    // Bot A's turn streams. Tokens carry a turn and a block id but no conversation.
+    chat.apply(startFrame("trn_a", "thr_a", "bot_a", "cnv_a"));
+    chat.apply(tokenFrame("trn_a", "thr_a", "half a sentence"));
+    chat.apply(tokenFrame("trn_a", "thr_a", " and more"));
+    expect(chat.messages).toHaveLength(0);
+    expect(chat.isStreaming).toBe(false);
+    chat.apply(endFrame("trn_a", "thr_a", "end", { conversationID: "cnv_a" }));
+    expect(chat.messages).toHaveLength(0);
+
+    // The same when this view was created after A's turn began: no turn.start was ever seen.
+    const late = new Conversation("bot_b");
+    late.bind("cnv_b", "bot_b", null);
+    late.apply(tokenFrame("trn_x", "thr_x", "stray fragment"));
+    expect(late.messages).toHaveLength(0);
+
+    // A chat that knows its own block still takes the tail of its own turn.
+    const own = new Conversation("bot_b");
+    own.bind("cnv_b", "bot_b", "thr_b");
+    own.apply(tokenFrame("trn_b", "thr_b", "tail of mine"));
+    expect(own.messages[0]?.text).toBe("tail of mine");
+  });
+
+  test("a turn of this conversation whose tokens were held back asks for the durable reply at its end", () => {
+    const chat = new Conversation("bot_b");
+    chat.bind("cnv_b", "bot_b", null);
+    chat.apply(tokenFrame("trn_b", "thr_b", "unseen"));
+    expect(chat.messages).toHaveLength(0);
+    expect(chat.apply(endFrame("trn_b", "thr_b", "end", { conversationID: "cnv_b" }))).toContainEqual({ kind: "reloadDurableState" });
+    // Another bot's turn asks for nothing.
+    chat.apply(startFrame("trn_a", "thr_a", "bot_a", "cnv_a"));
+    expect(chat.apply(endFrame("trn_a", "thr_a", "end", { conversationID: "cnv_a" }))).not.toContainEqual({ kind: "reloadDurableState" });
+  });
+
+  test("a turn this chat declined at its start stays declined even if its block is later adopted", () => {
+    const chat = new Conversation("bot_b");
+    chat.bind("cnv_b", "bot_b", null);
+    chat.apply(startFrame("trn_a", "thr_a", "bot_a", "cnv_a"));
+    // The open chat then learns of a block with the same id (it cannot, but a stale id must not leak).
+    chat.startSession("thr_a", "cnv_b");
+    chat.apply(tokenFrame("trn_a", "thr_a", "must stay out"));
+    expect(chat.messages).toHaveLength(0);
+  });
+
+  test("a server restart clears turn state, bubbles and dead cards, but keeps cards re-sent since (exit test P1)", () => {
+    const chat = new Conversation("agni");
+    chat.bind("cnv_1", "agni", "thr_1");
+    chat.apply(startFrame("trn_1", "thr_1", "agni", "cnv_1"));
+    chat.apply(tokenFrame("trn_1", "thr_1", "dies with the server"));
+    chat.apply(fixtureFrame("approval.request"));
+    chat.apply(fixtureFrame("form.request"));
+    chat.apply(wire({ type: "secret.request", seq: 9, requestID: "sec_old", purpose: "p", command: "c", kind: "password", expiresAt: "2030-01-01T00:00:00.000Z" }));
+    chat.appendLocalUserMessage("still mine");
+    expect(chat.isStreaming).toBe(true);
+
+    chat.resetLive({ keepCards: new Set(["frm_01hq"]) });
+    expect(chat.isStreaming).toBe(false);
+    expect(chat.inFlightTurnID).toBeNull();
+    expect(chat.messages.some((message) => message.state.kind === "streaming")).toBe(false);
+    expect(chat.messages.some((message) => message.isLocalEcho)).toBe(true);
+    expect(chat.approvals).toHaveLength(0);
+    expect(chat.forms.map((form) => form.id)).toEqual(["frm_01hq"]);
+    expect(chat.secrets).toHaveLength(0);
+
+    // A turn that comes back to life later starts clean.
+    chat.apply(startFrame("trn_2", "thr_1", "agni", "cnv_1"));
+    chat.apply(tokenFrame("trn_2", "thr_1", "fresh"));
+    expect(chat.messages.find((message) => message.turnID === "trn_2")?.text).toBe("fresh");
+    expect(chat.isStreaming).toBe(true);
+  });
+
   test("a turn seen from its start is never a continuation", () => {
     const conversation = new Conversation("agni", "thr_1");
     conversation.apply(startFrame("trn_whole", "thr_1"));
