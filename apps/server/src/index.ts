@@ -19,7 +19,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { PROTOCOL_VERSION } from "@agni/protocol";
-import { listDevices, mintPairCode, mintToken, revokeDevice } from "./auth/tokens";
+import { AmbiguousDevicePrefixError, listDevices, mintPairCode, mintToken, revokeDevice } from "./auth/tokens";
 import { serviceCommand } from "./service";
 import { loadConfig, type Config } from "./config";
 import { pluginMailResolver } from "./plugins/credentials";
@@ -569,7 +569,15 @@ function revoke(args: string[]): void {
   }
   const config = loadConfig();
   const db = cliDatabase(config.dbPath);
-  const device = revokeDevice(db, target);
+  let device: ReturnType<typeof revokeDevice>;
+  try {
+    device = revokeDevice(db, target);
+  } catch (error) {
+    if (!(error instanceof AmbiguousDevicePrefixError)) throw error;
+    console.error(error.message);
+    db.close();
+    process.exit(1);
+  }
   if (!device) {
     console.error(`no device matching "${target}"`);
     db.close();

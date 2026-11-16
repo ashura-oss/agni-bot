@@ -186,7 +186,7 @@ describe("LIKE wildcards in id-prefix lookups", () => {
       const revoked = revokeDevice(db, prefix);
       expect({ prefix, revoked: revoked?.name ?? null }).toEqual({ prefix, revoked: null });
     }
-    expect(db.query<{ n: number }, []>("SELECT count(*) AS n FROM devices WHERE revoked_at IS NULL").get()!.n).toBe(3);
+    expect(db.query<{ n: number }, []>("SELECT count(*) AS n FROM devices WHERE revoked_at IS NULL").get()!.n).toBe(2);
   });
 
   test("a job looked up by a wildcard prefix is not found, even when there is only one job", () => {

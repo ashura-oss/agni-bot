@@ -61,8 +61,11 @@ export async function verifyToken(db: Database, token: string): Promise<Device |
     .get(await hashToken(token));
   if (!row || row.revoked_at) return null;
   // Idle too long: judged by the last use, or by pairing time for a device never seen.
-  const lastActive = Date.parse(row.last_seen_at ?? row.created_at);
-  if (Number.isFinite(lastActive) && Date.now() - lastActive > SESSION_IDLE_MS) return null;
+  // A timestamp that cannot be read means the idle rule cannot be applied, so the token is refused.
+  const created = Date.parse(row.created_at);
+  const lastActive = row.last_seen_at === null ? created : Date.parse(row.last_seen_at);
+  if (!Number.isFinite(created) || !Number.isFinite(lastActive)) return null;
+  if (Date.now() - lastActive > SESSION_IDLE_MS) return null;
   registerSecret(token);
   touchDevice(db, row.id);
   return row;
@@ -77,14 +80,35 @@ export function touchDevice(db: Database, deviceID: string): void {
   );
 }
 
+/** A prefix names more than one device, so no device was revoked. */
+export class AmbiguousDevicePrefixError extends Error {
+  constructor(readonly prefix: string, readonly count: number) {
+    super(`"${prefix}" matches ${count} devices; give more of the id so it names one`);
+    this.name = "AmbiguousDevicePrefixError";
+  }
+}
+
+/**
+ * Revoke a device by its full id or a unique prefix. Null when nothing matches.
+ * A prefix that matches several devices throws `AmbiguousDevicePrefixError` and
+ * revokes none: revoking whichever row came first would cut off the wrong device.
+ */
 export function revokeDevice(db: Database, idOrPrefix: string): Device | null {
   // A prefix, compared as text: `LIKE` would read `%` and `_` in the argument as wildcards.
   if (idOrPrefix.length === 0) return null;
-  const row = db
-    .query<Device, [string]>(
-      "SELECT id, name, created_at, last_seen_at, revoked_at FROM devices WHERE substr(id, 1, length(?1)) = ?1 LIMIT 1",
-    )
-    .get(idOrPrefix);
+  const columns = "id, name, created_at, last_seen_at, revoked_at";
+  const exact = db.query<Device, [string]>(`SELECT ${columns} FROM devices WHERE id = ?`).get(idOrPrefix);
+  let row = exact;
+  if (!row) {
+    const matches = db
+      .query<Device, [string]>(`SELECT ${columns} FROM devices WHERE substr(id, 1, length(?1)) = ?1 LIMIT 2`)
+      .all(idOrPrefix);
+    if (matches.length > 1) {
+      const count = db.query<{ n: number }, [string]>("SELECT count(*) AS n FROM devices WHERE substr(id, 1, length(?1)) = ?1").get(idOrPrefix)!.n;
+      throw new AmbiguousDevicePrefixError(idOrPrefix, count);
+    }
+    row = matches[0] ?? null;
+  }
   if (!row) return null;
   if (!row.revoked_at) {
     db.run("UPDATE devices SET revoked_at = ? WHERE id = ?", [nowISO(), row.id]);
