@@ -58,6 +58,8 @@ export interface ChatMessage {
    * it when the answer is sealed.
    */
   isContinuation: boolean;
+  /** The daemon said how this message's turn ended (history rows carry it). */
+  stopKnown?: boolean;
 }
 
 export interface ApprovalRow {
@@ -264,6 +266,11 @@ export class Conversation {
     return id;
   }
 
+  /** Take back a local echo the daemon refused, so the text can go back to the composer. */
+  discardLocalEcho(id: string): void {
+    this.messages = this.messages.filter((message) => !(message.id === id && message.isLocalEcho));
+  }
+
   markLocalFailure(id: string, reason: string): void {
     const message = this.messages.find((candidate) => candidate.id === id);
     if (message) message.state = { kind: "failed", reason };
@@ -366,6 +373,15 @@ export class Conversation {
         senderColor: info.senderColor ?? null,
         toAgentId: info.toAgentId ?? null,
         uiHint: info.uiHint ?? null,
+        ...(info.role === "assistant" && info.stopReason !== undefined
+          ? {
+              stopKnown: true,
+              state:
+                info.stopReason === "end" || info.stopReason === "needs_input"
+                  ? ({ kind: "complete" } as const)
+                  : ({ kind: "stopped", reason: info.stopReason } as const),
+            }
+          : {}),
       }),
     );
 
@@ -398,6 +414,7 @@ export class Conversation {
       for (let index = this.messages.length - 1; index >= 0; index -= 1) {
         const message = this.messages[index];
         if (!message || message.turnID !== turnID || message.role !== "assistant") continue;
+        if (message.stopKnown) break;
         if (message.state.kind === "complete") message.state = { kind: "stopped", reason };
         break;
       }
@@ -448,6 +465,11 @@ export class Conversation {
       case "channel.created":
       case "channel.list.ok":
       case "channel.history.ok":
+        return [];
+
+      // The "Always allow" rules live in the app's settings state, not in a transcript.
+      case "approval.rules.list.ok":
+      case "approval.rule.revoke.ok":
         return [];
 
       case "approval.closed":

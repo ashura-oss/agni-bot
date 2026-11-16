@@ -421,6 +421,45 @@ describe("transcript", () => {
     expect(whole.apply(endFrame("trn_w", "thr_1", "end"))).not.toContainEqual({ kind: "reloadDurableState" });
   });
 
+  test("history rows carry how their turn ended, so the marker survives a reload (W2-C)", () => {
+    const conversation = new Conversation("agni", "thr_1");
+    conversation.loadHistory("thr_1", null, "agni", [
+      info({ id: "msg_a", role: "assistant", text: "Roses are", turnID: "trn_s", stopReason: "cancelled" }),
+      info({ id: "msg_b", role: "assistant", text: "Fine.", turnID: "trn_ok", stopReason: "end" }),
+      info({ id: "msg_c", role: "assistant", text: "Old row", turnID: "trn_old" }),
+      info({ id: "msg_u", role: "user", text: "write", turnID: "trn_s" }),
+    ]);
+    const stopped = conversation.messages.find((message) => message.id === "msg_a");
+    expect(stopped?.state).toEqual({ kind: "stopped", reason: "cancelled" });
+    expect(conversation.messages.find((message) => message.id === "msg_b")?.state.kind).toBe("complete");
+    expect(conversation.messages.find((message) => message.id === "msg_c")?.state.kind).toBe("complete");
+    expect(conversation.messages.find((message) => message.id === "msg_u")?.state.kind).toBe("complete");
+  });
+
+  test("the local stop record only fills in rows the server did not describe", () => {
+    const conversation = new Conversation("agni", "thr_1");
+    conversation.loadHistory("thr_1", null, "agni", [
+      info({ id: "msg_a", role: "assistant", text: "told", turnID: "trn_a", stopReason: "end" }),
+      info({ id: "msg_b", role: "assistant", text: "silent", turnID: "trn_b" }),
+    ]);
+    conversation.restoreStops({ trn_a: "cancelled", trn_b: "cancelled" });
+    expect(conversation.messages.find((message) => message.id === "msg_a")?.state.kind).toBe("complete");
+    expect(conversation.messages.find((message) => message.id === "msg_b")?.state).toEqual({ kind: "stopped", reason: "cancelled" });
+  });
+
+  test("a local echo can be discarded when the daemon refuses the message", () => {
+    const conversation = new Conversation("agni", "thr_1");
+    const id = conversation.appendLocalUserMessage("x".repeat(10));
+    conversation.discardLocalEcho(id);
+    expect(conversation.messages).toHaveLength(0);
+  });
+
+  test("the rules frames change no transcript", () => {
+    const conversation = new Conversation("agni", "thr_1");
+    expect(conversation.apply(wire({ type: "approval.rules.list.ok", seq: 1, rules: [] }))).toEqual([]);
+    expect(conversation.apply(wire({ type: "approval.rule.revoke.ok", seq: 2, id: "rul_1" }))).toEqual([]);
+  });
+
   test("a turn seen from its start is never a continuation", () => {
     const conversation = new Conversation("agni", "thr_1");
     conversation.apply(startFrame("trn_whole", "thr_1"));
