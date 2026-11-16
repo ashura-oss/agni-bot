@@ -60,6 +60,21 @@ export function ThreadView() {
     return () => cancelAnimationFrame(frame);
   }, [messages.length, lastText, lastID, conversation.threadID]);
 
+  // Content can grow without a new message (a table sizing itself, an image, a status line
+  // clearing): while following the tail, keep following it, or the transcript is left part-way up.
+  const innerRef = useRef<HTMLDivElement>(null);
+  const hasMessages = messages.length > 0;
+  useEffect(() => {
+    const inner = innerRef.current;
+    const element = scrollRef.current;
+    if (!inner || !element || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      if (pinned.current) element.scrollTop = element.scrollHeight;
+    });
+    observer.observe(inner);
+    return () => observer.disconnect();
+  }, [hasMessages]);
+
   // Search picks a message: bring it into view and stop following the tail.
   useEffect(() => {
     const target = snapshot.focusMessageID;
@@ -87,7 +102,7 @@ export function ThreadView() {
     <div className="thread">
       {messages.length === 0 ? (
         <div className="transcript-empty">
-          Message {model.agent?.name ?? "Agni"} — one conversation, it never resets
+          Message {model.agent?.name ?? "your bot"} — one conversation, it never resets
         </div>
       ) : (
         <div
@@ -98,7 +113,7 @@ export function ThreadView() {
             pinned.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
           }}
         >
-          <div className="transcript-inner">
+          <div className="transcript-inner" ref={innerRef}>
             {messages.map((message, index) => (
               <MessageBlock
                 key={message.id}
@@ -239,6 +254,7 @@ function PendingInbox() {
         <ApprovalCard
           key={approval.id}
           approval={approval}
+          requester={model.requesterName(approval.agentID)}
           onAnswer={(decision) => model.answer(approval, decision)}
         />
       ))}
@@ -257,12 +273,21 @@ function PendingInbox() {
   );
 }
 
-function ApprovalCard({ approval, onAnswer }: { approval: ApprovalRow; onAnswer: (decision: string) => void }) {
+function ApprovalCard({
+  approval,
+  requester,
+  onAnswer,
+}: {
+  approval: ApprovalRow;
+  /** The bot that asked, or null when the frames did not say: never the product's name. */
+  requester: string | null;
+  onAnswer: (decision: string) => void;
+}) {
   return (
     <div className="approval-card">
       <div className="card-heading">
         <Hand size={12} color="var(--ember)" />
-        Agni wants to run something
+        {requester ? `${requester} wants to run something` : "A bot wants to run something"}
         <span className="spacer" />
         <span className="card-heading-id">{approval.id}</span>
       </div>

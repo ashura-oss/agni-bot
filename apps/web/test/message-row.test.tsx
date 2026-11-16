@@ -23,6 +23,8 @@ function message(partial: Partial<ChatMessage> & { id: string; role: ChatMessage
     uiHint: null,
     taskId: null,
     questionId: null,
+    isBackground: false,
+    isContinuation: false,
     ...partial,
   };
 }

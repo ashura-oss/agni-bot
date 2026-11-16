@@ -17,6 +17,7 @@ import { Check, Copy, TextCursor } from "lucide-react";
 import { isStreaming, stopExplanation, type AgentInfo, type ChatMessage } from "@agni/client";
 import { useAppModel, useAppSnapshot } from "../state/use-app-model";
 import { copyText, SidebarAgentBadge } from "./bits";
+import { describeFailure, failureOf } from "../state/display";
 
 export function MessageRowView({
   message,
@@ -154,28 +155,50 @@ function AssistantProse({
     : `${agent?.name ?? "The assistant"} produced no reply, and the daemon recorded no reason. Ask it to share this thread to see the records.`;
 
   const streaming = isStreaming(message);
+  // A failed turn is said once: the daemon's text carries the raw error, and so does the stop
+  // reason beneath it, so both collapse into one readable note.
+  const failure =
+    failureOf(message.text) ??
+    (message.state.kind === "failed" && message.text.length === 0 ? describeFailure(message.state.reason) : null);
+  // A background job (a reminder) that only ran tools is not the owner's empty reply.
+  const quietBackground = message.isBackground && message.text.length === 0 && message.state.kind === "complete";
 
   return (
-    <div className="assistant-bubble">
+    <div className={`assistant-bubble${message.isContinuation ? " continued" : ""}`}>
       {message.text.length === 0 && streaming ? (
         <div className="thinking-pill">
           <ThinkingDots />
           Thinking
         </div>
+      ) : failure ? (
+        <FailureNote failure={failure} />
       ) : message.text.length > 0 ? (
         <MarkdownText text={message.text} />
-      ) : message.state.kind === "failed" ? (
-        <div className="prose">{message.state.reason}</div>
-      ) : (
+      ) : quietBackground ? null : (
         <div className="prose">{failureText}</div>
       )}
 
-      {explanation && message.text.length > 0 ? (
+      {explanation && message.text.length > 0 && !failure ? (
         <div className="stop-explanation">Response didn't finish · {explanation}</div>
       ) : null}
 
       {message.tools.length > 0 && snapshot.preferences.showActivity ? (
         <ActivityStrip message={message} />
+      ) : null}
+    </div>
+  );
+}
+
+/** A turn that failed: one sentence, with the daemon's own wording behind a disclosure. */
+function FailureNote({ failure }: { failure: { summary: string; detail: string | null } }) {
+  return (
+    <div className="failure-note">
+      <div className="prose">{failure.summary}</div>
+      {failure.detail ? (
+        <details className="failure-detail">
+          <summary>Details</summary>
+          <pre>{failure.detail}</pre>
+        </details>
       ) : null}
     </div>
   );
