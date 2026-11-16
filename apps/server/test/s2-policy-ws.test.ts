@@ -323,10 +323,10 @@ describe("approval rules list", () => {
   test("a rule made by pattern shows its pattern", async () => {
     const { client, h } = await start();
     const { addApprovalRule } = await import("../src/stores/approval-rules");
-    addApprovalRule(h.db, { agentID: "ea", toolName: "mail_send", target: "", resourcePattern: "*@example.com" });
+    addApprovalRule(h.db, { agentID: "ea", toolName: "mail_send", target: "", account: "owner", resourcePattern: "*@example.com" });
     client.send({ type: "approval.rules.list" });
     const list = await client.next("approval.rules.list.ok");
-    expect(list.rules[0]).toMatchObject({ toolName: "mail_send", resourcePattern: "*@example.com" });
+    expect(list.rules[0]).toMatchObject({ toolName: "mail_send", resourcePattern: "*@example.com", account: "owner" });
   });
 });
 

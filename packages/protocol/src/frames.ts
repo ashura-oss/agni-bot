@@ -263,6 +263,8 @@ export const ApprovalRuleInfoSchema = z.object({
    * instead of one exact target. Still one bot and one tool. Additive in v2.
    */
   resourcePattern: z.string().optional(),
+  /** On a mail pattern rule: the mailbox it is for (the agent's own or the owner's). Additive in v2. */
+  account: z.enum(["agent", "owner"]).optional(),
 });
 export type ApprovalRuleInfo = z.infer<typeof ApprovalRuleInfoSchema>;
 

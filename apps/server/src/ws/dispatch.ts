@@ -1755,6 +1755,7 @@ function handleApprovalRulesList(deps: DispatchDeps): void {
     target: escapeUnsafe(rule.target),
     createdAt: rule.createdAt,
     ...(rule.resourcePattern ? { resourcePattern: escapeUnsafe(rule.resourcePattern) } : {}),
+    ...(rule.account ? { account: rule.account } : {}),
   }));
   deps.reply({ type: "approval.rules.list.ok", rules });
 }
