@@ -26,13 +26,17 @@ import { entry } from "../agent/card-text";
 import { approvalTarget, matchApprovalRule } from "../stores/approval-rules";
 import { audit } from "./audit-sink";
 import { isTainted, newestFirst } from "./context";
-import { REFUSALS_BEFORE_STOP, findDenial, noteBlockedAttempt } from "./denials";
+import { REFUSALS_BEFORE_STOP, findCoveringDenial, findDenial, noteBlockedAttempt, runHasDenial, type DenialRecord } from "./denials";
 import { unnamedDestinations } from "./egress";
 import { policyHooks } from "./hooks";
+import { shellCandidates, shellWorkingDir } from "./resources";
+import { scanShell } from "./shell-scan";
+import type { Database } from "bun:sqlite";
 import { assessCall, policyFor } from "./metadata";
 import type {
   ApprovalCard, CallAssessment, Decision, Operation, PolicyInput, RefusalCode, RunContext, ToolTier,
 } from "./types";
+import type { ToolResource } from "./tool-meta";
 import { domainAllowed } from "../routines/egress";
 
 export interface DecideOptions {
@@ -147,28 +151,55 @@ function routineDomainCheck(run: RunContext, tool: string, args: Record<string, 
   return null;
 }
 
+/** The shell tools: a command line the server reads for the files it touches. */
+const SHELL_TOOLS: ReadonlySet<string> = new Set(["bash", "run_privileged"]);
+
 /** The owner said no to this earlier in the run, to the thing itself and not just the tool. */
 function deniedEarlier(run: RunContext, tool: string, args: Record<string, unknown>, assessment: CallAssessment, record: boolean): Decision | null {
-  const command = tool === "bash" ? String(args.command ?? "") : undefined;
-  const hit = findDenial(run.services.db, run, assessment.operation, assessment.resources, command);
-  if (!hit) return null;
-  const attempts = record ? noteBlockedAttempt(run.services.db, hit.id) : hit.blockedCount;
-  const what = hit.key;
-  if (record && attempts >= REFUSALS_BEFORE_STOP) {
-    return {
-      action: "stop", cause: "refused",
-      message: `I stopped: I kept trying to reach ${entry(what, 120)} after you said no.`,
-      reason: `refused ${attempts} times: ${hit.operation} on ${hit.kind}`,
-    };
+  const db = run.services.db;
+  const shell = SHELL_TOOLS.has(tool);
+  const command = shell ? String(args.command ?? "") : undefined;
+  // Every word of a command is a candidate file, not just the words the metadata kept for the card.
+  const scan = shell ? shellProbe(db, run, command ?? "", tool === "bash" ? args.cwd : undefined) : null;
+  const hit = findDenial(db, run, assessment.operation, [...assessment.resources, ...(scan?.candidates ?? [])], command);
+  if (hit) {
+    const attempts = record ? noteBlockedAttempt(db, hit.id) : hit.blockedCount;
+    if (record && attempts >= REFUSALS_BEFORE_STOP) {
+      return {
+        action: "stop", cause: "refused",
+        message: `I stopped: I kept trying to reach ${entry(hit.key, 120)} after you said no.`,
+        reason: `refused ${attempts} times: ${hit.operation} on ${hit.kind}`,
+      };
+    }
+    return refusedAfterNo(run, tool, args, assessment, hit, "");
   }
+  // A command that holds a variable, a pattern, a substitution, `eval`, `cd` and the like may reach the refused thing without
+  // naming it. While the run holds a refusal that covers it, such a command is not run and is not offered to the owner.
+  if (scan && scan.unresolved.length > 0) {
+    const any = findCoveringDenial(db, run, assessment.operation);
+    if (any) return refusedAfterNo(run, tool, args, assessment, any, ` This command uses ${scan.unresolved.slice(0, 3).join(", ")}, which I cannot follow to file names, so it might reach it. Name the files plainly, with no variables, patterns, substitution or folder changes.`);
+  }
+  return null;
+}
+
+function refusedAfterNo(run: RunContext, tool: string, args: Record<string, unknown>, assessment: CallAssessment, hit: DenialRecord, because: string): Decision {
   const bot = run.services.botName?.trim() || "A bot";
   return {
     ...refuse(
       "denied_resource",
-      `Refused: the owner said no to ${OPERATION_PHRASE[hit.operation]} ${entry(what, 200)} earlier in this task. This covers every tool and every route to it, for the rest of this task. Do not try again. Tell the owner what you were trying to do and ask how to continue.`,
-      `owner said no to ${hit.operation} on ${hit.kind}`,
+      `Refused: the owner said no to ${OPERATION_PHRASE[hit.operation]} ${entry(hit.key, 200)} earlier in this task. This covers every tool and every route to it, for the rest of this task.${because} Do not try again. Tell the owner what you were trying to do and ask how to continue.`,
+      because ? `owner said no to ${hit.operation} on ${hit.kind}; command cannot be resolved` : `owner said no to ${hit.operation} on ${hit.kind}`,
     ),
     preview: `Blocked: ${entry(bot, 60)} tried to ${verbFor(tool, args, assessment, false)} after you said no to ${DENIED_GERUND[hit.operation]} it.`,
+  };
+}
+
+/** The candidates and the unresolved parts of a shell command, or null when the run holds no refusal (nothing to compare with). */
+function shellProbe(db: Database, run: RunContext, command: string, cwd: unknown): { candidates: ToolResource[]; unresolved: string[] } | null {
+  if (!runHasDenial(db, run)) return null;
+  return {
+    candidates: shellCandidates(command, shellWorkingDir(typeof cwd === "string" && cwd ? cwd : undefined)),
+    unresolved: scanShell(command).unresolved,
   };
 }
 

@@ -20,7 +20,7 @@ import { isReadOnlyCommand } from "../tools/bash";
 import { isOutsideScratch, scratchDir, writeTargetExists } from "../tools/write-file";
 import type { CallAssessment, RiskKind, TaintKind, TaintSource } from "./types";
 import type { ToolClass, ToolMeta, ToolResource, ToolTier } from "./tool-meta";
-import { commandOperation, commandResources, hostResource, pathResource, recipientResources } from "./resources";
+import { commandOperation, commandResources, hostResource, pathResource, recipientResources, shellWorkingDir } from "./resources";
 
 type Args = Record<string, unknown>;
 
@@ -76,10 +76,15 @@ function assessWrite(args: Args): Partial<CallAssessment> {
 function assessShell(args: Args): Partial<CallAssessment> {
   const command = String(args.command ?? "");
   const cwd = typeof args.cwd === "string" && args.cwd ? args.cwd : undefined;
-  const base = cwd ?? scratchDir();
-  const resources = commandResources(command, base);
+  const resources = commandResources(command, shellWorkingDir(cwd));
   if (isReadOnlyCommand(command, cwd)) return { tier: 0, risk: "command", asks: false, operation: "read", resources };
   return { tier: 3, risk: "command", asks: true, operation: commandOperation(command), resources };
+}
+
+/** A command run as administrator: always asks, never read-only, and names the same files a shell call would. */
+function assessPrivileged(args: Args): Partial<CallAssessment> {
+  const command = String(args.command ?? "");
+  return { tier: 3, risk: "command", asks: true, operation: commandOperation(command), resources: commandResources(command, shellWorkingDir(undefined)) };
 }
 
 /** A send from the agent's own mailbox or calendar is free in an untainted run (D1); from the owner's it asks. */
@@ -148,7 +153,7 @@ export const TOOL_POLICY: Readonly<Record<string, ToolPolicy>> = {
     taintedBy: { kind: "unknown", when: (args) => !isReadOnlyCommand(String(args.command ?? ""), typeof args.cwd === "string" && args.cwd ? args.cwd : undefined), label: (args) => `output of: ${clean(args.command, 60)}` },
   },
   run_privileged: {
-    classes: ["effector", "private-reader"], tier: 3,
+    classes: ["effector", "private-reader"], tier: 3, assess: assessPrivileged,
     taintedBy: { kind: "unknown", label: (args) => `output of: ${clean(args.command, 60)}` },
   },
 

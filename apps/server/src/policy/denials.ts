@@ -62,6 +62,11 @@ interface DenialRow {
   id: string; resource_kind: ToolResource["kind"]; resource_key: string; operation: Operation; tool_name: string; cause: "denied" | "expired"; blocked_count: number;
 }
 
+/** Does this run hold any refusal at all? One indexed read; the shell checks run only when it does. */
+export function runHasDenial(db: Database, run: Pick<RunContext, "rootJob" | "rootTurnID">): boolean {
+  return db.query<{ one: number }, [string]>("SELECT 1 AS one FROM run_denials WHERE run_key = ? LIMIT 1").get(denialScope(run)) !== null;
+}
+
 /** The first earlier "no" in this run that covers any of these resources for this operation. */
 export function findDenial(
   db: Database,
@@ -81,6 +86,18 @@ export function findDenial(
     if (hit) return { id: row.id, kind: row.resource_kind, key: row.resource_key, operation: row.operation, tool: row.tool_name, cause: row.cause, blockedCount: row.blocked_count };
   }
   return null;
+}
+
+/**
+ * The first earlier "no" in this run that covers this operation at all, whatever it was about. For a shell
+ * command the server cannot follow to file names: it might reach any of them, so any such "no" applies.
+ */
+export function findCoveringDenial(db: Database, run: Pick<RunContext, "rootJob" | "rootTurnID">, operation: Operation): DenialRecord | null {
+  const rows = db
+    .query<DenialRow, [string]>("SELECT id, resource_kind, resource_key, operation, tool_name, cause, blocked_count FROM run_denials WHERE run_key = ? ORDER BY created_at")
+    .all(denialScope(run));
+  const row = rows.find((candidate) => candidate.resource_kind === "path" && covers(candidate.operation, operation));
+  return row ? { id: row.id, kind: row.resource_kind, key: row.resource_key, operation: row.operation, tool: row.tool_name, cause: row.cause, blockedCount: row.blocked_count } : null;
 }
 
 function resourceCovered(kind: ToolResource["kind"], key: string, attempt: ToolResource): boolean {

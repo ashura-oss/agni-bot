@@ -10,6 +10,7 @@ import { homedir } from "node:os";
 import type { Operation } from "./types";
 import type { ToolResource } from "./tool-meta";
 import { resolveWritePath, scratchDir } from "../tools/write-file";
+import { chainOf, scanShell } from "./shell-scan";
 
 const CASE_INSENSITIVE = process.platform === "win32";
 
@@ -78,33 +79,14 @@ export function hostResource(raw: unknown): ToolResource[] {
 const DELETE_PROGRAMS = new Set(["rm", "rmdir", "unlink", "del", "erase", "shred", "trash", "rd"]);
 const CHANGE_PROGRAMS = new Set(["mv", "move", "ren", "rename", "cp", "copy", "tee", "dd", "truncate", "touch", "chmod", "chown", "sed", "ln", "install", "rsync"]);
 
-/**
- * Split a shell line into command segments, each a list of words. Quotes are removed; whitespace and
- * redirections split words; `;`, `&&`, `||`, `|`, `&`, newlines, subshell parentheses and backticks end a
- * segment, so the first word of each segment is the program that segment runs.
- */
+/** The folder a shell command runs in: scratch, or a folder inside it (a relative `cwd` is under scratch, as `isReadOnlyCommand` and the shell tool read it). */
+export function shellWorkingDir(cwd: string | undefined): string {
+  return resolve(scratchDir(), (cwd ?? "").trim());
+}
+
+/** Split a shell line into command segments, each a list of words (program first). Quotes are removed. */
 export function shellSegments(command: string): string[][] {
-  const segments: string[][] = [];
-  let words: string[] = [];
-  let current = "";
-  let quote: string | null = null;
-  const flushWord = (): void => { if (current) words.push(current); current = ""; };
-  const endSegment = (): void => { flushWord(); if (words.length) segments.push(words); words = []; };
-  for (const ch of command) {
-    if (quote) {
-      if (ch === quote) quote = null; else current += ch;
-    } else if (ch === "'" || ch === "\"") {
-      quote = ch;
-    } else if (/[;|&\n()`]/.test(ch)) {
-      endSegment();
-    } else if (/[\s<>]/.test(ch)) {
-      flushWord();
-    } else {
-      current += ch;
-    }
-  }
-  endSegment();
-  return segments;
+  return scanShell(command).segments.map((segment) => [...(segment.program === null ? [] : [segment.program]), ...segment.args]);
 }
 
 /** Split a shell line into words: quotes are removed, separators and redirections split words. */
@@ -112,36 +94,66 @@ export function shellWords(command: string): string[] {
   return shellSegments(command).flat();
 }
 
-/** What a shell command does to files, by its programs: deleting, changing, or something else (run). */
+/**
+ * What a shell command does to files, by its programs wherever they sit (after `;`, inside `$( )` or
+ * backticks, behind `sudo`, `env` or `xargs`): deleting, changing, or something else (run).
+ */
 export function commandOperation(command: string): Operation {
-  const programs = command.split(/[;|&\n]+/).map((part) => shellWords(part)[0]?.split(/[\\/]/).pop()?.toLowerCase() ?? "");
+  const scan = scanShell(command);
+  const programs = scan.segments.flatMap((segment) => chainOf(segment).names);
   if (programs.some((program) => DELETE_PROGRAMS.has(program))) return "delete";
-  if (programs.some((program) => CHANGE_PROGRAMS.has(program)) || /[^<]>(?!>)|>>/.test(command)) return "change";
+  if (programs.some((program) => CHANGE_PROGRAMS.has(program)) || scan.segments.some((segment) => segment.redirects.some((redirect) => redirect.kind === "out"))) return "change";
   return "run";
 }
 
-/** The words of one command segment that can name a file: the program name is dropped unless it is itself a path (`./run.sh`). */
-function segmentArguments(words: string[]): string[] {
-  const [program = "", ...rest] = words;
-  return /[\\/.~*?]/.test(program) ? words : rest;
+/** A word as a comparison key: `~` expanded, relative to `cwd`, links followed unless the word holds a pattern. */
+function wordKey(word: string, cwd: string, home: string): string {
+  const expanded = word === "~" ? home : word.startsWith("~/") || word.startsWith("~\\") ? resolve(home, word.slice(2)) : word;
+  const absolute = resolve(cwd, expanded);
+  // A word with a pattern in it cannot be followed to a real file; any other is resolved the way a file tool resolves it, links included.
+  return /[*?[]/.test(word) ? foldPath(absolute) : pathKey(absolute);
 }
 
-/** Every word of the command that could name a file or folder, resolved against `cwd`, as comparison keys. */
+/**
+ * What a command is working on, for recording a refusal: the words that can name a file or folder. A program's
+ * own name is not one unless it is itself a path (`./run.sh`); redirect targets and assignment values always are.
+ */
 export function commandPaths(command: string, cwd: string): string[] {
   const home = homedir();
   const keys = new Set<string>();
-  for (const word of shellSegments(command).flatMap(segmentArguments)) {
-    if (word.startsWith("-") || word.includes("=") && !/[\\/]/.test(word)) continue;
-    const expanded = word === "~" ? home : word.startsWith("~/") || word.startsWith("~\\") ? resolve(home, word.slice(2)) : word;
-    const absolute = resolve(cwd, expanded);
-    // A word with a pattern in it cannot be followed to a real file; any other is resolved the way a file tool resolves it, links included.
-    keys.add(/[*?[]/.test(word) ? foldPath(absolute) : pathKey(absolute));
+  const add = (word: string): void => {
+    if (!word) return;
+    const at = word.indexOf("=");
+    const flag = word.startsWith("-");
+    // An option is not a file, but its value can be (`--out=file`); a plain word with an `=` and no path is an assignment-looking word.
+    const value = at >= 0 && (flag || !/[\\/]/.test(word)) ? word.slice(at + 1) : word;
+    if (flag && at < 0) return;
+    if (value) keys.add(wordKey(value, cwd, home));
+  };
+  for (const segment of scanShell(command).segments) {
+    const chain = chainOf(segment);
+    for (const assignment of [...segment.assignments, ...chain.skipped.filter((word) => word.includes("="))]) add(assignment.slice(assignment.indexOf("=") + 1));
+    if (chain.program !== null && /[\\/.~*?]/.test(chain.program)) add(chain.program);
+    for (const word of chain.rest) add(word);
+    for (const redirect of segment.redirects) add(redirect.target);
   }
   return [...keys];
 }
 
 export function commandResources(command: string, cwd: string): ToolResource[] {
   return commandPaths(command, cwd).map((value) => ({ kind: "path" as const, value }));
+}
+
+/**
+ * Everything in the command that could be a file or folder, for asking "does this reach what the owner refused":
+ * every word, program names and option values and the pieces of quoted strings included. More than
+ * `commandResources`, on purpose: a refusal must not be dodged by how the line is written.
+ */
+export function shellCandidates(command: string, cwd: string): ToolResource[] {
+  const home = homedir();
+  const keys = new Set<string>();
+  for (const word of scanShell(command).words) keys.add(wordKey(word, cwd, home));
+  return [...keys].map((value) => ({ kind: "path" as const, value }));
 }
 
 /** True when `candidate` is `denied`, lies inside it, or contains it (a command on the folder reaches the file). */
