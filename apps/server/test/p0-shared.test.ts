@@ -27,10 +27,11 @@ afterEach(() => {
 });
 
 describe("P0 extra CLI commands", () => {
-  test("both sprint tables are well formed (they shipped empty; sprints fill them)", () => {
+  test("both sprint tables are well formed, whatever commands the sprints have filled in", () => {
     for (const table of [s2Commands, s3Commands]) {
-      expect(typeof table.commands).toBe("object");
-      expect(Array.isArray(table.help)).toBe(true);
+      expect(Object.keys(table).sort()).toEqual(["commands", "help"]);
+      for (const run of Object.values(table.commands)) expect(typeof run).toBe("function");
+      for (const line of table.help) expect(typeof line).toBe("string");
       // Every command has a help line that names it.
       for (const name of Object.keys(table.commands)) expect(table.help.some((line) => line.includes(name))).toBe(true);
     }
