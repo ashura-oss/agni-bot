@@ -20,9 +20,9 @@ import { newID } from "../util/ids";
  */
 export const MAX_DEPTH = 3;
 /** Maximum tool steps a single turn in the chain may take. */
-export const MAX_CHAIN_STEPS = 24;
+export const MAX_CHAIN_STEPS = 48;
 /** Maximum tool steps a delegated (depth > 1) turn may take. */
-export const MAX_DELEGATED_STEPS = 12;
+export const MAX_DELEGATED_STEPS = 24;
 /** Maximum characters of handoff summary text carried between agents. */
 export const MAX_HANDOFF_SUMMARY_CHARS = 1_200;
 /** Maximum characters of durable fact text injected into a prompt prefix. */
