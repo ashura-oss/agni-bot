@@ -1,0 +1,40 @@
+rules:
+  - id: agni-env-spread-to-child
+    languages: [typescript]
+    severity: ERROR
+    message: >-
+      The whole of process.env (or Bun.env) is handed to a child process. The
+      server's environment carries the provider keys, so any child, and
+      anything a model gets that child to run, can read them. Build the
+      child's environment from an allowlist: use scrubbedShellEnv() from
+      util/scrubbed-env.ts, or list the few names the child needs. A child
+      that is another copy of Agni (the daemon) and truly needs the whole
+      environment may carry a nosemgrep comment with the reason.
+    metadata:
+      category: security
+      cwe: "CWE-526: Exposure of Sensitive Information Through Environmental Variables"
+      owasp: "A02:2021 - Cryptographic Failures"
+      sprint: S3-11
+    patterns:
+      - pattern-either:
+          - pattern: |
+              $F(..., {..., env: process.env, ...}, ...)
+          - pattern: |
+              $F(..., {..., env: Bun.env, ...}, ...)
+          - pattern: |
+              $F(..., {..., env: {..., ...process.env, ...}, ...}, ...)
+          - pattern: |
+              $F(..., {..., env: {..., ...Bun.env, ...}, ...}, ...)
+          - pattern: |
+              $F(..., {..., env: Object.assign({}, process.env, ...), ...}, ...)
+          - pattern: |
+              $ENV = {..., ...process.env, ...};
+              ...
+              $F(..., {..., env: $ENV, ...}, ...)
+          - pattern: |
+              $ENV = {..., ...Bun.env, ...};
+              ...
+              $F(..., {..., env: $ENV, ...}, ...)
+      - metavariable-regex:
+          metavariable: $F
+          regex: ^((child_process|cp|childProcess|Bun)\.)?(spawn|spawnSync|exec|execSync|execFile|execFileSync|fork)$

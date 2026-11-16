@@ -1,0 +1,37 @@
+rules:
+  - id: agni-model-json-into-sql
+    languages: [typescript]
+    mode: taint
+    severity: ERROR
+    message: >-
+      JSON parsed from model output reaches the text of an SQL statement.
+      Model output is untrusted data. Keep the statement fixed and pass every
+      value as a bound parameter (db.run("... WHERE id = ?", [value])). Only
+      a number coerced with Number() or a list of "?" placeholders may be
+      interpolated.
+    metadata:
+      category: security
+      cwe: "CWE-89: SQL Injection"
+      owasp: "A03:2021 - Injection"
+      sprint: S3-11
+    pattern-sources:
+      - patterns:
+          - pattern: JSON.parse($ARG)
+          - metavariable-regex:
+              metavariable: $ARG
+              regex: (?i)(completion|response|reply|choice|message|content|output|answer|arguments|tool_?call|llm|model|text)
+    pattern-sanitizers:
+      - pattern: Number(...)
+      - pattern: parseInt(...)
+      - pattern: parseFloat(...)
+      - pattern: $LIST.map(() => "?")
+      - pattern: $LIST.map(($ITEM) => "?")
+      - pattern: $LIST.map((_) => "?")
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $DB.exec($SQL, ...)
+              - pattern: $DB.run($SQL, ...)
+              - pattern: $DB.query($SQL, ...)
+              - pattern: $DB.prepare($SQL, ...)
+          - focus-metavariable: $SQL

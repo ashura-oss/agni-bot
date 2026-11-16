@@ -1,0 +1,23 @@
+rules:
+  - id: agni-shell-exec-interpolated
+    languages: [typescript]
+    severity: ERROR
+    message: >-
+      A string built from variables is passed to exec() or execSync(), which
+      run it through a shell. A value with a quote, a semicolon, a backtick or
+      $( ) becomes a second command. Use execFile() or Bun.spawn() with an
+      argument array so no shell parses the values, and validate anything that
+      becomes an argument.
+    metadata:
+      category: security
+      cwe: "CWE-78: OS Command Injection"
+      owasp: "A03:2021 - Injection"
+      sprint: S3-11
+    patterns:
+      - pattern-either:
+          - pattern: $F(`...${$X}...`, ...)
+          - pattern: $F("..." + $X, ...)
+          - pattern: $F($X + "...", ...)
+      - metavariable-regex:
+          metavariable: $F
+          regex: ^((child_process|cp|childProcess)\.)?(exec|execSync|execAsync|execPromise)$

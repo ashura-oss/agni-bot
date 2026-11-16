@@ -1,0 +1,32 @@
+rules:
+  - id: agni-fetch-without-ssrf-guard
+    languages: [typescript]
+    severity: ERROR
+    message: >-
+      fetch() in server code with a URL that is not a literal and no SSRF
+      check before it in the same block. A URL that came from a user, a model,
+      a page, or a stored setting can point at loopback, the local network or a
+      cloud metadata address. Call assertPublicHost() or resolvePublicHost()
+      from tools/fetch-url.ts first, or fetch through fetchPage(). If the URL is
+      fixed by the operator (a configured service) and may be private, add a
+      nosemgrep comment that says so.
+    metadata:
+      category: security
+      cwe: "CWE-918: Server-Side Request Forgery (SSRF)"
+      owasp: "A10:2021 - Server-Side Request Forgery"
+      sprint: S3-11
+    patterns:
+      - pattern: fetch($URL, ...)
+      - pattern-not: fetch("...", ...)
+      - pattern-not-inside: |
+          await assertPublicHost(...);
+          ...
+      - pattern-not-inside: |
+          assertPublicHost(...);
+          ...
+      - pattern-not-inside: |
+          await resolvePublicHost(...);
+          ...
+      - pattern-not-inside: |
+          $ADDRS = await resolvePublicHost(...);
+          ...
