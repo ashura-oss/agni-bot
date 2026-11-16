@@ -15,10 +15,12 @@
  * does for a run that has read outside text.
  */
 import type { Database } from "bun:sqlite";
+import type { ApprovalSource } from "@agni/protocol";
 import { newID, nowISO } from "../util/ids";
 import { redact } from "../util/redact";
 import { clip, entry, escapeUnsafe, quoted } from "./card-text";
-import type { ApprovalCard, RiskKind } from "../policy/types";
+import { saveCardMeta } from "./pending-cards";
+import type { ApprovalCard, RiskKind, TaintKind } from "../policy/types";
 import { isOutsideScratch, resolveWritePath, scratchDir, writeTargetExists } from "../tools/write-file";
 import { addApprovalRule, approvalTarget } from "../stores/approval-rules";
 
@@ -69,7 +71,17 @@ export interface ApprovalRequest {
 
 export interface ApprovalBrokerDeps {
   db: Database;
-  emit: (frame: { type: "approval.request"; requestID: string; action: string; preview: string; buttons: Decision[] }) => void;
+  emit: (frame: {
+    type: "approval.request"; requestID: string; action: string; preview: string; buttons: Decision[];
+    /** What outside text the run had read, newest first. Left out for a run that read none. */
+    source?: ApprovalSource[];
+    /** How risky the call is (0-3). */
+    tier?: 0 | 1 | 2 | 3;
+    /** When the card stops waiting (ISO time). */
+    expiresAt?: string;
+    /** The preview hides part of the call: the owner opens the full text before allowing. */
+    truncated?: boolean;
+  }) => void;
   /** Wait for a decision on a pending approval. */
   waitForDecision: (requestID: string, signal: AbortSignal) => Promise<Decision | null>;
   /**
@@ -86,17 +98,8 @@ export interface CardInfo {
   botName?: string | null;
   /** The bot whose turn this is: the scope of a rule if the owner says "always". */
   agentID: string | null;
-}
-
-/** What a card says besides its text: stored with the approval so a replayed card matches the first. */
-export interface CardMeta {
-  tier: number;
-  risk: RiskKind;
-  verb: string;
-  sources: Array<{ kind: string; label: string }>;
-  canRemember: boolean;
-  unnamedDestinations: string[];
-  truncated: boolean;
+  /** When the card stops waiting (ISO time), so the owner and the client see the same deadline the wait uses. */
+  expiresAt?: string;
 }
 
 /** The marks `clip` and `entry` leave where they cut something out. */
@@ -131,15 +134,32 @@ export class ApprovalBroker {
     // engine said may not be remembered never offers "always".
     const target = info?.card.canRemember && info.agentID ? approvalTarget(toolName, args) : null;
     const scope = info?.agentID && target !== null ? { agentID: info.agentID, target } : null;
-    const meta = info ? cardMeta(info.card, preview) : null;
+    const truncated = previewIsCut(preview);
+    const source = info ? approvalSources(info.card) : [];
+    const tier = info ? info.card.tier : undefined;
+    const expiresAt = info?.expiresAt;
 
     db.run(
-      `INSERT INTO approvals (id, thread_id, turn_id, action, preview, status, decision, call_id, tool_name, created_at, card_meta)
-       VALUES (?, ?, ?, ?, ?, 'pending', NULL, ?, ?, ?, ?)`,
-      [requestID, threadID, turnID, action, preview, callID, toolName, nowISO(), meta ? JSON.stringify({ ...meta, canRemember: scope !== null }) : null],
+      `INSERT INTO approvals (id, thread_id, turn_id, action, preview, status, decision, call_id, tool_name, created_at)
+       VALUES (?, ?, ?, ?, ?, 'pending', NULL, ?, ?, ?)`,
+      [requestID, threadID, turnID, action, preview, callID, toolName, nowISO()],
     );
+    // What the card said besides its text, kept with the row so a card replayed on reconnect is the same card.
+    saveCardMeta(db, requestID, {
+      ...(source.length > 0 ? { source } : {}),
+      ...(tier !== undefined ? { tier } : {}),
+      ...(expiresAt ? { expiresAt } : {}),
+      truncated,
+      canRemember: scope !== null,
+    });
 
-    this.deps.emit({ type: "approval.request", requestID, action, preview, buttons: scope ? ["once", "always", "reject"] : ["once", "reject"] });
+    this.deps.emit({
+      type: "approval.request", requestID, action, preview, buttons: scope ? ["once", "always", "reject"] : ["once", "reject"],
+      ...(source.length > 0 ? { source } : {}),
+      ...(tier !== undefined ? { tier } : {}),
+      ...(expiresAt ? { expiresAt } : {}),
+      truncated,
+    });
 
     const decision = await this.deps.waitForDecision(requestID, signal);
     if (decision === "always" && scope) addApprovalRule(db, { ...scope, toolName, approvalID: requestID });
@@ -176,16 +196,14 @@ Auto-approved by standing rule ${rule.id}: "Always allow" for ${rule.agentID} / 
   }
 }
 
-function cardMeta(card: ApprovalCard, preview: string): CardMeta {
-  return {
-    tier: card.tier,
-    risk: card.risk,
-    verb: card.verb,
-    sources: card.sources.map((source) => ({ kind: source.kind, label: source.label })),
-    canRemember: card.canRemember,
-    unnamedDestinations: card.unnamedDestinations,
-    truncated: previewIsCut(preview),
-  };
+/** The protocol's name for each kind of outside text a run can have read. */
+const SOURCE_KIND: Record<TaintKind, ApprovalSource["kind"]> = {
+  web: "web", email: "email", peer: "agent", attachment: "attachment", mcp: "connector", routine: "scheduled", scheduled: "scheduled", unknown: "unknown",
+};
+
+/** The card's sources as the frame carries them: newest first, one clean line each. */
+function approvalSources(card: ApprovalCard): ApprovalSource[] {
+  return card.sources.slice(0, 20).map((source) => ({ kind: SOURCE_KIND[source.kind] ?? "unknown", ...(source.label ? { label: source.label.slice(0, 300) } : {}) }));
 }
 
 const RISK_LINE: Record<RiskKind, string> = {

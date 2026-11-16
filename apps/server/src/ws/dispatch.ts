@@ -406,7 +406,9 @@ function handleHello(deps: DispatchDeps, session: Session, frame: Extract<Client
       // The card as it was raised: the same source, risk, expiry and cut flag, when the loop saved them.
       const meta = loadCardMeta(deps.db, approval.id);
       deps.reply({
-        type: "approval.request", requestID: approval.id, action: approval.action, preview: approval.preview, buttons: replayButtons(deps.db, approval),
+        type: "approval.request", requestID: approval.id, action: approval.action, preview: approval.preview,
+        // A card the engine said cannot be remembered (a run that had read outside text) never gains "always" on replay.
+        buttons: meta?.canRemember === false ? ["once", "reject"] : replayButtons(deps.db, approval),
         ...(meta?.source ? { source: meta.source } : {}),
         ...(meta?.tier !== undefined ? { tier: meta.tier } : {}),
         ...(meta?.expiresAt ? { expiresAt: meta.expiresAt } : {}),

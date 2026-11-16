@@ -41,6 +41,8 @@ export interface CardMeta {
   tier?: 0 | 1 | 2 | 3;
   expiresAt?: string;
   truncated?: boolean;
+  /** False when the card did not offer "always": a replay must not offer it either. */
+  canRemember?: boolean;
 }
 
 export function saveCardMeta(db: Database, approvalID: string, meta: CardMeta): void {
@@ -73,6 +75,7 @@ export function loadCardMeta(db: Database, approvalID: string): CardMeta | null 
   if (record.tier === 0 || record.tier === 1 || record.tier === 2 || record.tier === 3) meta.tier = record.tier;
   if (typeof record.expiresAt === "string") meta.expiresAt = record.expiresAt;
   if (typeof record.truncated === "boolean") meta.truncated = record.truncated;
+  if (typeof record.canRemember === "boolean") meta.canRemember = record.canRemember;
   return Object.keys(meta).length > 0 ? meta : null;
 }
 

@@ -96,9 +96,11 @@ async function askOwner(
   // The owner's time to decide is not the turn's.
   const release = deps.hold();
   const waitSignal = AbortSignal.any([signal, AbortSignal.timeout(deps.ownerWaitMs)]);
+  // The deadline the card shows is the one the wait uses.
+  const expiresAt = new Date(Date.now() + deps.ownerWaitMs).toISOString();
   let answer: Awaited<ReturnType<ApprovalBroker["request"]>>;
   try {
-    answer = await deps.broker.request(run.threadID, run.turnID, input.tool, input.callID, input.args, waitSignal, { card, agentID: run.bot, botName: run.services.botName });
+    answer = await deps.broker.request(run.threadID, run.turnID, input.tool, input.callID, input.args, waitSignal, { card, agentID: run.bot, botName: run.services.botName, expiresAt });
   } finally {
     release();
   }

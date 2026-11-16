@@ -309,7 +309,9 @@ describe("approvals", () => {
   });
 
   test("a card with nothing saved is replayed as it always was, with no invented expiry", async () => {
-    const { h } = await turnWaitingOnApproval();
+    const { h, requestID } = await turnWaitingOnApproval();
+    // The card was raised with its meta; this one is a card from before any was kept.
+    h.db.run("UPDATE approvals SET card_meta = NULL WHERE id = ?", [requestID]);
     const other = await h.connect({ device: "tablet" });
     const replayed = await other.next("approval.request");
     expect(replayed.expiresAt).toBeUndefined();

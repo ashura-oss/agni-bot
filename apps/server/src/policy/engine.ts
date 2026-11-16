@@ -23,7 +23,7 @@
  * a handful of small database reads at most. Under a millisecond.
  */
 import { entry } from "../agent/card-text";
-import { approvalTarget, findApprovalRule } from "../stores/approval-rules";
+import { approvalTarget, matchApprovalRule } from "../stores/approval-rules";
 import { audit } from "./audit-sink";
 import { isTainted, newestFirst } from "./context";
 import { REFUSALS_BEFORE_STOP, findDenial, noteBlockedAttempt } from "./denials";
@@ -113,8 +113,9 @@ function judge(run: RunContext, input: PolicyInput, record: boolean): Decision {
   // approved was one thing, once, not whatever this run now wants done after reading a page.
   const target = approvalTarget(tool, args);
   const canRemember = !tainted && target !== null;
-  if (target !== null && !tainted) {
-    const rule = findApprovalRule(run.services.db, run.bot, tool, target);
+  if (!tainted) {
+    // An exact rule (what "Always allow" stores) or a pattern rule over the call's resources (S2-08).
+    const rule = matchApprovalRule(run.services.db, { agentID: run.bot, toolName: tool, args, resources: assessment.resources });
     if (rule) return { action: "run", via: "rule", reason: `stored rule ${rule.id}`, assessment: { ...assessment, tier }, ruleID: rule.id, rule: { id: rule.id, agentID: rule.agentID, toolName: rule.toolName, createdAt: rule.createdAt } };
   }
 

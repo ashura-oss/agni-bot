@@ -50,7 +50,7 @@ import { mcpApprovalNote } from "../plugins/mcp";
 import { domainAllowed } from "../routines/egress";
 import { log } from "../log";
 import { TurnTimer } from "./turn-timer";
-import { OWNER_WAIT_CEILING_MS, expireApprovalForCall, expirePendingForTurn } from "./pending-cards";
+import { expireApprovalForCall, expirePendingForTurn, ownerWaitMsFor } from "./pending-cards";
 
 export interface TaskTurnSettings {
   firstTokenTimeoutMs: number;
@@ -743,7 +743,8 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
       let stepProgressed = false;
       const toolHooks: ToolHooks = {
         hold: () => timer.hold(),
-        ownerWaitMs: settings.ownerWaitMs ?? OWNER_WAIT_CEILING_MS,
+        // A chat turn waits 10 minutes for the owner; a job or routine nobody is watching waits 30.
+        ownerWaitMs: settings.ownerWaitMs ?? ownerWaitMsFor(Boolean(run.policy?.jobID) || runCtx.unattended),
         unattended: Boolean(run.untrustedInput) && !peerSourced,
         run: runCtx,
         peerInput,
