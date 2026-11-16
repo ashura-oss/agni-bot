@@ -6,8 +6,10 @@
  * arguments against the folder the server chose. Everything else is "unresolved": it is never read
  * for file names, and a run that holds a refusal asks the owner about it every time.
  */
-import { describe, expect, test } from "bun:test";
-import { resolve } from "node:path";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { hostPathOf, proveShell } from "../src/policy/shell-proof";
 import type { Operation } from "../src/policy/types";
 
@@ -185,6 +187,8 @@ describe("on Windows a POSIX-style absolute path is unresolved unless the one no
     ["a name that only starts like a mount", "/cygdrive"],
     ["a mount with a long name", "/cdrive/x"],
     ["a drive with no slash", "C:q1"],
+    ["a bare drive word, which is the current folder of that drive", "C:"],
+    ["a bare drive word in lower case", "d:"],
     ["a data stream", "q1:stream"],
     ["a trailing dot, which Windows drops", "q1."],
     ["a trailing dot inside a path", "sub./q1"],
@@ -220,5 +224,22 @@ describe("on Windows a POSIX-style absolute path is unresolved unless the one no
   test.skipIf(process.platform !== "win32")("its path is the C:\\ one the denials use", () => {
     const proof = proofOf("rm /c/Users/a/q1");
     expect(proof.proven && proof.paths).toEqual([resolve("C:\\Users\\a\\q1")]);
+  });
+});
+
+describe("a cp or mv whose destination is an existing folder is unresolved", () => {
+  // `cp a dir` writes `dir/a`: the file it changes is not one of the words.
+  const root = mkdtempSync(join(tmpdir(), "agni-proof-dest-"));
+  mkdirSync(join(root, "dir"));
+  writeFileSync(join(root, "a"), "x");
+  writeFileSync(join(root, "plain"), "x");
+  afterAll(() => rmSync(root, { recursive: true, force: true }));
+
+  test.each(["cp a dir", "mv a dir", "cp -r a dir", "cp a plain2 dir", "cp a .", "mv a ./dir"])("%s", (command) => {
+    expect(proveShell(command, root).proven, `${command} was proven; the file it writes is inside the folder, under another name`).toBe(false);
+  });
+
+  test.each(["cp a b", "mv a dir/new", "cp a plain", "rm dir", "cat dir", "mkdir dir"])("a destination that is not an existing folder is still proven: %s", (command) => {
+    expect(proveShell(command, root).proven, command).toBe(true);
   });
 });

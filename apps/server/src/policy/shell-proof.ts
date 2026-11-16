@@ -11,7 +11,9 @@
  * An operand is unresolved too, and the command with it, when it has a `..` segment (the shell opens
  * `link/../x` through the link, so the words do not say which file) or when any part of it that exists is a
  * symbolic link or junction (the file is then somewhere the words do not name). Only the parts below the
- * folder the server chose are looked at: that folder is the server's own.
+ * folder the server chose are looked at: that folder is the server's own. The same goes for a bare drive
+ * word (`C:`, the folder that drive is in) and for a `cp` or `mv` whose last operand is an existing folder
+ * (the file it writes is inside the folder, under a name the words do not give).
  *
  * There are no wrappers (`sudo`, `env`, `timeout`, `nice`, `xargs`, ...) and no option that takes a
  * folder (`-C`, `-D`, `-t`, `--directory`): the lists below name every option each program may carry,
@@ -21,7 +23,7 @@
  * For Sprint 7: unattended (sandboxed) shell is off in any run that holds a refusal. The sandbox
  * profile, not this module, is the boundary around what a command can reach.
  */
-import { lstatSync } from "node:fs";
+import { lstatSync, statSync } from "node:fs";
 import { parse, relative, resolve, sep } from "node:path";
 import type { Operation } from "./types";
 
@@ -136,6 +138,8 @@ export function proveShell(command: string, cwd: string, platform: NodeJS.Platfo
       if (crossesLink(absolute, cwd)) return unresolved("an operand that goes through a link");
       paths.push(absolute);
     }
+    // `cp a dir` and `mv a dir` write `dir/a`: when the last operand is a folder, the file changed is not one of the words.
+    if ((program === "cp" || program === "mv") && paths.length > 1 && isFolder(paths[paths.length - 1] as string)) return unresolved("a destination that is a folder");
   }
   return { proven: true, program, operation: spec.operation, paths };
 }
@@ -155,6 +159,8 @@ export function hostPathOf(word: string, platform: NodeJS.Platform = process.pla
   if (drive) return windowsPath(`${(drive[1] as string).toUpperCase()}:`, drive[2] ?? "");
   if (word.startsWith("/") || word.includes("\\")) return null;
   const withDrive = /^([A-Za-z]:)(?:\/(.*))?$/.exec(word);
+  // A bare drive word (`C:`) is the folder that drive is currently in, which the words do not say.
+  if (withDrive && withDrive[2] === undefined) return null;
   const body = withDrive ? (withDrive[2] ?? "") : word;
   if (!withDrive && /^[A-Za-z]:/.test(word)) return null;
   // A colon past the drive is a data stream; a name ending in a dot or space is another name to Windows.
@@ -165,6 +171,14 @@ export function hostPathOf(word: string, platform: NodeJS.Platform = process.pla
 function windowsPath(drive: string, rest: string): string | null {
   if (rest.includes(":") || rest.split("/").some((part) => part !== "." && part !== ".." && /[. ]$/.test(part))) return null;
   return `${drive}\\${rest.replaceAll("/", "\\")}`;
+}
+
+function isFolder(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 /**
