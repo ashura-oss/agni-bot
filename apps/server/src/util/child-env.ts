@@ -27,6 +27,7 @@ import { log } from "../log";
 import { providerKeyEnvNames } from "../models/providers";
 import { envValue, isWindowsDrivePath, type Env } from "./env-lookup";
 import { gitInstall } from "./git-bash";
+import { PROXY_VARIABLE, stripProxyUserinfo } from "./proxy-env";
 
 export type ChildKind = "shell" | "pdf-worker" | "daemon";
 
@@ -222,7 +223,9 @@ export function childEnv(kind: ChildKind, options: ChildEnvOptions = {}): Record
   const env: Record<string, string> = {};
   for (const [name, value] of Object.entries(source)) {
     if (value === undefined || name.toLowerCase() === "path") continue;
-    if (isAllowed(kind, name)) env[name] = value;
+    if (!isAllowed(kind, name)) continue;
+    // A command the model wrote may print its environment: it gets the proxy's address, not the password in it.
+    env[name] = kind === "shell" && PROXY_VARIABLE.test(name) ? stripProxyUserinfo(value) : value;
   }
   if (kind === "daemon") {
     const inherited = inheritedPath(source, platform === "win32");
