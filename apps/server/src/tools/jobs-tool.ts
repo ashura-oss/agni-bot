@@ -18,12 +18,12 @@ import {
 } from "../stores/jobs";
 import { canonicalAgentID } from "../agent/personas";
 import { describeSchedule, nextDailyRun, parseDay, parseWallClock } from "../jobs/schedule";
+import { MAX_EVERY_MINUTES, MIN_EVERY_MINUTES, checkSchedule } from "../jobs/schedule-check";
 import { isPeerPrincipal, isTainted, packTaint, unknownTaint } from "../policy/context";
 import type { RunContext, TaintSource } from "../policy/types";
 import { denialScope } from "../policy/denials";
 import { audit } from "../policy/audit-sink";
 import { describeRecurring, isRecurringSchedule, standingRuleOrigin, standingScheduleKind } from "../policy/standing-rules";
-import { CLOSURE_WORDING_REFUSAL, closureWording } from "../agent/closure";
 import { canSelfSchedule, maxSelfScheduledJobs } from "../agent/guardrails";
 
 export interface JobScheduleArgs {
@@ -66,21 +66,6 @@ export interface ScheduledJobView {
   agent: string;
   what: string;
   lastResult: string | null;
-}
-
-/** What a bot is told when a job it asks for could never be made. One text each, said before the owner is asked and again when the job is made. */
-const SELF_ONLY = "an agent may only schedule jobs for itself";
-const NOTHING_TO_DO = "a scheduled job needs something to do";
-const notADate = (at: unknown): string => `"${String(at)}" is not a date`;
-
-const MIN_EVERY_MINUTES = 5;
-const MAX_EVERY_MINUTES = 10_080;
-
-/** Why this interval can never be a schedule, or null. */
-function everyMinutesProblem(minutes: number): string | null {
-  return Number.isFinite(minutes) && minutes >= MIN_EVERY_MINUTES && minutes <= MAX_EVERY_MINUTES
-    ? null
-    : `everyMinutes must be between ${MIN_EVERY_MINUTES} and ${MAX_EVERY_MINUTES} (a week)`;
 }
 
 /** Why this bot may not keep another job of its own, or null. */
@@ -181,18 +166,12 @@ function inheritedRoot(ctx: ToolContext): RequestRoot | undefined {
 
 export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: string, from: ScheduledFrom = {}): JobScheduleResult {
   const { root, denialRoot, createdByRequest, created, taint, capabilities } = from;
-  const requested = args.agentID?.trim();
-  if (requested && canonicalAgentID(requested) !== canonicalAgentID(callerAgentID)) {
-    throw new Error(SELF_ONLY);
-  }
+  // The rules the engine and the card use before they ask the owner (jobs/schedule-check.ts): the same ones, so none can drift.
+  const problem = checkSchedule({ ...args, agent_id: args.agentID }, callerAgentID);
+  if (problem) throw new Error(problem);
   const text = args.text.trim();
-  if (!text) throw new Error(NOTHING_TO_DO);
-  if (closureWording(text)) throw new Error(CLOSURE_WORDING_REFUSAL);
   const full = capProblem(db, callerAgentID);
   if (full) throw new Error(full);
-  const choices = [args.at, args.dailyAt, args.everyMinutes].filter((value) => value !== undefined && value !== null);
-  if (choices.length === 0) throw new Error("say when it should run: `at` (one-off), `dailyAt` (a clock time), or `everyMinutes`");
-  if (choices.length > 1) throw new Error("pick one: `at`, `dailyAt` or `everyMinutes`");
 
   const payload: Record<string, unknown> = {
     text,
@@ -213,9 +192,7 @@ export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: 
   let runAt: string;
   let recurrence: string;
   if (args.at) {
-    const when = new Date(args.at);
-    if (Number.isNaN(when.getTime())) throw new Error(notADate(args.at));
-    runAt = when.toISOString();
+    runAt = new Date(args.at).toISOString();
     recurrence = "once";
     // Still the request it was scheduled in, for its wake count (it has a clock of its own, which `clockKey` would take away).
     if (root) { payload.rootTurnID = root.rootTurnID; payload.rootJob = root.rootJob; }
@@ -230,8 +207,6 @@ export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: 
     if (createdByRequest) payload.createdByRequest = createdByRequest;
   } else {
     const minutes = Number(args.everyMinutes);
-    const outOfRange = everyMinutesProblem(minutes);
-    if (outOfRange) throw new Error(outOfRange);
     const everyMs = Math.round(minutes * 60_000);
     runAt = new Date(Date.now() + everyMs).toISOString();
     recurrence = `every ${minutes} minute${minutes === 1 ? "" : "s"}`;
@@ -342,29 +317,10 @@ function callerOf(ctx: ToolContext): string {
   return id;
 }
 
-/** Why these `job_schedule` arguments can never be made into a job by this bot, or null. The same checks `scheduleJob` makes, said before the call is judged. */
+/** Why these `job_schedule` arguments can never be made into a job by this bot, or null: the checks `scheduleJob` makes, said before the call is judged. */
 function scheduleProblem(db: Database, args: Record<string, unknown>, bot: string | undefined): string | null {
-  const given = (value: unknown): boolean => value !== undefined && value !== null;
-  if ([args.at, args.dailyAt, args.everyMinutes].filter(given).length > 1) return "pick one: `at`, `dailyAt` or `everyMinutes`";
-  // Whose job it is, and what it says: the owner is not asked about a job that `scheduleJob` would refuse for either.
-  const requested = typeof args.agent_id === "string" ? args.agent_id.trim() : "";
-  if (requested && bot && canonicalAgentID(requested) !== canonicalAgentID(bot)) return SELF_ONLY;
-  const text = typeof args.text === "string" ? args.text.trim() : "";
-  if (!text) return NOTHING_TO_DO;
-  if (closureWording(text)) return CLOSURE_WORDING_REFUSAL;
-  if (given(args.at) && (typeof args.at !== "string" || !args.at.trim() || Number.isNaN(new Date(args.at).getTime()))) return notADate(args.at);
-  try {
-    if (given(args.dailyAt)) parseWallClock(String(args.dailyAt));
-    if (given(args.dailyAt) && Array.isArray(args.days)) for (const day of args.days) parseDay(String(day));
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error);
-  }
-  if (given(args.everyMinutes)) {
-    const outOfRange = everyMinutesProblem(Number(args.everyMinutes));
-    if (outOfRange) return outOfRange;
-  }
   // A bot at its cap could not keep the job, so it is told before anyone is asked about it.
-  return bot ? capProblem(db, bot) : null;
+  return checkSchedule(args, bot) ?? (bot ? capProblem(db, bot) : null);
 }
 
 /**
@@ -411,6 +367,11 @@ export function createJobTools(db: Database): ToolDefinition<unknown, unknown>[]
       validate: (args, bot) => scheduleProblem(db, args, bot),
       handler: async (args, ctx) => {
         const input = (args ?? {}) as Record<string, unknown>;
+        // The owner said yes to a time that was ahead when the card was raised. If the card waited past it, the job would run at once.
+        if (ctx.ownerApproved === true) {
+          const stale = checkSchedule(input, ctx.chain?.currentAgentID, Date.now());
+          if (stale) return { error: `not done: ${stale} The owner said yes to a time that is no longer ahead, so nothing was made.` };
+        }
         const recurring = isRecurringSchedule(input);
         if (recurring) {
           // A repeating job is a standing rule: only the owner's own clean turn, or the owner's yes to this very call's card

@@ -21,13 +21,11 @@ import { describeRecurring, isRecurringSchedule, oneShotTime } from "../policy/s
 import { ROUTINE_DEFAULTS } from "../routines/types";
 import type { Preflight } from "../routines/types";
 import { getRoutine } from "../stores/routines";
+import { checkSchedule } from "../jobs/schedule-check";
 import { isOutsideScratch, resolveWritePath, scratchDir, writeTargetExists } from "../tools/write-file";
 
 /** The most characters a card's body holds. A call whose body would be longer is not put to the owner: it is refused. */
 export const CARD_BODY_MAX_CHARS = 20_000;
-
-/** How far behind now a one-shot job's time may be and still mean "now": a model's clock is as old as its turn, and a chain link is set to run at once. */
-const PAST_GRACE_MS = 60_000;
 
 /** The call cannot be put on a card whole, so no card is raised for it. The message is for the model and says what to do. */
 export class CardNotShown extends Error {
@@ -214,12 +212,10 @@ function jobPreview(kind: "repeating_job" | "next_job", args: Record<string, unk
   if (recurring !== (kind === "repeating_job")) {
     throw new CardNotShown(`this call was classified as ${kind === "repeating_job" ? "a repeating job" : "a one-shot job"} but its schedule is ${recurring ? "a repeating one" : "a one-shot one"}, so it was not shown to the owner and was not run`);
   }
-  // The owner is not asked to approve a time that has already gone by: the bot got the time wrong, and is told so.
-  if (!recurring) {
-    const when = new Date(String(args.at)).getTime();
-    if (Number.isNaN(when)) throw new CardNotShown(`"${entry(args.at, 80)}" is not a date, so the job was not put to the owner and was not made`);
-    if (when < Date.now() - PAST_GRACE_MS) throw new CardNotShown(`the time you gave (${oneShotTime(args.at)}) has already passed, so the job was not put to the owner and was not made. Give a time in the future.`);
-  }
+  // The owner is not asked about a schedule that could never be made, or to approve a time that has already gone by: the bot got it wrong,
+  // and is told so, in the words the tool uses (jobs/schedule-check.ts).
+  const problem = checkSchedule(args, undefined, Date.now());
+  if (problem !== null) throw new CardNotShown(`${problem} (the job was not put to the owner and was not made)`);
   const lines = [
     `Bot: ${entry(bot, 80)}`,
     `Runs: ${describeRecurring(args)}`,
