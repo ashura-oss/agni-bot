@@ -598,8 +598,11 @@ function wakeParent(deps: TurnJobDeps, taskID: string, summary: string, parentDe
     summary: visible.text ?? "",
     redacted: visible.redacted,
     taint: taskTaint(deps.db, task.id),
-    // The wake is a link of the chain the task was delegated in: it is the owner's only if every task it is told about is.
+    // The wake is a link of the chain the task was delegated in: it is the owner's only if every task it is told about is, and it is cut to the
+    // tools of the run that delegated if that run was (a narrowed run does not get more done through its own wake than it could itself).
     ownerOnly: carried.ownerOnly,
+    narrowed: carried.narrowed,
+    ...(carried.capabilities !== null ? { capabilities: carried.capabilities } : {}),
   };
   claimResultDelivery(deps.db, task.id, () => {
     const existing = findQueuedJobByPayloadKey(deps.db, "turn", wakeKey);

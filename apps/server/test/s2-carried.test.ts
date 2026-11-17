@@ -177,6 +177,8 @@ describe("packCarried: what each link does", () => {
     const wake = packCarried(brief, "wake");
     expect(wake).toMatchObject({ rootTurnID: "trn_root", rootJob: null, denialRoot: "job_scope", chainID: "chn_1", ownerOnly: true, taint: [] });
     expect(wake.clockKey).toBeUndefined();
+    // A wake is cut to the tools of the run that delegated, when that run was cut.
+    expect({ narrowed: wake.narrowed, capabilities: wake.capabilities }).toEqual({ narrowed: true, capabilities: TOOLS });
     const resume = packCarried(brief, "resume", { taint: [WEB] });
     expect(resume).toMatchObject({ rootTurnID: "trn_root", denialRoot: "job_scope", chainID: "chn_1", ownerOnly: true, taint: [WEB], narrowed: true });
     expect([...resume.capabilities!].sort()).toEqual([...TOOLS].sort());

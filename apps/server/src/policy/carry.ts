@@ -237,9 +237,6 @@ export function packCarried(from: RunContext | Carried | undefined, link: Link, 
       break;
     case "wake":
       // The results carry their own taint (what the task's run read), so the wake itself starts with none.
-      // (Not yet carried: the wake runs with its bot's own tools. Fix B.)
-      out.narrowed = false;
-      out.capabilities = null;
       root();
       if (src.denialRoot) out.denialRoot = src.denialRoot;
       if (src.chainID) out.chainID = src.chainID;
@@ -280,6 +277,12 @@ export function readCarried(payload: unknown): Carried {
   for (const item of isWake ? results : []) {
     const part: Record<string, unknown> = typeof item === "object" && item !== null ? item as Record<string, unknown> : {};
     ownerOnly = ownerOnly && part.ownerOnly === true;
+    // Cut by any task that was, to the tools every cut task allowed; one whose set cannot be read leaves the inert tools only.
+    if (typeof part.narrowed === "boolean" ? part.narrowed : part.capabilities !== undefined) {
+      const allowed = readCapabilities(part.capabilities) ?? null;
+      capabilities = !narrowed ? allowed : capabilities === null || allowed === null ? null : capabilities.filter((name) => allowed.includes(name));
+      narrowed = true;
+    }
   }
   let taint: TaintSource[];
   if (Array.isArray(p.taint)) taint = readTaint(p.taint);
