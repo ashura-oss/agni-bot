@@ -108,3 +108,53 @@ describe("acquireServeLockAtStart", () => {
     expect(JSON.parse(readFileSync(serveLockPath(home), "utf8")).token).toBe("swapped");
   });
 });
+
+describe("which recorded hosts allow a takeover (fail closed)", () => {
+  test("a live `localhost` bind keeps the lock, wherever this machine puts it (Windows/Bun: ::1 only)", async () => {
+    const home = fresh();
+    const server = Bun.serve({ port: 0, hostname: "localhost", fetch: () => Response.json({ ok: true, v: 2, uptimeMs: 1 }) });
+    cleanups.push(() => server.stop(true));
+    const text = lock(home, await liveOther(), { host: "localhost", port: server.port });
+    await expect(acquireServeLockAtStart({ home, ...quick })).rejects.toThrow(ServeLockError);
+    expect(readFileSync(serveLockPath(home), "utf8")).toBe(text);
+  });
+
+  test("`localhost` with nothing listening on 127.0.0.1 or ::1 is stale: taken over", async () => {
+    const home = fresh();
+    lock(home, await liveOther(), { host: "localhost", port: await closedPort() });
+    const held = await acquireServeLockAtStart({ home, ...quick });
+    expect(JSON.parse(readFileSync(serveLockPath(home), "utf8")).pid).toBe(process.pid);
+    held.release();
+  });
+
+  test("an IP literal that refuses is stale: an IPv6 literal too", async () => {
+    const home = fresh();
+    lock(home, await liveOther(), { host: "::1", port: await closedPort() });
+    const held = await acquireServeLockAtStart({ home, ...quick });
+    expect(JSON.parse(readFileSync(serveLockPath(home), "utf8")).pid).toBe(process.pid);
+    held.release();
+  });
+
+  test("a live bind on an IPv6 literal keeps the lock", async () => {
+    const home = fresh();
+    const server = Bun.serve({ port: 0, hostname: "::1", fetch: () => Response.json({ ok: true, v: 2, uptimeMs: 1 }) });
+    cleanups.push(() => server.stop(true));
+    const text = lock(home, await liveOther(), { host: "::1", port: server.port });
+    await expect(acquireServeLockAtStart({ home, ...quick })).rejects.toThrow(ServeLockError);
+    expect(readFileSync(serveLockPath(home), "utf8")).toBe(text);
+  });
+
+  test.each(["0.0.0.0", "::", "[::]"])("a wildcard (%s) is never taken over, even when nothing listens: the message says which file to delete", async (host) => {
+    const home = fresh();
+    const text = lock(home, await liveOther(), { host, port: await closedPort() });
+    await expect(acquireServeLockAtStart({ home, ...quick })).rejects.toThrow(/delete .*serve\.lock if no Agni server is running/);
+    expect(readFileSync(serveLockPath(home), "utf8")).toBe(text);
+  });
+
+  test.each(["agni.example", "my-machine", "agni.localhost"])("a host name (%s) is never taken over, even when nothing listens", async (host) => {
+    const home = fresh();
+    const text = lock(home, await liveOther(), { host, port: await closedPort() });
+    await expect(acquireServeLockAtStart({ home, ...quick })).rejects.toThrow(/delete .*serve\.lock if no Agni server is running/);
+    expect(readFileSync(serveLockPath(home), "utf8")).toBe(text);
+  });
+});

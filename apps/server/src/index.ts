@@ -154,8 +154,8 @@ async function serve(): Promise<void> {
     throw error;
   }
   // The port is ours: the lock now says where this server listens, which is how a later `serve` tells this server from a
-  // pid the machine reused after it was killed.
-  serveLock.recordEndpoint(config.host, config.port);
+  // pid the machine reused after it was killed. The socket's own host and port, not the configured ones (port 0 is "any").
+  serveLock.recordEndpoint(running.hostname, running.port);
   // Only after the port is ours: a second `serve` that hit EADDRINUSE must
   // not re-queue the live daemon's running jobs.
   const requeued = requeueStuckJobs(db);

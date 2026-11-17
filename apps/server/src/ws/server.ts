@@ -40,6 +40,8 @@ import { redact, registerSecretsFromEnv, secretEnvNames } from "../util/redact";
 import { StreamRedactor } from "../util/redact-stream";
 
 export interface RunningServer {
+  /** The host the socket is bound to, as the runtime reports it (what `serve` records in its lock). */
+  readonly hostname: string;
   readonly port: number;
   readonly url: string;
   /** Plugin connection state lives here (settings pane snapshots, OAuth). */
@@ -376,6 +378,7 @@ export function startServer(config: Config, db: Database, router: Router, starte
   if (resumed > 0) log.warn(`resumed ${resumed} owner message(s) a previous process left queued`);
 
   return {
+    hostname: server.hostname ?? config.host,
     port: server.port ?? config.port,
     url: `ws://${config.host}:${server.port ?? config.port}/ws`,
     plugins,
