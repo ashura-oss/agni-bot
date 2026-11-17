@@ -1,0 +1,140 @@
+/* Sprint 2: the policy core in the app. -----------------------------------------
+ * Approval cards, the full-text dialog, the budget stop, pause and off, spending.
+ * Colour comes from the tokens only (the appearance system sets them at runtime).
+ * Loaded last. Phone rules at the bottom keep every control at 44px and the header
+ * inside 375px.
+ */
+
+/* Approval card -------------------------------------------------------------- */
+
+.approval-card .card-heading .approval-expiry {
+  flex: 0 0 auto;
+  color: var(--ink-tertiary);
+  font-size: var(--text-caption);
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+/* The whole preview, scrolled inside its box, the way the daemon wrote it. */
+.approval-card .approval-preview {
+  max-height: min(36vh, 300px);
+  border-left: 3px solid var(--hairline);
+  background: var(--canvas);
+  color: var(--ink);
+}
+
+.approval-full-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.approval-full-hint {
+  color: var(--ink-secondary);
+  font-size: var(--text-meta);
+}
+
+.approval-notice {
+  margin: 0;
+  padding-left: 10px;
+  border-left: 3px solid var(--ember);
+  color: var(--ink);
+  font-size: var(--text-meta);
+  line-height: 1.45;
+}
+
+.approval-expired {
+  margin: 0;
+  color: var(--ink-secondary);
+  font-size: var(--text-meta);
+  line-height: 1.5;
+}
+
+.approval-card.expired {
+  opacity: 0.85;
+}
+
+/* A button that is not available yet stays in the tab order and says why. */
+.btn[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn[aria-disabled="true"]:hover {
+  background: var(--surface);
+}
+
+.btn.primary[aria-disabled="true"]:hover {
+  background: var(--ember);
+}
+
+.approval-full-dialog {
+  width: min(720px, 100%);
+}
+
+.approval-full-dialog h2.approval-full-title {
+  font-size: var(--text-title);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.approval-full-dialog h2.approval-full-title:focus {
+  outline: none;
+}
+
+.approval-full-body {
+  max-height: min(55vh, 460px);
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--row-radius);
+  background: var(--canvas);
+}
+
+.approval-full-text {
+  margin: 0;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--text-code);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.approval-full-status {
+  margin: 0;
+  color: var(--ink-secondary);
+  font-size: var(--text-meta);
+}
+
+.approval-full-status .btn {
+  margin-top: 8px;
+}
+
+.approval-full-actions {
+  flex-wrap: wrap;
+}
+
+@media (max-width: 720px) {
+  .approval-card .btn,
+  .approval-full-dialog .btn {
+    min-height: var(--touch-target);
+  }
+
+  .approval-card .card-actions {
+    flex-wrap: wrap;
+  }
+
+  .approval-card .card-actions .btn {
+    flex: 1 1 auto;
+  }
+
+  .approval-card .approval-preview {
+    max-height: 30vh;
+  }
+
+  .approval-full-actions .btn {
+    flex: 1 1 auto;
+  }
+}
