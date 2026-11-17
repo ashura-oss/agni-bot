@@ -60,14 +60,18 @@ and reports success once `/health` answers. `daemon stop` is SIGTERM (SIGKILL
 only if the process refuses to die). `serve` handles both signals by stopping
 the job runner, flushing the frame log, and closing SQLite. Log and pid
 locations default to `~/.agni/` (see `apps/server/src/config.ts`). The
-provider settings file is the exception and still lives under `data/`.
+provider settings file, `providers.json`, also defaults to `~/.agni/`
+(`apps/server/src/models/providers.ts`). An older copy under the repo's `data/`
+folder is moved there on first run (`apps/server/src/home.ts`).
 
 ## Background jobs
 
 The `jobs` table is the queue: `queued → running → done | failed`. Claims are
 transactional, attempts are counted, and a job a dead process left `running` is
-requeued at boot. One runner per daemon executes kinds sequentially so
-background work cannot stampede a free-tier provider.
+requeued at boot. One runner per daemon works the queue on a pool of
+`AGNI_JOB_CONCURRENCY` workers (default 2). Only `turn`, `routine`, and
+`task.reminder` jobs may overlap with themselves. Every other kind runs one at
+a time (`apps/server/src/jobs/runner.ts`).
 
 The `turn` kind runs one prompt in a thread. The daemon uses it for reminders
 and scheduled briefs, and it streams results to any connected client. Completion
@@ -113,9 +117,17 @@ Each task step sends the same system prompt
 and tool schemas first, then the compacted session and recent messages. That
 keeps the request prefix stable for provider-side caching.
 
-The loop has no tool-call or output-token budget (removed 2026-10-27); the
-turn timeout and the chain step guardrail (24 model calls, 12 when delegated)
-bound it. It persists its message log
+The loop is bounded in four ways:
+
+- A model response may ask for at most 25 tool calls. Calls past that point are
+  skipped, and the model is told so.
+- Each chat step asks for at most 8,192 output tokens, unless
+  `AGNI_MAX_OUTPUT_TOKENS` sets another limit.
+- A chain of handoffs and delegations is capped at 48 steps, or 24 when
+  delegated (`agent/guardrails.ts`).
+- The turn timeout (`AGNI_TURN_TIMEOUT_MS`, default 120000) ends any turn that runs too long.
+
+The loop persists its message log
 and each tool result. An interrupted session restores saved tool results. Calls
 with an uncertain outcome come back as errors and are never replayed
 automatically. Approval decisions are stored in SQLite and resolve the active
@@ -148,9 +160,10 @@ delegated work.
 ## Stores
 
 One SQLite database in WAL mode. Its location comes from `AGNI_DB_PATH`
-(default in `config.ts`). Tables are created by numbered migrations in
-`apps/server/src/db/migrations.ts`, which has 49 migrations. The schema holds
-about 30 tables. Main groups:
+(default in `config.ts`). Tables are created by numbered migrations. The base
+list in `apps/server/src/db/migrations.ts` has 53 migrations (ids 1 to 53). Ids
+54 to 64 are reserved for later sprints in `db/s2/` and `db/s3/`, and are empty
+today. The schema has about 50 tables. Main groups:
 
 - Conversations and turns: `conversations`, `threads`, `turns`, `messages`,
   `channels`, `channel_messages`, `summaries`, `attachments`, `artifacts`
@@ -167,6 +180,20 @@ opens with the carried summary and closes into it (`closed_by`: `manual`,
 `context`, or `background`). Compaction is write-time: one bounded model call per
 closing block (`agent/rollover.ts`). A failed summary carries the previous
 summary forward and never blocks a turn.
+
+## Shared seams (stubs)
+
+These exist so later work can plug in without changing its callers. Most have
+no real behaviour yet. Do not describe them as working.
+
+- `policy/tool-meta.ts`: the `ToolMeta` types. Types only.
+- `policy/audit-sink.ts`: `audit()`. The default sink drops events, and nothing calls it yet.
+- `util/redact.ts`: `redact()` returns its input unchanged. `tools/bash.ts`
+  has its own private helper that masks the one-time password.
+- `models/usage-hook.ts`: the model router reports each successful completion
+  through `recordModelUsage`. The default recorder drops the event.
+- `util/secret-names.ts`: the classifier that decides whether a setting name is
+  a secret. Unknown names count as secrets. Nothing in product code calls it yet.
 
 ## Plugins
 

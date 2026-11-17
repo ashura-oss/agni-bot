@@ -1,6 +1,6 @@
 # Wire protocol v2
 
-The contract between the server and every client (Mac app, Android app, CLI).
+The contract between the server and every client (web app, Mac app, CLI). A Tauri client is planned.
 Machine version: [`packages/protocol/src/frames.ts`](../packages/protocol/src/frames.ts) —
 if the two disagree, the code wins, then fix this doc.
 
@@ -146,8 +146,9 @@ client can show it and keep the draft.
 | `task.update` | `{taskID, action, until?, title?, description?, dueAt?, deadlineAt?, reminderAt?, labels?, repeatRule?, priority?, listID?}` | Completes, reopens, snoozes, or edits a task. |
 | `task.answer` | `{taskID, questionID, text}` | Answers a question a delegated task asked. Its own frame, not a `msg.send`: the task must be in `needs_input`, the answer belongs to one question, and it is accepted exactly once. |
 | `bind.direct` | `{agentID}` | Pins this client to an agent: the server resolves that agent's conversation, its active session block and its DM channel, and answers with them. |
-| `provider.add` | `{providerID, apiKey, model?, baseUrl?, label?}` | Adds a supported API provider over the authenticated socket. `providerID: "custom"` adds an endpoint of the owner's own: `baseUrl` is an OpenAI-compatible base (`https://host/v1`), `label` names it in the list. The daemon stores the key in its mode-600 `.env` and the endpoint in `data/providers.json`; neither is ever returned. |
+| `provider.add` | `{providerID, apiKey, model?, baseUrl?, label?}` | Adds a supported API provider over the authenticated socket. `providerID: "custom"` adds an endpoint of the owner's own: `baseUrl` is an OpenAI-compatible base (`https://host/v1`), `label` names it in the list. The daemon stores the key in `config.env` (mode 600, under `AGNI_HOME`) and the endpoint in `providers.json` under `AGNI_HOME`; neither is ever returned. |
 | `provider.model.set` | `{providerID, model}` | Changes a configured provider's model ID on the daemon and updates the live router. |
+| `provider.models.list` | `{providerID}` | Lists the models a configured provider offers. Answer: `provider.models.ok`. |
 | `provider.auth.status` | `{providerID: "chatgpt"}` | Reads public ChatGPT connection/account metadata. Requires device authentication. |
 | `provider.auth.start` | `{providerID: "chatgpt", accountID?}` | Starts official OAuth on the daemon host with a loopback callback, fresh PKCE/state/nonce. A saved account ID reuses its registration. Requires a local authenticated connection. |
 | `provider.auth.cancel` | `{providerID: "chatgpt", loginID}` | Cancels the initiating device's pending login. |
@@ -225,6 +226,8 @@ accountLabel?, error?, connectedAt?}`.
 | `provider.auth.started` | `{providerID: "chatgpt", loginID, authorizeURL, expiresAt}` | Requester-only, never replayed. Opens OpenAI's authorization page. Contains no access, refresh, or ID token. |
 | `provider.auth.state` | `{providerID: "chatgpt", connection}` | Public state: `status`, saved `accounts [{id,label,connected}]`, `activeAccountID`, selected `model`, eligible `models [{id,label}]`, optional safe `message` and first-sign-in `showWelcome`. Never includes credentials. |
 | `presence` | `{state}` | `online \| offline`. |
+| `agent.presence` | `{agentId, state, taskId?}` | A bot's state: `idle \| working \| waiting \| blocked`. `waiting` means waiting for the owner. `taskId` names the delegated task when the state is about one. |
+| `provider.models.ok` | `{providerID, models}` | Answer to `provider.models.list`. `models` is a list of model IDs. |
 | `status.update` | `{channelId, agentId?, text, transient}` | Activity text; transient updates clear on the next message. |
 | `msg.new` | `{id, channelId, fromType, fromId, senderName, senderColor?, text, internal, uiHint?, intent?, toAgentId?, taskId?, questionId?, createdAt}` | Durable channel message; `uiHint` can be `onboarding_name_prompt`, `handoff_notice`, `progress`, `needs_input`, or `normal`. `intent` says what an agent-to-agent message is for (`request`, `result`, `question`, `status`, `fyi`); it is absent on ordinary messages. The live frame for a handoff notice always carries one, defaulting to `request`; a notice reloaded from history has none, because channel rows do not store intent. `toAgentId` names the agent a handoff notice is about, so the client can render the name as a link to that agent's chat. `taskId` + `questionId` mark a question from a delegated task: the client renders an answer field that sends `task.answer`. |
 | `agent.updated` | `{agentId, displayName, onboarded, role?, visibility?}` | Agent rename/onboarding state changed. `role` and `visibility` are present when the change touched them (an `agent.profile` edit). |
@@ -289,7 +292,7 @@ is replayable.
 
 ### Attachments (additive v2 extension)
 
-`msg.send.files` now carries up to five opaque uploaded attachment IDs, rather
+The `files` field of `msg.send` now carries up to five opaque uploaded attachment IDs, rather
 than client filesystem paths. No existing shipped client sent paths before this
 change: the Mac app sends `nil` and the CLI omits the field. Files must have
 been uploaded by the sending device. Text remains required; the web app
