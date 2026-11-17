@@ -48,30 +48,39 @@ export function startClock(db: Database, key: string, nowMs: number = Date.now()
  * and the slot it was scheduled for (`slot`: the job's `run_at` when the run's clock started), so a delegated child that is
  * still running when the job's next slot starts stays on the clock of the run it belongs to.
  *
- * The key is written on the job (`jobs.run_clock_key`) when the clock starts, and the runner clears it when it schedules the
- * next run. A retry of the same run finds the key and keeps that clock. A first try that failed before its clock started
+ * The key is written on the job (`jobs.run_clock_key`) before the clock starts, and the runner clears it when it moves the job
+ * to its next slot. A retry of the same run finds the key and keeps that clock. A first try that failed before its clock started
  * (a busy thread, a crash) left none, so its retry starts one for its own slot: it must not take the newest clock of the
  * job, which is the previous run's.
+ *
+ * Fails closed. A key that cannot be read, or a new one that cannot be written, would leave a retry unable to find this run's
+ * clock and give it a fresh one, so no clock is started: the key returned names none, `readClock` reads it as unknown and the
+ * run is stopped before its first step.
  */
 export function startJobClock(db: Database, jobID: string, slot: string, nowMs: number = Date.now()): string {
-  let stored: string | null = null;
+  let stored: string | null;
   try {
     stored = db.query<{ run_clock_key: string | null }, [string]>("SELECT run_clock_key FROM jobs WHERE id = ?").get(jobID)?.run_clock_key ?? null;
   } catch (error) {
-    log.warn(`run clock of job ${jobID} could not be looked up: ${error instanceof Error ? error.message : String(error)}`);
+    log.warn(`run clock of job ${jobID} could not be looked up, so the run is stopped: ${error instanceof Error ? error.message : String(error)}`);
+    return unavailableClockKey(jobID, slot);
   }
   // A key whose clock was dropped as too old starts again now: the clock is the run's, and the run is long over.
   const key = stored || `${jobID}@${slot}`;
-  startClock(db, key, nowMs);
   if (!stored) {
     try {
       db.run("UPDATE jobs SET run_clock_key = ? WHERE id = ?", [key, jobID]);
     } catch (error) {
-      log.warn(`run clock ${key} could not be recorded on its job: ${error instanceof Error ? error.message : String(error)}`);
+      log.warn(`run clock ${key} could not be recorded on its job, so the run is stopped: ${error instanceof Error ? error.message : String(error)}`);
+      return unavailableClockKey(jobID, slot);
     }
   }
+  startClock(db, key, nowMs);
   return key;
 }
+
+/** The key of a clock that was never started: it reads as unknown, which stops the run (`checkWallTime`). */
+const unavailableClockKey = (jobID: string, slot: string): string => `unavailable:${jobID}@${slot}`;
 
 /**
  * The run is now waiting on the owner. Returns the function that ends the wait. A wait that could not be

@@ -304,3 +304,52 @@ describe("INV-14 each scheduled run of a job has its own clock", () => {
     expect(s.all("SELECT clock_key FROM run_clocks").length, "the retry did not start a clock for its own slot").toBe(2);
   });
 });
+
+describe("INV-14 a job whose clock key cannot be read or written is stopped", () => {
+  /** One try of a one-shot job with the given trouble, and what came of it. */
+  async function tryJob(s: Scenario, trouble: () => () => void): Promise<{ id: string; requests: number; endedBy: string | null; state: string | undefined }> {
+    const id = enqueueJob(s.db, { kind: "turn", payload: { text: "check the warehouse", agentID: "ea", notify: false } }).id;
+    s.model.queue(say("All quiet."));
+    const undo = trouble();
+    try { await s.runner().tick(); } finally { undo(); }
+    return {
+      id,
+      requests: s.model.requests.length,
+      endedBy: s.get<{ ended_by: string | null }>("SELECT ended_by FROM turns ORDER BY started_at DESC, rowid DESC LIMIT 1")?.ended_by ?? null,
+      state: s.get<{ state: string }>("SELECT state FROM jobs WHERE id = ?", id)?.state,
+    };
+  }
+
+  scenarioTest("a key that cannot be read does not become a fresh clock", async () => {
+    const s = await scenarios.start();
+    const result = await tryJob(s, () => {
+      const query = s.db.query.bind(s.db);
+      s.db.query = ((sql: string) => {
+        if (/^SELECT run_clock_key FROM jobs/.test(sql)) throw new Error("database is locked");
+        return query(sql);
+      }) as typeof s.db.query;
+      return () => { s.db.query = query as typeof s.db.query; };
+    });
+    expect(result.requests, "the run took a step on a clock that was started fresh because its key could not be read").toBe(0);
+    expect(result.endedBy, "the run was not stopped for its clock").toBe("wall_time");
+    expect(result.state).toBe("failed");
+  });
+
+  scenarioTest("a key that cannot be written does not leave the run on a clock its retry cannot find", async () => {
+    const s = await scenarios.start();
+    const result = await tryJob(s, () => {
+      s.db.run("CREATE TRIGGER no_clock_key BEFORE UPDATE OF run_clock_key ON jobs BEGIN SELECT RAISE(ABORT, 'disk full'); END");
+      return () => s.db.run("DROP TRIGGER no_clock_key");
+    });
+    expect(result.requests, "the run took a step on a clock whose key was not recorded").toBe(0);
+    expect(result.endedBy, "the run was not stopped for its clock").toBe("wall_time");
+    expect(result.state).toBe("failed");
+  });
+
+  scenarioTest("with the key readable and writable the same job runs", async () => {
+    const s = await scenarios.start();
+    const result = await tryJob(s, () => () => undefined);
+    expect(result.requests, "the baseline job did not run").toBe(1);
+    expect(result.state).toBe("done");
+  });
+});
