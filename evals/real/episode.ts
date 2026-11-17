@@ -88,7 +88,7 @@ export async function runEpisode(o: EpisodeOptions): Promise<EpisodeResult> {
       upstreamBase = `http://127.0.0.1:${mock.port}`;
     }
     proxy = startProxy({ upstreamBase, guard: o.guard, ...(o.mode === "live" ? { upstreamKey: o.apiKey! } : {}) });
-    server = await startEpisodeServer({ home, scratch, baseUrl: proxy.url, model, ...(o.task.env ? { env: o.task.env } : {}), logDir: epDir });
+    server = await startEpisodeServer({ home, scratch, baseUrl: proxy.url, model, ...(o.task.env ? { env: o.task.env } : {}), logDir: epDir, fixturePort: o.web.port });
     ctx.port = server.port;
     ctx.client = await AgniClient.connect(server.port, server.token);
     // First run: the owner names the default bot, as round 5 did.

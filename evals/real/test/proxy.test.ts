@@ -10,12 +10,13 @@ afterEach(() => {
 
 /** An upstream that answers with fixed JSON and records what it received. */
 function fakeUpstream(answer: unknown) {
-  const seen: Array<{ authorization: string | null; body: any }> = [];
+  const seen: Array<{ authorization: string | null; body: any; path: string; method: string }> = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     async fetch(req) {
-      seen.push({ authorization: req.headers.get("authorization"), body: await req.json().catch(() => null) });
+      const u = new URL(req.url);
+      seen.push({ authorization: req.headers.get("authorization"), body: await req.json().catch(() => null), path: u.pathname + u.search, method: req.method });
       return Response.json(answer);
     },
   });
@@ -114,6 +115,31 @@ describe("eval proxy", () => {
     await (await post(p, chat({ stream: false }))).text();
     expect(p.calls[0]!.cachedReported).toBe(true);
     expect(p.calls[0]!.cachedTokens).toBe(600);
+  });
+
+  test("only POST /api/v1/chat/completions is forwarded; other paths and methods never reach the provider", async () => {
+    const up = fakeUpstream({ choices: [] });
+    const guard = new SpendGuard(1);
+    const p = proxy(up.base, guard);
+    const origin = p.url.replace(/\/api\/v1$/, "");
+    const json = { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(chat({ stream: false })) };
+    expect((await fetch(`${p.url}/models`)).status).toBe(404);
+    expect((await fetch(`${p.url}/key`)).status).toBe(404);
+    expect((await fetch(`${p.url}/embeddings`, json)).status).toBe(404);
+    expect((await fetch(`${origin}/v1/chat/completions`, json)).status).toBe(404);
+    expect((await fetch(`${origin}/api/v1/chat/completions/../../admin`, json)).status).toBe(404);
+    expect((await fetch(`${p.url}/chat/completions`, { method: "GET" })).status).toBe(404);
+    expect((await fetch(`${p.url}/chat/completions`, { method: "PUT", body: "{}" })).status).toBe(404);
+    expect(up.seen).toHaveLength(0);
+    expect(guard.spentUsd).toBe(0);
+    expect(p.calls.every((c) => c.status === 404 && (c.error ?? "").includes("is not forwarded"))).toBe(true);
+  });
+
+  test("the forwarded call goes to the chat path with no query string", async () => {
+    const up = fakeUpstream({ choices: [] });
+    const p = proxy(up.base, new SpendGuard(1));
+    await (await fetch(`${p.url}/chat/completions?redirect=http://evil.example`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(chat({ stream: false })) })).text();
+    expect(up.seen.map((s) => `${s.method} ${s.path}`)).toEqual(["POST /api/v1/chat/completions"]);
   });
 
   test("chat bodies ask the provider for usage; nothing else in the body changes", async () => {

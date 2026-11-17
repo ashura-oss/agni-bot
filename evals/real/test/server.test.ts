@@ -6,7 +6,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { assertThrowawayHome, startEpisodeServer } from "../server";
+import { assertThrowawayHome, PLACEHOLDER_KEY, serverEnv, startEpisodeServer } from "../server";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -34,6 +34,16 @@ describe("throwaway home guard", () => {
     expect(() => assertThrowawayHome(join(fresh(), "agni-eval-nested"))).toThrow("throwaway");
     expect(() => assertThrowawayHome(join(tmpdir(), "my-home"))).toThrow("throwaway");
     expect(() => assertThrowawayHome(join(homedir(), "agni-eval-x"))).toThrow("throwaway");
+  });
+
+  test("the server environment: placeholder key, the fixture port only when given, no AGNI_* from this process", () => {
+    const home = fresh();
+    const o = { home, scratch: join(home, "scratch"), baseUrl: "http://127.0.0.1:1/api/v1", model: "m", logDir: home };
+    const withPort = serverEnv({ ...o, fixturePort: 4321 }, 9999);
+    expect(withPort.AGNI_EVAL_FIXTURE_PORT).toBe("4321");
+    expect(withPort.OPENROUTER_API_KEY).toBe(PLACEHOLDER_KEY);
+    expect(withPort.AGNI_HOME).toBe(home);
+    expect(serverEnv(o, 9999).AGNI_EVAL_FIXTURE_PORT).toBeUndefined();
   });
 
   test("scratch outside the home is refused", () => {

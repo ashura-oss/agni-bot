@@ -9,12 +9,18 @@
  * - Record: one `CallRecord` per call (tokens, cached tokens when reported,
  *   the provider's cost, first-token time, finish reason, tool-call names).
  *
+ * Only `POST /api/v1/chat/completions` is forwarded; any other method or
+ * path is answered 404 here and never reaches the provider.
+ *
  * Imported from round 5's `proxy.ts`. The request body is passed on as the
  * server built it (model, temperature, limits) except for OpenRouter's
  * `usage: { include: true }`, which makes it report the call's cost.
  */
 import { actualCostUsd, priceFor, worstCaseUsd, type SpendGuard, type Ticket } from "./spend";
 import type { CallRecord } from "./types";
+
+/** The one path the proxy forwards (as POST): the chat call the server makes. */
+export const FORWARDED_PATH = "/api/v1/chat/completions";
 
 export interface ProxyOptions {
   /** `https://openrouter.ai`, or a mock provider's `http://127.0.0.1:<port>`. The server's path (`/api/v1/...`) is appended. */
@@ -70,8 +76,15 @@ export function startProxy(opts: ProxyOptions): ProxyHandle {
         reqChars: 0, status: 0, blocked: false, aborted: false, firstMs: -1, finish: "", contentLen: 0, reasoningLen: 0, toolNames: [],
         cachedReported: false, chargedUsd: 0,
       };
-      const hasBody = req.method !== "GET" && req.method !== "HEAD";
-      let bodyText = hasBody ? await req.text() : "";
+      if (req.method !== "POST" || url.pathname !== FORWARDED_PATH) {
+        rec.status = 404;
+        rec.endMs = Date.now();
+        rec.error = `eval proxy: ${req.method} ${url.pathname} is not forwarded`;
+        calls.push(rec);
+        return Response.json({ error: { message: rec.error } }, { status: 404 });
+      }
+      // Only POST gets here, so every forwarded call has a body.
+      let bodyText = await req.text();
       rec.reqChars = bodyText.length;
       const parsed = bodyText ? safeParse(bodyText) : null;
       const body: Record<string, unknown> | null = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
@@ -87,18 +100,15 @@ export function startProxy(opts: ProxyOptions): ProxyHandle {
       const price = priceFor(rec.model);
 
       // The cap is checked before anything is sent. A body that is not JSON is priced as a chat call of its size.
-      let ticket: Ticket | null = null;
-      if (hasBody) {
-        const worst = worstCaseUsd(body ?? { messages: bodyText }, price);
-        ticket = opts.guard.reserve(worst);
-        if (!ticket) {
-          rec.blocked = true;
-          rec.status = 402;
-          rec.endMs = Date.now();
-          rec.error = `eval spend cap: $${opts.guard.spentUsd.toFixed(4)} spent of $${opts.guard.capUsd.toFixed(4)}; this call could cost up to $${worst.toFixed(4)}`;
-          calls.push(rec);
-          return Response.json({ error: { message: rec.error, code: 402 } }, { status: 402 });
-        }
+      const worst = worstCaseUsd(body ?? { messages: bodyText }, price);
+      let ticket: Ticket | null = opts.guard.reserve(worst);
+      if (!ticket) {
+        rec.blocked = true;
+        rec.status = 402;
+        rec.endMs = Date.now();
+        rec.error = `eval spend cap: $${opts.guard.spentUsd.toFixed(4)} spent of $${opts.guard.capUsd.toFixed(4)}; this call could cost up to $${worst.toFixed(4)}`;
+        calls.push(rec);
+        return Response.json({ error: { message: rec.error, code: 402 } }, { status: 402 });
       }
       let recorded = false;
       const record = (): void => {
@@ -114,13 +124,13 @@ export function startProxy(opts: ProxyOptions): ProxyHandle {
 
       let upstream: Response;
       try {
-        upstream = await fetch(upstreamBase + url.pathname + url.search, {
-          method: req.method,
+        upstream = await fetch(upstreamBase + FORWARDED_PATH, {
+          method: "POST",
           headers: {
             "content-type": "application/json",
             authorization: opts.upstreamKey ? `Bearer ${opts.upstreamKey}` : (req.headers.get("authorization") ?? ""),
           },
-          body: hasBody ? bodyText : undefined,
+          body: bodyText,
           signal: req.signal,
         });
       } catch (error) {

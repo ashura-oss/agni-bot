@@ -18,6 +18,7 @@ import { basename, join, resolve, sep } from "node:path";
 import { cleanChildEnv } from "../../apps/server/test/test-child-env";
 import { trackTree, TREE_SPAWN_OPTIONS } from "../../apps/server/src/util/process-tree";
 import { sleep } from "./util";
+import { FIXTURE_PORT_ENV } from "./web-fixtures";
 
 export const SERVER_ENTRY = resolve(import.meta.dir, "../../apps/server/src/index.ts");
 export const PRELOAD = resolve(import.meta.dir, "preload.ts");
@@ -52,6 +53,8 @@ export interface StartServerOptions {
   env?: Record<string, string>;
   /** Folder for `server.out.log` and `server.err.log`. */
   logDir: string;
+  /** The fixture server's port; the preload sends fixtures.example there and nowhere else. Without it every fixture fetch is refused. */
+  fixturePort?: number;
 }
 
 export interface EpisodeServer {
@@ -97,6 +100,7 @@ export function serverEnv(o: StartServerOptions, port: number): Record<string, s
     OPENROUTER_BASE_URL: o.baseUrl,
     OPENROUTER_MODEL: o.model,
     AGNI_USER_FIRST_NAME: "Sam",
+    ...(o.fixturePort !== undefined ? { [FIXTURE_PORT_ENV]: String(o.fixturePort) } : {}),
     ...EVAL_SERVER_ENV,
     ...(o.env ?? {}),
   });
