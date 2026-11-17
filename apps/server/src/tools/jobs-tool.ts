@@ -181,11 +181,19 @@ function ownsJob(row: NonNullable<ReturnType<typeof getJob>>, callerAgentID: str
   return row.kind === "turn" && canonicalAgentID(String(parsePayload(row.payload).agentID ?? "ea")) === canonicalAgentID(callerAgentID);
 }
 
+function isRecordRow(row: NonNullable<ReturnType<typeof getJob>>): boolean {
+  const payload = parsePayload(row.payload);
+  return payload.wakeKey !== undefined || payload.delegationTaskID !== undefined;
+}
+
 export function cancelScheduledJob(db: Database, id: string, callerAgentID: string): { id: string; state: string; note: string } {
   const found = getJob(db, id) ?? getJobByPrefix(db, id);
   // Someone else's job looks the same as a missing one.
   const row = found && ownsJob(found, callerAgentID) ? found : undefined;
   if (!row) throw new Error(`no scheduled job with id "${id}"`);
+  // A wake is the count of its request's wakes, and a delegated task's job is the record of that task: deleting either
+  // would reset a limit or erase what ran. They are not reminders the bot set, so it may not remove them.
+  if (isRecordRow(row)) throw new Error(`job "${row.id}" is not one of your reminders: it is the record of a delegated task or a wake, and job_cancel cannot remove it`);
   if (row.state === "running") {
     setJobEnabled(db, row.id, false);
     return { id: row.id, state: "paused", note: "it is running right now; it will not run again" };
