@@ -191,7 +191,7 @@ function refusalOnCard(run: RunContext, tool: string, assessment: CallAssessment
   return connector ? refusalNamedOnCard(run, "tool") : null;
 }
 
-const SHELL_REFUSED_LINE = "You said no to running a command earlier in this task. I cannot tell which files it would have touched, so every command and every file change now asks you first.";
+const SHELL_REFUSED_LINE = "You said no to running a command earlier in this task. I cannot tell which files it would have touched, so every command, every file change and every connector call now asks you first.";
 
 /** The card's line for a call the server cannot read file names from, when the run holds a refusal; null when it holds none. */
 function refusalNamedOnCard(run: RunContext, what: "command" | "tool"): string | null {

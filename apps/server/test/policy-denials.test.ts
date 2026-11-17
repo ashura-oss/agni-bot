@@ -254,6 +254,8 @@ describe("a run that holds a refusal does not give a connector tool a free pass"
     expect(decision.action).toBe("ask");
     if (decision.action !== "ask") return;
     expect(decision.card.refusedRun).toContain("You said no to running a command");
+    // The card says what else now asks, and a connector is one of those things.
+    expect(decision.card.refusedRun).toMatch(/connector/i);
     expect(decision.card.canRemember).toBe(false);
   });
 
