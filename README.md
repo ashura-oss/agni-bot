@@ -379,8 +379,10 @@ Keychain, or a Linux Secret Service. `config.env` then holds only settings, and
 - **A vault whose keystore goes away stops the server.** Agni refuses to start
   and says why; it never falls back to plaintext keys.
 - `agni doctor` shows the active mode, the keystore backend (or why there is
-  none), and warns when file mode is active on a machine where the vault would
-  work. `agni vault status|list|migrate|export` manage the vault; `export --yes`
+  none), and whether the server can unlock the vault (it exits 1 when it cannot;
+  on a headless server it reads the service's passphrase file from the
+  installed systemd unit). It warns when file mode is active on a machine where
+  the vault would work, and when `vault.bin` exists but no mode is recorded. `agni vault status|list|migrate|export` manage the vault; `export --yes`
   goes back to plaintext.
 - A server you start by hand on a home that never went through `agni setup` (a
   dev checkout) has no recorded mode and runs in file mode; set

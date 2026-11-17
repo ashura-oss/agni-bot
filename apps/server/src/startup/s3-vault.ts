@@ -5,6 +5,7 @@ import { secretClassifier } from "../secrets/classify";
 import { applyVaultEnv, plaintextSecretNames } from "../secrets/env";
 import { isVaultUnlocked, lockVault, tryGetVault, unlockVault, vaultExists, VaultError } from "../secrets";
 import { secretsMode } from "../secrets/mode";
+import { recordedSecretsMode } from "../secrets/setup-mode";
 import type { StartupContext } from "./context";
 
 export interface VaultStartResult {
@@ -28,6 +29,11 @@ export async function unlockVaultAtStart(options: { env?: Record<string, string 
   const home = options.home ?? agniHome(env);
   const mode = secretsMode(env);
   if (mode === "file" && !vaultExists({ home })) return { mode, unlocked: false, applied: [] };
+  if (mode === "file" && !recordedSecretsMode(home, env)) {
+    log.warn(
+      "vault.bin exists but no secrets mode is recorded, so Agni is running in file mode. If you meant to use the vault, run `agni vault migrate` (it records the mode) or set AGNI_SECRETS_MODE=vault in config.env.",
+    );
+  }
   const vault = await unlockVault({ home, env, create: mode === "vault" });
   const applied = applyVaultEnv(env, vault);
   if (mode === "vault") {

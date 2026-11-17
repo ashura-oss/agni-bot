@@ -76,6 +76,16 @@ export function systemdCredentialLine(file: string): string {
 }
 
 /**
+ * The passphrase file an installed unit passes to the service (the inverse of `systemdCredentialLine`), or `undefined`
+ * when the unit carries none. `agni doctor` uses it: run from a shell, it has no `$CREDENTIALS_DIRECTORY`, but the
+ * unit says where the service's passphrase comes from.
+ */
+export function passphraseFileFromUnit(unit: string): string | undefined {
+  const match = new RegExp(`^LoadCredential=${PASSPHRASE_CREDENTIAL_NAME}:(.+?)\\s*$`, "m").exec(unit);
+  return match?.[1]?.replace(/%%/g, "%");
+}
+
+/**
  * The passphrase file the unit must pass on, or `undefined` when the vault does
  * not use the passphrase backend. The backend is the passphrase when
  * `AGNI_KEYSTORE=passphrase`, when an existing vault's header says so, or when
@@ -131,7 +141,9 @@ function run(cmd: string[], allowFail = false): { ok: boolean; out: string } {
 }
 
 const plistPath = (): string => join(homedir(), "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
-const unitPath = (): string => join(homedir(), ".config", "systemd", "user", SYSTEMD_UNIT);
+/** Where `service install` writes the systemd user unit. */
+export const systemdUnitPath = (): string => join(homedir(), ".config", "systemd", "user", SYSTEMD_UNIT);
+const unitPath = systemdUnitPath;
 
 export async function serviceCommand(sub: string | undefined, config: Config): Promise<void> {
   const mac = process.platform === "darwin";
