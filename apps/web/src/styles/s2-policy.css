@@ -385,6 +385,10 @@
   font-size: var(--text-meta);
 }
 
+.spending-hint {
+  margin: 0;
+}
+
 .spending-actions {
   display: flex;
   align-items: center;

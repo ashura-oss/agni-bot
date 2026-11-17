@@ -10,10 +10,15 @@ import { useAppModel, useAppSnapshot } from "../state/use-app-model";
 
 type Field = "dayUsd" | "perBotDayUsd" | "perJobUsd";
 
-const FIELDS: Array<{ id: Field; label: string }> = [
+const FIELDS: Array<{ id: Field; label: string; hint?: string }> = [
   { id: "dayUsd", label: "Daily limit, all bots" },
   { id: "perBotDayUsd", label: "Daily limit, each bot" },
-  { id: "perJobUsd", label: "Limit per task" },
+  // The daemon applies this cap only to a run with a root job (policy/budget.ts): chats never hit it.
+  {
+    id: "perJobUsd",
+    label: "Limit per background job",
+    hint: "Covers scheduled jobs and the work they hand to other bots. Chats count toward the daily limits only.",
+  },
 ];
 
 function show(value: number | null): string {
@@ -114,6 +119,9 @@ export function SpendingView() {
       >
         {FIELDS.map((field) => {
           const error = errors[field.id];
+          const hintID = field.hint ? `${ids}-${field.id}-hint` : null;
+          const errorID = error ? `${ids}-${field.id}-error` : null;
+          const describedBy = [hintID, errorID].filter((id): id is string => id !== null).join(" ");
           return (
             <div className="spending-field" key={field.id}>
               <label htmlFor={`${ids}-${field.id}`}>{field.label}</label>
@@ -127,7 +135,7 @@ export function SpendingView() {
                   autoComplete="off"
                   value={draft[field.id]}
                   aria-invalid={error ? true : undefined}
-                  aria-describedby={error ? `${ids}-${field.id}-error` : undefined}
+                  aria-describedby={describedBy || undefined}
                   onChange={(event) => {
                     setDraft({ ...draft, [field.id]: event.target.value });
                     setDirty(true);
@@ -135,6 +143,11 @@ export function SpendingView() {
                   }}
                 />
               </div>
+              {hintID ? (
+                <p id={hintID} className="settings-note spending-hint">
+                  {field.hint}
+                </p>
+              ) : null}
               {error ? (
                 <span id={`${ids}-${field.id}-error`} className="spending-error">
                   {error}

@@ -466,7 +466,39 @@ describe("Settings, Spending", () => {
     expect(settings.getByText("$0.30 of $1.00")).toBeInTheDocument();
     expect((screen.getByLabelText("Daily limit, all bots") as HTMLInputElement).value).toBe("2.00");
     expect((screen.getByLabelText("Daily limit, each bot") as HTMLInputElement).value).toBe("1.00");
-    expect((screen.getByLabelText("Limit per task") as HTMLInputElement).value).toBe("0.50");
+    expect((screen.getByLabelText("Limit per background job") as HTMLInputElement).value).toBe("0.50");
+  });
+
+  it("the per-job limit says it covers background jobs only, and the hint is read with the field", () => {
+    const { model } = rig();
+    open(model);
+    renderWith(model);
+    expect(screen.queryByLabelText("Limit per task")).not.toBeInTheDocument();
+    const field = screen.getByLabelText("Limit per background job");
+    const hint = screen.getByText(
+      "Covers scheduled jobs and the work they hand to other bots. Chats count toward the daily limits only.",
+    );
+    expect(hint.id).not.toBe("");
+    expect(field.getAttribute("aria-describedby")?.split(" ")).toContain(hint.id);
+    expect(field).toHaveAccessibleDescription(
+      "Covers scheduled jobs and the work they hand to other bots. Chats count toward the daily limits only.",
+    );
+    // The daily limits have no hint.
+    expect(screen.getByLabelText("Daily limit, all bots")).not.toHaveAttribute("aria-describedby");
+  });
+
+  it("an error on the per-job limit keeps the hint and adds the error to the description", async () => {
+    const { model } = rig();
+    open(model);
+    renderWith(model);
+    const field = screen.getByLabelText("Limit per background job");
+    fireEvent.change(field, { target: { value: "abc" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save limits" }));
+    await settle();
+    expect(field).toHaveAttribute("aria-invalid", "true");
+    expect(field).toHaveAccessibleDescription(
+      "Covers scheduled jobs and the work they hand to other bots. Chats count toward the daily limits only. Enter an amount, like 2.00.",
+    );
   });
 
   it("shows the run limits read-only, with how to change them", () => {
@@ -536,7 +568,7 @@ describe("Settings, Spending", () => {
     open(model);
     renderWith(model);
     fireEvent.change(screen.getByLabelText("Daily limit, all bots"), { target: { value: "$3" } });
-    fireEvent.change(screen.getByLabelText("Limit per task"), { target: { value: "0.75" } });
+    fireEvent.change(screen.getByLabelText("Limit per background job"), { target: { value: "0.75" } });
     fireEvent.click(screen.getByRole("button", { name: "Save limits" }));
     await settle();
     expect(sent).toContainEqual({ type: "spend.caps.set", dayUsd: 3, perBotDayUsd: 1, perJobUsd: 0.75 });
