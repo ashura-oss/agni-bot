@@ -11,10 +11,9 @@
  *
  * MCP tools (`mcp_` prefix) get one default: an untrusted reader and an
  * effector at tier 2, asked every time unless the owner trusted that tool
- * (`MCP_FREE_TOOLS`). That set stays the one place trust is read: a tool's own
- * `meta` (`mcpToolMeta` in `plugins/mcp.ts` describes the same tool) can only add
- * to what the table says, never take away from it (`policyFor`), so it cannot make
- * a tool free. See `test/s3-mcp-policy-merge.test.ts`.
+ * (`MCP_FREE_TOOLS`). That set is the one place trust is read: a tool's own
+ * `meta` can only add to what the table says, never take away from it
+ * (`policyFor`), so it cannot make a tool free. See `test/s3-mcp-policy-merge.test.ts`.
  */
 import { MCP_FREE_TOOLS } from "../plugins/mcp";
 import { entry } from "../agent/card-text";

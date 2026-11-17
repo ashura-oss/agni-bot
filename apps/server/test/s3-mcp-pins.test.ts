@@ -4,7 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { z } from "zod";
 import { openDatabase } from "../src/db";
-import { McpHub, MCP_FREE_TOOLS, mcpToolMeta } from "../src/plugins/mcp";
+import { McpHub, MCP_FREE_TOOLS } from "../src/plugins/mcp";
 import { hashToolDefinition, listPins } from "../src/plugins/mcp-pins";
 import { runMcpCommand } from "../src/cli/s3-mcp";
 
@@ -300,22 +300,5 @@ describe("agni mcp approve (S3-06)", () => {
     expect(text).toMatch(/a\s+.*pending/);
     expect(text).toMatch(/c\s+.*pending/);
     await hub.disconnect("p");
-  });
-});
-
-describe("MCP tool metadata", () => {
-  test("an MCP tool is an untrusted reader and an effector at tier 2; an owner-trusted free tool is tier 1", async () => {
-    const hub = new McpHub();
-    await hub.connect("granola", "https://unused.example", undefined, await fakeServer([
-      { name: "search", description: "find" },
-      { name: "create_page", description: "write" },
-    ]), ["search"]);
-    expect(mcpToolMeta("mcp_granola_create_page")).toMatchObject({ classes: ["untrusted-reader", "effector"], tier: 2 });
-    expect(mcpToolMeta("mcp_granola_search")).toMatchObject({ classes: ["untrusted-reader", "effector"], tier: 1 });
-    expect(mcpToolMeta("bash")).toBeUndefined();
-    // Any mcp_ name is an MCP tool: unknown or no longer connected, it is never free.
-    expect(mcpToolMeta("mcp_unknown_tool")).toMatchObject({ tier: 2 });
-    await hub.disconnect("granola");
-    expect(mcpToolMeta("mcp_granola_search")).toMatchObject({ tier: 2 });
   });
 });

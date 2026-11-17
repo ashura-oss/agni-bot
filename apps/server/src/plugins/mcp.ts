@@ -23,7 +23,6 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { Database } from "bun:sqlite";
 import type { ToolDefinition } from "../tools/registry";
-import type { ToolMeta } from "../policy/tool-meta";
 import { log } from "../log";
 import { redact } from "../util/redact";
 import { redactJSONText } from "../util/redact-json";
@@ -45,20 +44,6 @@ const HINTS = new Map<string, { plugin: string; readOnly: boolean }>();
 export function mcpApprovalNote(toolName: string): string | undefined {
   const hint = HINTS.get(toolName);
   return hint?.readOnly ? `${hint.plugin} claims this tool is read-only (not verified; the server's word only)` : undefined;
-}
-
-/**
- * Policy metadata for an MCP tool, for a tool definition to carry as its own `meta`. The
- * policy table has its own row for every `mcp_` tool (`policy/metadata.ts`) and a tool's meta
- * can only add to it, so this describes the tool and decides nothing: the table, with
- * `MCP_FREE_TOOLS`, is the authority. Every `mcp_` tool is an untrusted reader (its results are text a
- * third party wrote) and an effector (we cannot tell what it changes). Tier 2 asks
- * every time; tier 1 only for a tool the owner trusted and the catalog lets run free.
- * Any other name is not an MCP tool: undefined.
- */
-export function mcpToolMeta(name: string): ToolMeta | undefined {
-  if (!name.startsWith("mcp_")) return undefined;
-  return { classes: ["untrusted-reader", "effector"], tier: MCP_FREE_TOOLS.has(name) ? 1 : 2 };
 }
 
 const MAX_RESULT_CHARS = 20_000;
