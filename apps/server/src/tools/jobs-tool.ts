@@ -22,7 +22,7 @@ import { isPeerPrincipal, isTainted, packTaint, unknownTaint } from "../policy/c
 import type { RunContext, TaintSource } from "../policy/types";
 import { denialScope } from "../policy/denials";
 import { audit } from "../policy/audit-sink";
-import { describeRecurring, isRecurringSchedule, standingRuleOrigin } from "../policy/standing-rules";
+import { describeRecurring, isRecurringSchedule, standingRuleOrigin, standingScheduleKind } from "../policy/standing-rules";
 import { CLOSURE_WORDING_REFUSAL, closureWording } from "../agent/closure";
 import { canSelfSchedule, maxSelfScheduledJobs } from "../agent/guardrails";
 
@@ -402,8 +402,9 @@ export function createJobTools(db: Database): ToolDefinition<unknown, unknown>[]
         } else {
           const refusal = schedulingRefusal(ctx);
           if (refusal) return { error: refusal };
-          // A fire of a job a bot made may not schedule the next one unasked: a chain of one-shot jobs is a repeating job (policy/standing-rules.ts).
-          if (ctx.ownerApproved !== true && ctx.run?.principal?.kind === "job") return refuseStandingJob(ctx, input, "This task was started by a scheduled job, not by you.");
+          // A fire of a job a bot made, and a wake in the chain it started, may not schedule the next one unasked: a chain of one-shot jobs is
+          // a repeating job (policy/standing-rules.ts). The same question the engine asks, so the card and this check cannot disagree.
+          if (ctx.ownerApproved !== true && standingScheduleKind(input, ctx.run) === "next_job") return refuseStandingJob(ctx, input, standingRuleOrigin(ctx.run) ?? "This task was not started by you.");
         }
         return scheduleJob(db, {
           text: String(input.text ?? ""),

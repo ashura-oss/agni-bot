@@ -11,6 +11,7 @@
  */
 import { entry } from "../agent/card-text";
 import { describeSchedule, parseDay, parseWallClock } from "../jobs/schedule";
+import { getJob } from "../stores/jobs";
 import { isTainted } from "./context";
 import type { ToolResource } from "./tool-meta";
 import type { RunContext, StandingKind } from "./types";
@@ -43,7 +44,27 @@ export const STANDING_KINDS: readonly StandingKind[] = Object.keys(KINDS) as Sta
  */
 export function standingScheduleKind(args: Record<string, unknown>, run: RunContext | undefined): StandingKind | null {
   if (isRecurringSchedule(args)) return "repeating_job";
-  return run?.principal?.kind === "job" && !isTainted(run) ? "next_job" : null;
+  if (!run || isTainted(run)) return null;
+  const kind = run.principal?.kind;
+  if (kind === "job") return "next_job";
+  // A wake is the next step of the chain a bot-made job started (the job delegated, the task finished, the wake reports back): it
+  // may not schedule the next link unasked. A wake of the owner's own chat turn, or of a job the owner made, starts no chain.
+  return kind === "wake" && run.rootJob != null && rootJobMadeByBot(run) ? "next_job" : null;
+}
+
+/**
+ * Was the job at the root of this run's request made by a bot (a `job_schedule` call)? A root job that cannot be read, or that is
+ * not there, is not shown to be the owner's: it counts as a bot's (fail closed).
+ */
+function rootJobMadeByBot(run: RunContext): boolean {
+  try {
+    const row = getJob(run.services.db, String(run.rootJob));
+    if (!row) return true;
+    const payload: unknown = JSON.parse(row.payload ?? "{}");
+    return typeof payload !== "object" || payload === null || (payload as { scheduledBy?: unknown }).scheduledBy === "bot";
+  } catch {
+    return true;
+  }
 }
 
 /**

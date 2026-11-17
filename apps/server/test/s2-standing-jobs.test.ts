@@ -239,7 +239,7 @@ describe("an origin that cannot be read is asked about", () => {
     const tainted = rig.another();
     addTaint(tainted, { kind: "web", label: "evil.example/page", tool: "web_fetch", at: "2026-11-16T10:00:00Z" });
     expect(decide(tainted, { tool: "job_schedule", args: recur, callID: "call_1" }).action).toBe("ask");
-    // A one-shot job from a clean run that no bot-made job is behind is not a standing rule; a tainted run may not make one.
+    // A one-shot job from a clean run that no bot-made job is behind is not a standing rule (a wake in a bot-made job's chain is: test/s2-standing-chain.test.ts); a tainted run may not make one.
     const once = { text: "do it", at: new Date(Date.now() + 3_600_000).toISOString() };
     expect(decide(rig.run, { tool: "job_schedule", args: once, callID: "call_1" }).action).toBe("run");
     expect(decide(rig.another({ principal: { kind: "wake" } }), { tool: "job_schedule", args: once, callID: "call_1" }).action).toBe("run");
