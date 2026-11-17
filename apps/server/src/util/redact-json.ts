@@ -10,7 +10,7 @@
  */
 import { REDACTED, redact } from "./redact";
 
-/** How many layers of JSON inside a string are opened. Deeper text is masked as it is; the registry covers two levels of escaping. */
+/** How many layers of JSON inside a string are opened. Deeper text that parses as JSON is withheld; deeper text that does not is masked as plain text. */
 const MAX_JSON_DEPTH = 6;
 
 /** True when `text` could be a JSON object, array or string: the only JSON worth opening, and a cheap test. */
@@ -36,13 +36,16 @@ const looksLikeJSON = (text: string): boolean => {
  */
 export function redactJSONText(text: string, depth = 0): string {
   if (typeof text !== "string" || text.length === 0) return text;
-  if (depth >= MAX_JSON_DEPTH || !looksLikeJSON(text)) return redact(text);
+  if (!looksLikeJSON(text)) return redact(text);
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
     return redact(text);
   }
+  // Too deep to open, but it parses as JSON: masking it as plain text would miss a secret written with a JSON
+  // escape, so it is withheld whole. Only text that is not JSON is masked as text at this depth.
+  if (depth >= MAX_JSON_DEPTH) return REDACTED;
   try {
     const swapped = swapLossyNumbers(text);
     if (swapped.literals.length > 0) {
