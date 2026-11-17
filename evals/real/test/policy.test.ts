@@ -20,6 +20,7 @@ describe("owner policy", () => {
   test("a chain is allowed only when every part is", () => {
     expect(ask(policy, `run shell: cp q3/summary.txt ${outbox}/q3-summary.txt && rm q3/draft-v1.txt`)).toBe("reject");
     expect(ask(policy, `run shell: cp q3/summary.txt ${outbox}/q3-summary.txt`)).toBe("once");
+    expect(ask(policy, "run shell: ls && touch x.txt")).toBe("reject");
   });
 
   test("the command comes from the heading, not the card body", () => {
