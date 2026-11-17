@@ -156,7 +156,7 @@ export function registerTurnJob(runner: JobRunner, deps: TurnJobDeps): void {
           job.id,
         ]);
         const delay = Math.min(WAKE_RETRY_MS * 2 ** (deferrals - 1), WAKE_RETRY_MAX_MS);
-        return { result: "deferred: the parent thread is busy", nextRunAt: new Date(Date.now() + delay).toISOString() };
+        return { result: "deferred: the parent thread is busy", nextRunAt: new Date(Date.now() + delay).toISOString(), deferred: true };
       }
       // S1-21: a result the parent already read through delegate_wait or
       // task_status was reported in that turn. Announcing it again would make

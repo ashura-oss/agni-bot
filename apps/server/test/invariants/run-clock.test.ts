@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { toolUsage } from "../../src/jobs/harness-review";
 import { enqueueJob, wakeJob } from "../../src/stores/jobs";
 import { scenarioTest, useScenarios, gate, say, type Scenario, type ModelStep } from "../scenarios/harness";
-import { call, later, minutes, playTurn, scripted } from "./support";
+import { call, later, minutes, playTurn, scripted, setPaused } from "./support";
 
 const scenarios = useScenarios();
 afterEach(() => setSystemTime());
@@ -351,5 +351,55 @@ describe("INV-14 a job whose clock key cannot be read or written is stopped", ()
     const result = await tryJob(s, () => () => undefined);
     expect(result.requests, "the baseline job did not run").toBe(1);
     expect(result.state).toBe("done");
+  });
+});
+
+describe("INV-14 only a move to a new slot clears a job's clock key", () => {
+  const clockKeyOf = (s: Scenario, id: string): string | null | undefined => s.get<{ run_clock_key: string | null }>("SELECT run_clock_key FROM jobs WHERE id = ?", id)?.run_clock_key;
+
+  scenarioTest("a wake put off because its parent thread is busy is the same run: it keeps its clock", async () => {
+    const s = await scenarios.start({ turnTimeoutMs: 150 });
+    const a = await s.connect({ label: "A" });
+    s.model.queue(say("Hello."));
+    const threadID = (await playTurn(s, a, "hello")).threadID;
+
+    // The wake's first try runs and fails (its model is too slow): its clock started and is kept for the retry.
+    s.model.queue({ text: "Looking.", hold: gate() });
+    const id = enqueueJob(s.db, {
+      kind: "turn",
+      payload: {
+        agentID: "ea", threadID, channelID: "main", notify: false, inputRole: "system", wakeKey: `wake:${threadID}:trn_root`, depth: 1, rootTurnID: "trn_root", rootJob: null,
+        results: [{ taskID: "tsk_a", agentID: "researcher", summary: "Counted 42.", redacted: false }],
+      },
+    }).id;
+    await s.runner().tick();
+    expect(s.get<{ state: string }>("SELECT state FROM jobs WHERE id = ?", id)?.state, "the first try did not fail into a retry; the script is out of step").toBe("queued");
+    const key = clockKeyOf(s, id);
+    expect(key, "the first try left no clock key; the script is out of step").toBeTruthy();
+
+    // The owner starts a turn in the parent's thread, and the retry comes due while it runs.
+    const held = gate();
+    s.model.queue({ text: "Thinking.", hold: held });
+    const requests = s.model.requests.length;
+    const { threadID: busy } = await a.startTurn("one more thing");
+    expect(busy, "the owner's turn is not in the wake's parent thread; the script is out of step").toBe(threadID);
+    await s.model.requested(requests + 1);
+    later(minutes(15));
+    await s.runner().tick();
+    held.open();
+
+    expect(s.get<{ result: string | null }>("SELECT result FROM jobs WHERE id = ?", id)?.result ?? "", "the wake was not put off; the script is out of step").toMatch(/deferred/);
+    expect(clockKeyOf(s, id), "putting the wake off for a busy thread gave its retry a fresh clock").toBe(key);
+  });
+
+  scenarioTest("a recurring job skipped for a pause moves to its next slot, and the next run starts its own clock", async () => {
+    const s = await scenarios.start();
+    const a = await s.connect({ label: "A" });
+    const id = enqueueJob(s.db, { kind: "turn", payload: { text: "check the warehouse", agentID: "ea", notify: false, everyMs: minutes(60) } }).id;
+    s.db.run("UPDATE jobs SET run_clock_key = ? WHERE id = ?", [`${id}@earlier-slot`, id]);
+    await setPaused(a, true);
+    await s.runner().tick();
+    expect(s.get<{ state: string; result: string | null }>("SELECT state, result FROM jobs WHERE id = ?", id), "the paused job was not skipped to its next slot; the script is out of step").toMatchObject({ state: "queued", result: "skipped (paused)" });
+    expect(clockKeyOf(s, id), "the next slot would have run on the skipped run's clock").toBeNull();
   });
 });

@@ -25,6 +25,11 @@ export interface JobOutcome {
   result?: string;
   /** Set to run this job again at a later time (recurring jobs). */
   nextRunAt?: string;
+  /**
+   * With `nextRunAt`: the same run, put off (a wake whose parent thread is busy), not a move to the next slot. The run
+   * keeps the clock it started (`jobs.run_clock_key`); only a move to a new slot starts the next run on a clock of its own.
+   */
+  deferred?: boolean;
 }
 
 export type JobHandler = (job: JobRow, ctx: JobContext) => Promise<JobOutcome | void>;
@@ -267,8 +272,9 @@ export class JobRunner {
       const outcome = (await handler(job, { emit: this.emit, agentID })) ?? {};
       if (outcome.nextRunAt) {
         requeueJob(this.db, job.id, outcome.nextRunAt);
-        // A clean recurring run starts a fresh retry budget for its next failure.
-        this.db.run("UPDATE jobs SET attempts = 0, run_clock_key = NULL WHERE id = ?", [job.id]);
+        // A clean recurring run starts a fresh retry budget for its next failure, and its next slot a clock of its own. A run that is
+        // only put off is the same run: it keeps its clock.
+        this.db.run(outcome.deferred ? "UPDATE jobs SET attempts = 0 WHERE id = ?" : "UPDATE jobs SET attempts = 0, run_clock_key = NULL WHERE id = ?", [job.id]);
         if (outcome.result !== undefined) {
           this.db.run("UPDATE jobs SET result = ? WHERE id = ?", [`${outcome.result} (recurring)`, job.id]);
         }
