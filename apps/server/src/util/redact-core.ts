@@ -111,7 +111,7 @@ const escaping = (pattern: RegExp): Escaper => (text, upper) => text.replace(pat
  *       .NET's default encoder: those, and `+` (backslash-u-002b), `'` (backslash-u-0027), a backtick (backslash-u-0060)
  *         and `"` (backslash-u-0022, in place of the backslash-quote JSON writes), but not `=`;
  *       Gson: those, and `=` (backslash-u-003d) and `'`, but not `+` or `"`;
- *   - non-ASCII: everything above ASCII as backslash-u-XXXX per UTF-16 unit (Python's ensure_ascii, PHP, .NET).
+ *   - non-ASCII: DEL (0x7f) and everything above it as backslash-u-XXXX per UTF-16 unit (Python's ensure_ascii, PHP, .NET).
  * Hex digits come in lower and upper case, and one serializer applies several kinds at once.
  */
 const SERIALIZER_ESCAPES: readonly { present: RegExp; ways: readonly Escaper[] }[] = [

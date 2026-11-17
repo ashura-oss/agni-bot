@@ -4,7 +4,7 @@
  * `JSON.stringify` leaves `/`, `<`, `>`, `&` and non-ASCII text alone, so the registry matched only that. PHP writes
  * backslash-slash; Go writes `<`, `>` and `&` as backslash-u-003c and its kin (lower or upper hex); .NET adds `+`, `'`,
  * `"` and a backtick, and Gson adds `=` and `'` (each leaves the others alone); Python, PHP and .NET write non-ASCII text
- * as backslash-u-XXXX. A secret that holds such a character, in a frame, a log line or a document that
+ * (and Python, DEL) as backslash-u-XXXX. A secret that holds such a character, in a frame, a log line or a document that
  * came through one of them, was left unmasked. One level of escaping only: the forms are for text one serializer wrote.
  */
 import { afterEach, describe, expect, test } from "bun:test";
@@ -110,6 +110,16 @@ describe("a serializer's escaped forms of a secret are masked", () => {
     for (const upper of [false, true]) {
       const written = serializedWith(secret, "<>&", upper);
       expect(redact(`got ${written} back`)).toBe(`got ${REDACTED} back`);
+    }
+  });
+
+  test("DEL (0x7f), which Python's ensure_ascii escapes with the non-ASCII text, as lower and upper hex", () => {
+    const secret = `del${String.fromCharCode(0x7f)}char-Zk93-secret`;
+    registerSecret(secret);
+    for (const upper of [false, true]) {
+      const written = serializedWith(secret, String.fromCharCode(0x7f), upper);
+      expect(written).toContain(hex(0x7f, upper));
+      expect(redact(`{"t":"${written}"}`)).toBe(`{"t":"${REDACTED}"}`);
     }
   });
 
