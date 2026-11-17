@@ -75,6 +75,8 @@ const TYPING_IDLE_MS = 1000;
 const OFFLINE_REFUSAL = "Not connected. Your draft was kept; send it again once you are reconnected.";
 /** The same refusal for "Hand off to AI", which has no draft to keep. */
 const HANDOFF_OFFLINE_REFUSAL = "Not connected. The task was not handed off; try again once you are reconnected.";
+/** Coming back to the page reads the pause state again at most this often (focus and visibility often fire together). */
+const PAGE_RETURN_READ_MS = 1_000;
 
 function notice(kind: NoticeKind, title: string, body: string, threadID: string | null = null): NoticeRow {
   return {
@@ -248,7 +250,9 @@ export class AppModel {
     if (typeof window !== "undefined") {
       window.addEventListener("popstate", this.onLocationChange);
       window.addEventListener("pagehide", this.flushSettings);
+      window.addEventListener("focus", this.onPageReturn);
     }
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", this.onPageReturn);
     const stored = SecretStore.load();
     if (stored) {
       this.token = stored.token;
@@ -429,6 +433,25 @@ export class AppModel {
   }
 
   private onLocationChange = (): void => { this.applyLocationRoute(true); };
+
+  /** When the last page-return read went out (ms since the epoch). */
+  private lastPageReturnRead = 0;
+
+  /**
+   * The owner came back to this page: the window took focus, or the tab is shown again. Read the
+   * pause state and today's spend again, because `agni pause` in a terminal changes them in the
+   * database and the daemon does not yet tell an open page (Sprint 5 item 0c). At most once per
+   * `PAGE_RETURN_READ_MS`, never while hidden, and only while connected (offline it stays quiet;
+   * the read on reconnect covers that).
+   */
+  private onPageReturn = (): void => {
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+    if (!this.connection || !isReady(this.connectionState)) return;
+    const now = Date.now();
+    if (now - this.lastPageReturnRead < PAGE_RETURN_READ_MS) return;
+    this.lastPageReturnRead = now;
+    this.refreshPolicy();
+  };
 
   /** Read the address bar: back, forward, a reload, or a link opened in this tab. */
   private applyLocationRoute(refresh: boolean): void {

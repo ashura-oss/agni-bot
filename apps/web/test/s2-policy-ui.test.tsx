@@ -627,3 +627,89 @@ describe("the stop marker after a reload (item 5)", () => {
     expect(screen.getByText("No reply — out of budget.")).toBeInTheDocument();
   });
 });
+
+describe("a pause made outside this page (agni pause in a terminal)", () => {
+  /** Reads of the pause state: `policy.pause` with no `paused`. */
+  function pauseReads(sent: ClientFrame[]): number {
+    return sent.filter((item) => item.type === "policy.pause" && !("paused" in item) && !("agentID" in item)).length;
+  }
+
+  /** jsdom's page is always visible; this makes it say what the test needs, and undoes it. */
+  function visibility(state: "visible" | "hidden"): () => void {
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => state });
+    return () => void delete (document as unknown as { visibilityState?: unknown }).visibilityState;
+  }
+
+  it("reads the pause state and today's spend again when the window takes focus", async () => {
+    const { sent } = rig();
+    act(() => void window.dispatchEvent(new Event("focus")));
+    await settle();
+    expect(pauseReads(sent)).toBe(1);
+    expect(sent).toContainEqual({ type: "spend.status" });
+  });
+
+  it("reads again when the tab is shown, and not when it is hidden", async () => {
+    const { sent } = rig();
+    const undoHidden = visibility("hidden");
+    try {
+      act(() => void document.dispatchEvent(new Event("visibilitychange")));
+      await settle();
+      expect(pauseReads(sent)).toBe(0);
+    } finally {
+      undoHidden();
+    }
+    const undoVisible = visibility("visible");
+    try {
+      act(() => void document.dispatchEvent(new Event("visibilitychange")));
+      await settle();
+      expect(pauseReads(sent)).toBe(1);
+    } finally {
+      undoVisible();
+    }
+  });
+
+  it("focus and the tab showing together read once; a second later it reads again", async () => {
+    const { sent } = rig();
+    const now = vi.spyOn(Date, "now").mockReturnValue(5_000_000);
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await settle();
+    expect(pauseReads(sent)).toBe(1);
+    now.mockReturnValue(5_000_999);
+    act(() => void window.dispatchEvent(new Event("focus")));
+    await settle();
+    expect(pauseReads(sent)).toBe(1);
+    now.mockReturnValue(5_001_000);
+    act(() => void window.dispatchEvent(new Event("focus")));
+    await settle();
+    expect(pauseReads(sent)).toBe(2);
+  });
+
+  it("while not connected it sends nothing and says nothing", async () => {
+    const { model, sent } = rig();
+    (model as unknown as { connectionState: unknown }).connectionState = { kind: "connecting" };
+    renderWith(model);
+    act(() => void window.dispatchEvent(new Event("focus")));
+    await settle();
+    expect(sent).toHaveLength(0);
+    expect(screen.queryByText("Not sent")).not.toBeInTheDocument();
+  });
+
+  it("a pause from the terminal shows in an open page once the owner comes back to it", async () => {
+    const { model, sent } = rig();
+    frame(model, { type: "agents.update", seq: 1, agents: roster, mentions: roster });
+    frame(model, pauseOk(false));
+    renderWith(model);
+    expect(screen.getByRole("button", { name: "Pause all bots" })).toBeInTheDocument();
+    // `agni pause` ran in a terminal; the owner clicks back into the browser.
+    act(() => void window.dispatchEvent(new Event("focus")));
+    await settle();
+    expect(pauseReads(sent)).toBe(1);
+    // The daemon answers the read with the state the terminal set.
+    frame(model, pauseOk(true));
+    expect(screen.getByText("All bots are paused. Nothing new will start.")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Resume all bots" }).length).toBeGreaterThanOrEqual(2);
+  });
+});
