@@ -5,6 +5,7 @@
  * next wake is not run as a model turn; its results are posted to the parent's conversation as a plain notice.
  */
 import { afterEach, describe, expect, setSystemTime } from "bun:test";
+import { resetS2Startup } from "../src/startup/s2";
 import { enqueueJob } from "../src/stores/jobs";
 import { createThread } from "../src/stores/threads";
 import { getRunCaps, setRunCaps } from "../src/stores/policy-settings";
@@ -12,7 +13,8 @@ import { scenarioTest, gate, say, useScenarios, type Scenario } from "./scenario
 import { later, minutes } from "./invariants/support";
 
 const scenarios = useScenarios();
-afterEach(() => setSystemTime());
+// A scenario boots the startup hooks, which wire the router gate and the budget to its database: unwire them with it.
+afterEach(() => { setSystemTime(); resetS2Startup(); });
 
 /** A wake job for the request `root`: what a finished delegated task queues for the bot that delegated it. */
 function queueWake(s: Scenario, threadID: string, root: string, n: number): string {
