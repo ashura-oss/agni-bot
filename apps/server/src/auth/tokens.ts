@@ -4,7 +4,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { newID, nowISO } from "../util/ids";
-import { registerSecret } from "../util/redact";
+import { registerSecretFor } from "../util/redact";
 
 export interface Device {
   id: string;
@@ -35,8 +35,6 @@ export async function hashToken(token: string): Promise<string> {
 
 export async function mintToken(db: Database, name: string): Promise<{ device: Device; token: string }> {
   const token = `${TOKEN_PREFIX}${Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url")}`;
-  // Registered before it is stored or handed out: from here on no log line or frame can carry it.
-  registerSecret(token);
   const device: Device = {
     id: newID("dev"),
     name,
@@ -44,6 +42,10 @@ export async function mintToken(db: Database, name: string): Promise<{ device: D
     last_seen_at: null,
     revoked_at: null,
   };
+  // Registered before it is stored or handed out: from here on no log line or frame can carry it. Held under its
+  // device, and kept until the server restarts even if the device is revoked or idles out: a dead token costs nothing
+  // to keep masked (a restart loads only the hashes, so the registry does not grow across runs).
+  registerSecretFor(`device-token:${device.id}`, token);
   db.run("INSERT INTO devices (id, name, token_hash, created_at) VALUES (?, ?, ?, ?)", [
     device.id,
     device.name,
@@ -66,7 +68,7 @@ export async function verifyToken(db: Database, token: string): Promise<Device |
   const lastActive = row.last_seen_at === null ? created : Date.parse(row.last_seen_at);
   if (!Number.isFinite(created) || !Number.isFinite(lastActive)) return null;
   if (Date.now() - lastActive > SESSION_IDLE_MS) return null;
-  registerSecret(token);
+  registerSecretFor(`device-token:${row.id}`, token); // after a restart this is how a paired token is masked again
   touchDevice(db, row.id);
   return row;
 }

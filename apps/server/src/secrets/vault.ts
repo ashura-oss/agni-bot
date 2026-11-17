@@ -32,11 +32,19 @@ function checkValue(value: string): void {
   }
 }
 
+/** Numbers each vault object, so two of them on one file (a daemon and a CLI command in one test, say) hold apart. */
+let vaultInstances = 0;
+
 export class FileVault implements Vault {
   private entries = new Map<string, StoredEntry>();
-  /** Registers every value of an entry under the holder `vault:<file>:<name>`, so only this entry's own hold is let go of. */
+  private readonly instance = ++vaultInstances;
+  /**
+   * Registers every value of an entry under the holder `vault:<instance>:<file>:<name>`, so only this entry's own hold
+   * is let go of, and one vault object letting go of a value does not unmask what another object on the same file
+   * still holds.
+   */
   private holderOf(name: string): string {
-    return `vault:${this.path}:${name}`;
+    return `vault:${this.instance}:${this.path}:${name}`;
   }
   /** An empty value is not a secret and would mask every empty string. */
   private register(name: string, value: string): void {

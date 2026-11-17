@@ -7,23 +7,20 @@
  * `providers.json`.
  * Throwaway home, in-memory keystore.
  */
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import * as redactModule from "../src/util/redact";
+import { redact, unregisterSecret } from "../src/util/redact";
 
-// Record what is registered for redaction, and still call the real function (the test double
-// forwards, so a test that runs after this one in the same process is not affected).
-const registered: string[] = [];
-const realRegister = redactModule.registerSecret;
-mock.module("../src/util/redact", () => ({
-  ...redactModule,
-  registerSecret: (value: string) => {
-    registered.push(value);
-    realRegister(value);
-  },
-}));
+/**
+ * Masked, and held by a named holder: letting go of the anonymous `registerSecret` hold (what an unnamed caller
+ * leaves) does not unmask it. A caller that registers anonymously cannot be told apart from a test cleaning up.
+ */
+const heldByName = (value: string): boolean => {
+  unregisterSecret(value);
+  return redact(`before ${value} after`) === "before [redacted] after";
+};
 
 import { HealthTracker } from "../src/models/health";
 import { addProviderCredential, setProviderModel } from "../src/models/provider-settings";
@@ -41,7 +38,6 @@ beforeEach(() => {
   for (const name of NAMES) saved[name] = process.env[name];
   for (const name of NAMES) delete process.env[name];
   lockVault();
-  registered.length = 0;
   home = mkdtempSync(join(tmpdir(), "agni-provkeys-"));
   process.env.AGNI_HOME = home;
 });
@@ -75,7 +71,16 @@ describe("file mode", () => {
     expect(result.ok).toBe(true);
     expect(readFileSync(join(home, "config.env"), "utf8")).toContain(KEY);
     expect(process.env.GROQ_API_KEY).toBe(KEY);
-    expect(registered).toContain(KEY);
+    expect(heldByName(KEY)).toBe(true);
+  });
+});
+
+describe("file mode, custom endpoint", () => {
+  test("the key and a credentialed address are masked by a named holder", async () => {
+    const full = "https://user:canary-file-url-password@gateway.example.com/v1";
+    const result = await addProviderCredential(router(), "custom", CUSTOM_KEY, "my-model", { baseUrl: full, label: "Gateway" });
+    expect(result.ok).toBe(true);
+    expect(heldByName(CUSTOM_KEY)).toBe(true);
   });
 });
 
@@ -90,7 +95,7 @@ describe("vault mode", () => {
     expect(process.env.GROQ_API_KEY).toBe(KEY);
     expect(existsSync(join(home, "config.env"))).toBe(false);
     expect(filesContaining(KEY)).toEqual([]);
-    expect(registered).toContain(KEY);
+    expect(heldByName(KEY)).toBe(true);
   });
 
   test("a second key is a second vault entry; config.env is never created", async () => {
@@ -132,7 +137,7 @@ describe("custom endpoints in vault mode", () => {
     expect(vault.get("env/AGNI_CUSTOM_KEY_1")).toBe(CUSTOM_KEY);
     expect(loadCustomProviders(process.env)).toMatchObject([{ id: "custom", baseUrl: "https://gateway.example.com/v1", envKey: "AGNI_CUSTOM_KEY_1" }]);
     expect(filesContaining(CUSTOM_KEY)).toEqual([]);
-    expect(registered).toContain(CUSTOM_KEY);
+    expect(heldByName(CUSTOM_KEY)).toBe(true);
   });
 
   test("an address that carries a credential is kept whole in the vault and cleaned in the file", async () => {

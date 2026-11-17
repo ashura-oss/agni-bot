@@ -15,7 +15,7 @@
  * cycle (`secrets/classify.ts` imports `models/providers.ts`).
  */
 import { statSync, unlinkSync, writeFileSync } from "node:fs";
-import { registerSecret } from "../util/redact";
+import { registerSecretFor } from "../util/redact";
 import { secretsMode } from "../secrets/mode";
 import { tryGetVault } from "../secrets/state";
 import { VaultError, type Vault } from "../secrets/types";
@@ -93,7 +93,11 @@ export function eraseFile(path: string): boolean {
   return true;
 }
 
-/** Make `redact()` mask these values from now on. Empty values are not secrets. */
-export function rememberSecrets(...values: Array<string | undefined | null>): void {
-  for (const value of values) if (value) registerSecret(value);
+/**
+ * Make `redact()` mask these values from now on, held by `holder` (a name that says whose they are: a hold is only
+ * ever let go of by its own holder, so one owner cannot unmask what another still holds). The hold lasts until the
+ * process ends or the holder lets go; the callers here are one-shot commands. Empty values are not secrets.
+ */
+export function rememberSecrets(holder: string, ...values: Array<string | undefined | null>): void {
+  for (const value of values) if (value) registerSecretFor(holder, value);
 }

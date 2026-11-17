@@ -49,7 +49,7 @@ const chatgptPath = (home: string): string => resolve(dirname(databasePath(home)
 function store(vault: Vault, name: string, value: string): void {
   vault.set(name, value);
   if (vault.get(name) !== value) throw new VaultError("WRITE_FAILED", `${name} could not be read back from the vault, so its old store was not changed.`);
-  rememberSecrets(value);
+  rememberSecrets(`migrate:${name}`, value);
 }
 
 function readText(path: string): string | undefined {
@@ -264,7 +264,7 @@ export function migratePluginTokens(vault: Vault, context: VaultMigrationContext
     if (!blob) continue;
     const name = entryName.connectionTokens(row.id);
     store(vault, name, blob.value);
-    rememberSecrets(...blob.secrets);
+    rememberSecrets(`migrate:${name}:tokens`, ...blob.secrets); // the vault holds the whole blob; these are the tokens inside it
     pending.push({ id: row.id, tokens: row.tokens, name });
   }
   if (pending.length === 0) {
@@ -443,9 +443,9 @@ export function migrateChatgptAccounts(vault: Vault, context: VaultMigrationCont
     throw new Error("The ChatGPT accounts file is not in the expected format, so it was left as it is. Move it aside and sign in to ChatGPT again.");
   }
   store(vault, entryName.chatgptAccounts, text);
-  for (const account of parsed.accounts) {
+  for (const [index, account] of parsed.accounts.entries()) {
     const tokens = isObject(account) && isObject(account.tokens) ? account.tokens : {};
-    rememberSecrets(tokens.accessToken as string | undefined, tokens.refreshToken as string | undefined, tokens.idToken as string | undefined);
+    rememberSecrets(`migrate:${entryName.chatgptAccounts}:${index}`, tokens.accessToken as string | undefined, tokens.refreshToken as string | undefined, tokens.idToken as string | undefined);
   }
   eraseFile(path);
   return 1;

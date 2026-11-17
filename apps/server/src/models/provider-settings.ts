@@ -4,7 +4,8 @@ import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { providerConfigPath } from "./providers";
 import { homePath } from "../home";
-import { entryName, rememberSecrets, vaultForWrites } from "../credentials/vault-mode";
+import { entryName, vaultForWrites } from "../credentials/vault-mode";
+import { rememberSecretsAt, stageSecretsAt } from "../util/redact";
 import { baseUrlCarriesCredential, sanitizeBaseUrl } from "../credentials/provider-urls";
 import { VaultError } from "../secrets/types";
 import { PrivateFileError, writePrivateFile } from "../util/private-file";
@@ -52,7 +53,9 @@ export async function addProviderCredential(
   if (!apiKey || apiKey.length > 4096 || /[\u0000\r\n]/.test(apiKey)) {
     return { ok: false, code: "invalid_key", message: "Enter a valid API key." };
   }
-  rememberSecrets(apiKey);
+  // Masked before anything else happens to it. Held by a slot named for the provider: a key saved for it later
+  // replaces this one, and the replaced key stays masked (it may still work) until the slot ages it out.
+  stageSecretsAt(`provider-key:${providerID.slice(0, 64)}`, apiKey);
   if (providerID === "custom") {
     return addCustomProvider(router, apiKey, model, custom);
   }
@@ -68,6 +71,7 @@ export async function addProviderCredential(
     await saveProviderKey(target.envKey, apiKey);
     // Bun.env is the environment map used by the rest of this process.
     Bun.env[target.envKey] = apiKey;
+    rememberSecretsAt(`provider-key:${providerID.slice(0, 64)}`, apiKey); // saved: this is the provider's live key now
     if (model?.trim()) await saveProviderModel(providerID, validateModel(model));
     router.replaceProviders(loadProviders(Bun.env));
     return { ok: true, providers: router.status() };
@@ -122,17 +126,21 @@ async function addCustomProvider(
     model: model?.trim() ? validateModel(model) : "",
     envKey,
   };
+  let urlSlotHeld = false;
   try {
     await saveProviderKey(envKey, apiKey);
     // An address with a credential in it is a secret too: the vault keeps it whole, the file a clean copy.
     const vault = vaultForWrites();
     if (vault && baseUrlCarriesCredential(baseUrl)) {
-      rememberSecrets(baseUrl);
+      stageSecretsAt(`provider-url:${id}`, baseUrl);
+      urlSlotHeld = true;
       vault.set(entryName.providerUrl(id), baseUrl);
       entry.baseUrl = sanitizeBaseUrl(baseUrl);
     }
     Bun.env[envKey] = apiKey;
     await saveCustomProvider(entry);
+    rememberSecretsAt(`provider-key:custom:${id}`, apiKey);
+    if (urlSlotHeld) rememberSecretsAt(`provider-url:${id}`, baseUrl);
     router.replaceProviders(loadProviders(Bun.env));
     return { ok: true, providers: router.status() };
   } catch (error) {
