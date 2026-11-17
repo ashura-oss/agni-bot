@@ -113,10 +113,12 @@ describe("a wake of a narrowed run's delegation", () => {
 });
 
 describe("a wake told of several tasks", () => {
-  async function wakeOf(database: Database, results: unknown[]): Promise<Set<string>> {
+  // A wake the server writes today says whether the run it reports to was cut (`narrowed`); `top` replaces what it says, `{}` leaves it out as a wake
+  // queued before the field existed does.
+  async function wakeOf(database: Database, results: unknown[], top: Record<string, unknown> = { narrowed: false }): Promise<Set<string>> {
     const parent = createThread(database, "ea");
     const seen = watchTools();
-    enqueueJob(database, { kind: "turn", payload: { agentID: "ea", threadID: parent.id, notify: false, inputRole: "system", wakeKey: `wake:${parent.id}`, depth: 1, ownerOnly: true, results } });
+    enqueueJob(database, { kind: "turn", payload: { agentID: "ea", threadID: parent.id, notify: false, inputRole: "system", wakeKey: `wake:${parent.id}`, depth: 1, ownerOnly: true, ...top, results } });
     const runner = new JobRunner(database, () => undefined, { maxPerTick: 5 });
     registerTurnJob(runner, { db: database, settings, emit: () => undefined, router: routerOf([() => callResponse("load_tools", { names: ["job_list"] }), () => textResponse("Noted.")]) });
     await runner.tick();
@@ -151,7 +153,21 @@ describe("a wake told of several tasks", () => {
 
   test("keep the persona's tools when no task was narrowed", async () => {
     db = openDatabase(":memory:");
-    const tools = await wakeOf(db, [item({ narrowed: false }), item({})]);
+    const tools = await wakeOf(db, [item({ narrowed: false }), item({ narrowed: false })]);
     expect(tools.has("bash")).toBe(true);
+  });
+
+  test("queued before the field existed have only the inert tools: they came from a delegation, and nothing says it was not cut", async () => {
+    db = openDatabase(":memory:");
+    // The wake itself says nothing, and neither does any task it reports.
+    const tools = await wakeOf(db, [item({}), item({})], {});
+    expect(non(tools, "bash", "mail_send", "recall_fact", "memory_search")).toEqual([]);
+    expect(tools.has("say")).toBe(true);
+  });
+
+  test("with one task that says nothing are cut by it, even when the others were not", async () => {
+    db = openDatabase(":memory:");
+    const tools = await wakeOf(db, [item({ narrowed: false }), item({})]);
+    expect(non(tools, "bash", "mail_send", "recall_fact")).toEqual([]);
   });
 });

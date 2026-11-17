@@ -8,6 +8,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createRunContext, isOwnerMade } from "../src/policy/context";
 import { packCarried, readCarried, storedCarried, type Carried } from "../src/policy/carry";
+import { briefCarried } from "../src/stores/tasks";
 import type { RunContext, TaintSource } from "../src/policy/types";
 import { policyRig, type PolicyRig } from "./policy-fixture";
 
@@ -98,6 +99,21 @@ describe("readCarried fails closed", () => {
     expect(readCarried({ rootTurnID: "trn_1" }).rootJob).toBeNull();
     const none = readCarried({ rootTurnID: "", denialRoot: 4, clockKey: null, chainID: [] });
     expect([none.rootTurnID, none.denialRoot, none.clockKey, none.chainID]).toEqual([undefined, undefined, undefined, undefined]);
+  });
+
+  test("a brief or a wake that does not say whether its run was cut reads as cut, to tools nobody can read", () => {
+    // They come from a delegation, which always cuts the delegate; a record from before `narrowed` existed must not read as free.
+    expect(briefCarried(JSON.stringify({ taint: [WEB], ownerOnly: true }))).toMatchObject({ narrowed: true, capabilities: null });
+    expect(briefCarried(JSON.stringify({ capabilities: ["say"] }))).toMatchObject({ narrowed: true, capabilities: ["say"] });
+    expect(briefCarried(null)).toMatchObject({ narrowed: true, capabilities: null });
+    expect(briefCarried("not json")).toMatchObject({ narrowed: true, capabilities: null });
+    expect(briefCarried(JSON.stringify({ narrowed: false }))).toMatchObject({ narrowed: false });
+    expect(briefCarried(JSON.stringify({ narrowed: true, capabilities: ["say", "ask"] }))).toMatchObject({ narrowed: true, capabilities: ["say", "ask"] });
+    expect(readCarried({ wakeKey: "wake:t", results: [{ ownerOnly: true }] })).toMatchObject({ narrowed: true, capabilities: null });
+    expect(readCarried({ wakeKey: "wake:t", narrowed: false, results: [{ narrowed: false }] }).narrowed).toBe(false);
+    expect(readCarried({ wakeKey: "wake:t", narrowed: false, results: [{ narrowed: false }, { ownerOnly: true }] })).toMatchObject({ narrowed: true, capabilities: null });
+    // A job that is neither keeps its own reading: no tool list is not narrowed (s2-legacy-jobs.test.ts).
+    expect(readCarried({ scheduledBy: "bot" }).narrowed).toBe(false);
   });
 
   test("a wake is the owner's only if every task it is told about is", () => {

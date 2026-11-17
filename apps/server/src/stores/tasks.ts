@@ -391,8 +391,8 @@ function briefIntent(brief: string | null): PeerIntent {
  * brief that is missing, cannot be read, or says nothing reads as the worst (`readCarried`).
  */
 export function briefCarried(raw: string | null): Carried {
-  if (!raw) return readCarried(undefined);
-  try { return readCarried(JSON.parse(raw)); } catch { return readCarried(undefined); }
+  if (!raw) return readCarried(undefined, { brief: true });
+  try { return readCarried(JSON.parse(raw), { brief: true }); } catch { return readCarried(undefined, { brief: true }); }
 }
 
 function parseAttachmentIDs(value: string): string[] {

@@ -273,19 +273,22 @@ const isNonEmpty = (value: unknown): value is string => typeof value === "string
  * taint unknown, the tools the inert ones only, the chain a bot's. A wake's own fields are folded with each result it is told about:
  * the owner's only if every part is, cut if any part was, and then to the tools every cut part could call.
  */
-export function readCarried(payload: unknown): Carried {
+export function readCarried(payload: unknown, options: { brief?: boolean } = {}): Carried {
   const p: Record<string, unknown> = typeof payload === "object" && payload !== null && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
   const results = Array.isArray(p.results) ? p.results : [];
   const isWake = isNonEmpty(p.wakeKey) && results.length > 0;
   let ownerOnly = p.ownerOnly === true;
-  // `narrowed` is written by the server; a payload from before it existed said it by having a list of tools.
-  let narrowed = typeof p.narrowed === "boolean" ? p.narrowed : p.capabilities !== undefined;
+  // A brief and a wake come from a delegation, and a delegated run is always cut by whoever started it. One of them that does not say
+  // whether it was (it was written before `narrowed` existed) reads as cut, to a set nobody can read: the inert tools, not the bot's own.
+  const fromDelegation = isWake || options.brief === true;
+  // `narrowed` is written by the server; any other payload from before it existed said it by having a list of tools.
+  let narrowed = typeof p.narrowed === "boolean" ? p.narrowed : fromDelegation || p.capabilities !== undefined;
   let capabilities = readCapabilities(p.capabilities) ?? null;
   for (const item of isWake ? results : []) {
     const part: Record<string, unknown> = typeof item === "object" && item !== null ? item as Record<string, unknown> : {};
     ownerOnly = ownerOnly && part.ownerOnly === true;
     // Cut by any task that was, to the tools every cut task allowed; one whose set cannot be read leaves the inert tools only.
-    if (typeof part.narrowed === "boolean" ? part.narrowed : part.capabilities !== undefined) {
+    if (typeof part.narrowed === "boolean" ? part.narrowed : true) {
       const allowed = readCapabilities(part.capabilities) ?? null;
       capabilities = !narrowed ? allowed : capabilities === null || allowed === null ? null : capabilities.filter((name) => allowed.includes(name));
       narrowed = true;
