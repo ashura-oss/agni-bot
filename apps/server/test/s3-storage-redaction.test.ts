@@ -8,6 +8,7 @@ import { PluginService } from "../src/plugins/service";
 import { getConnectionFor } from "../src/plugins/store";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { Config } from "../src/config";
 import { McpHub } from "../src/plugins/mcp";
 import { listPins } from "../src/plugins/mcp-pins";
@@ -110,5 +111,49 @@ describe("MCP tool pins", () => {
     expect(pin!.hash).toBe(baseline.hash);
     // And what is stored still parses, so `agni mcp approve` can show a diff.
     expect(() => JSON.parse(pin!.definition)).not.toThrow();
+  });
+});
+
+describe("MCP tool results", () => {
+  /** A client-side transport that fails every tool call the way a dropped connection does, naming what it was sending. */
+  function failingCalls(inner: Transport, message: string): Transport {
+    return {
+      start: () => inner.start(),
+      close: () => inner.close(),
+      send: async (payload, options) => {
+        if ((payload as { method?: string }).method === "tools/call") throw new Error(message);
+        return inner.send(payload, options);
+      },
+      get onmessage() { return inner.onmessage; }, set onmessage(handler) { inner.onmessage = handler; },
+      get onclose() { return inner.onclose; }, set onclose(handler) { inner.onclose = handler; },
+      get onerror() { return inner.onerror; }, set onerror(handler) { inner.onerror = handler; },
+    } as Transport;
+  }
+
+  async function callSearch(reply: (() => string) | null, transportError?: string) {
+    const server = new McpServer({ name: "echo", version: "1" });
+    server.registerTool("search", { description: "find", inputSchema: {} }, async () => ({ content: [{ type: "text" as const, text: reply!() }], isError: true }));
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverSide);
+    const db = openDatabase(":memory:");
+    dbs.push(db);
+    const hub = new McpHub();
+    await hub.connect("notion", "https://mcp.example.com/mcp", undefined, transportError ? failingCalls(clientSide, transportError) : clientSide, [], { pins: db });
+    const tool = hub.tools()[0]!;
+    return JSON.stringify(await tool.handler({}, undefined as never));
+  }
+
+  test("a tool answer that echoes the bearer reaches the loop masked, so the loop stores no plaintext", async () => {
+    registerSecret(BEARER);
+    const out = await callSearch(() => `401 from upstream. Request headers: {"authorization":"Bearer ${BEARER}"}`);
+    expect(out).toContain("401 from upstream");
+    expect(out).not.toContain(BEARER);
+  });
+
+  test("a transport error that names the bearer reaches the loop masked", async () => {
+    registerSecret(BEARER);
+    const out = await callSearch(() => "unused", `connection reset while sending Authorization: Bearer ${BEARER}`);
+    expect(out).toContain("connection reset");
+    expect(out).not.toContain(BEARER);
   });
 });
