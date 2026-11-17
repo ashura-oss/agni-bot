@@ -52,7 +52,8 @@ function forms(written: string): string[] {
 }
 
 /**
- * The passwords an address may hold, in the forms they may turn up in text (as written, percent-decoded, and as a URL parser
+ * The secrets an address may hold in its userinfo: the password, and the user name too when there is no password (empty or left
+ * out), in the forms they may turn up in text (as written, percent-decoded, and as a URL parser
  * writes them). Where the `user:password` ends is read two ways when an `@` follows the authority (the last `@` of the authority, and
  * the last `@` of the whole address), because a password may hold a `/`, `?` or `#`, and the two readings are then not the same.
  * Masking an extra form costs nothing; missing one leaks.
@@ -65,12 +66,15 @@ function passwordsIn(value: string): string[] {
   const addFrom = (userinfo: string): void => {
     const colon = userinfo.indexOf(":");
     if (colon >= 0) for (const form of forms(userinfo.slice(colon + 1))) found.add(form);
+    // No password (`TOKEN@host`, `TOKEN:@host`): some proxy services take the API key as the user name, so it is the secret.
+    if (colon < 0 || colon === userinfo.length - 1) for (const form of forms(colon < 0 ? userinfo : userinfo.slice(0, colon))) found.add(form);
   };
   const inAuthority = authority.lastIndexOf("@");
   if (inAuthority >= 0) addFrom(authority.slice(0, inAuthority));
   addFrom(text.slice(0, text.lastIndexOf("@")));
   const parsed = parseAddress(value, scheme);
   if (parsed?.password) for (const form of forms(parsed.password)) found.add(form);
+  else if (parsed?.username) for (const form of forms(parsed.username)) found.add(form);
   return [...found].filter((password) => password !== "");
 }
 
