@@ -4,9 +4,10 @@
  * round 5 and `project-log/ISSUES.md`.
  */
 import type { TaskDef } from "../types";
+import { ROUND4_TASKS } from "./round4";
 import { ROUND5_TASKS } from "./round5";
 
-export const TASKS: TaskDef[] = [...ROUND5_TASKS];
+export const TASKS: TaskDef[] = [...ROUND5_TASKS, ...ROUND4_TASKS];
 
 export function findTasks(ids: string[] | "all"): TaskDef[] {
   if (ids === "all") return TASKS;
