@@ -143,12 +143,28 @@ export interface ScheduledFrom {
    * the owner approved from such a run does not shed its restrictions. Absent for a run that read nothing outside.
    */
   taint?: TaintSource[];
+  /**
+   * The tools the scheduling run could call, when its tools were narrowed by whoever started it (a bot's brief, a delegated task,
+   * a job that was itself narrowed): every fire of the job is cut down to them, as a delegated child's run is (`policy/narrowing.ts`).
+   * `null` says the run's set could not be read, which fires with the inert tools only. Absent for a run that was not narrowed.
+   */
+  capabilities?: string[] | null;
 }
 
 /** What a job made by this run must start with, or undefined when the run read nothing outside. A record that cannot be read is one unknown source. */
 function carriedTaint(run: RunContext | undefined): TaintSource[] | undefined {
   if (!run || !isTainted(run)) return undefined;
   return Array.isArray(run.taint?.sources) && run.taint.sources.length > 0 ? packTaint(run) : [unknownTaint("a run with no record of what it had read")];
+}
+
+/** What a job made by this run must be cut down to, or undefined when the run's tools were not narrowed. A set that cannot be read is null. */
+function carriedCapabilities(run: RunContext | undefined): string[] | null | undefined {
+  if (!run?.narrowed) return undefined;
+  try {
+    return [...run.effectiveCapabilities];
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -164,7 +180,7 @@ function inheritedRoot(ctx: ToolContext): RequestRoot | undefined {
 }
 
 export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: string, from: ScheduledFrom = {}): JobScheduleResult {
-  const { root, denialRoot, createdByRequest, created, taint } = from;
+  const { root, denialRoot, createdByRequest, created, taint, capabilities } = from;
   const requested = args.agentID?.trim();
   if (requested && canonicalAgentID(requested) !== canonicalAgentID(callerAgentID)) {
     throw new Error(SELF_ONLY);
@@ -190,6 +206,8 @@ export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: 
     ...(denialRoot ? { denialRoot } : {}),
     // What the scheduling run read stays with the job: each fire starts as tainted as that run was.
     ...(taint && taint.length > 0 ? { taint } : {}),
+    // What the scheduling run could call stays with the job: each fire is cut down to it, as a delegated child's run is.
+    ...(capabilities !== undefined ? { capabilities } : {}),
   };
 
   let runAt: string;
@@ -418,6 +436,7 @@ export function createJobTools(db: Database): ToolDefinition<unknown, unknown>[]
           ...(ctx.run ? { denialRoot: denialScope(ctx.run), ...(recurring ? { createdByRequest: denialScope(ctx.run) } : {}) } : {}),
           root: inheritedRoot(ctx),
           taint: carriedTaint(ctx.run),
+          capabilities: carriedCapabilities(ctx.run),
           created: { turnID: ctx.turnID, jobID: ctx.run?.jobID ?? null, approval: ctx.ownerApproved === true ? "owner_card" : "own_turn" },
         });
       },

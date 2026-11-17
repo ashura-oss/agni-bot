@@ -30,6 +30,8 @@ export interface RunContextInput {
   principal: { kind: PrincipalKind; from?: string };
   /** Every tool this run may call. */
   capabilities: Iterable<string>;
+  /** Those tools were cut down by whoever started the run (`RunContext.narrowed`). */
+  narrowed?: boolean;
   /** The registry's view of the tools of this turn. */
   registry: { get(name: string): { meta?: ToolMeta } | undefined; validateArgs(name: string, args: Record<string, unknown>, bot?: string): string | null };
   isUnloaded?: (tool: string) => boolean;
@@ -65,6 +67,7 @@ export function createRunContext(input: RunContextInput): RunContext {
     clockKey: input.clockKey ?? input.rootTurnID ?? input.turnID,
     principal: { ...input.principal },
     effectiveCapabilities: new Set(input.capabilities),
+    ...(input.narrowed ? { narrowed: true } : {}),
     taint: { sources },
     budget: { extraAllowanceUSD: 0 },
     ownerText: input.ownerText ?? [],

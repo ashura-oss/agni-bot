@@ -107,6 +107,11 @@ export interface RunContext {
   principal: Principal;
   /** The tools this run may call at all (the persona's allowlist narrowed by the chain). Deferred tools are in it. */
   effectiveCapabilities: ReadonlySet<string>;
+  /**
+   * `effectiveCapabilities` was cut down by whoever started this run (a bot's brief or a delegated task, or a job a narrowed run
+   * scheduled), not just by the persona. A job this run schedules carries the set so its fires are cut down to it too.
+   */
+  narrowed?: boolean;
   /** Outsider text this run has read. Empty means untainted. Grows during the run; never shrinks. */
   taint: { sources: TaintSource[] };
   budget: RunBudget;
@@ -209,6 +214,11 @@ export interface ApprovalCard {
    * from its first step. The card says so.
    */
   standingTainted?: boolean;
+  /**
+   * The standing rule is asked of a run whose tools were narrowed: what it starts will run with those tools (the tools of the run
+   * that asked), not with everything the bot may call. The card says so.
+   */
+  standingNarrowed?: boolean;
 }
 
 /** Why a call was refused, as a stable code for tests, the audit trail and the model's error. */

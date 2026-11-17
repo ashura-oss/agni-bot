@@ -683,6 +683,8 @@ async function runTurn(
         ...(jobSlot ? { jobSlot } : {}),
         jobID: jobID ?? null,
         capabilities: readCapabilities(payload.capabilities),
+        // A job a narrowed run scheduled stores that run's tools (even a value that cannot be read): every fire is narrowed to them.
+        ...(payload.capabilities !== undefined ? { narrowed: true } : {}),
       },
       facts: payload.facts,
       ...(channelID ? { channelID } : {}),

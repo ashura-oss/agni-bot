@@ -170,6 +170,11 @@ export interface TaskTurnRun {
     jobSlot?: string;
     jobID?: string | null;
     capabilities?: string[];
+    /**
+     * The job this run belongs to carries a tool list of the run that scheduled it (`jobs-tool.ts`), so every fire is narrowed to it
+     * like a delegated child: a list that cannot be read leaves only the inert tools. Set from the job's payload, never a tool argument.
+     */
+    narrowed?: boolean;
   };
   /** Restrict task tools to this list, intersected with the persona's tools. */
   toolAllowlist?: string[];
@@ -455,8 +460,10 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   // S2-06: a bot another bot started (a handoff, a delegated task) may call only what its own persona, the grant and
   // its parent could call. The parent's set rides in `run.policy.capabilities`; none readable means the inert tools only.
   const startedByBot = Boolean(run.peer || run.delegation);
+  // A job a narrowed run scheduled fires with the tools of the run that asked: it is cut down by the same rule, each time it fires.
+  const narrowedRun = startedByBot || run.policy?.narrowed === true;
   const parentCapabilities = run.policy?.capabilities;
-  const narrowedTools = startedByBot ? [...narrowCapabilities(ownTools, parentCapabilities)] : ownTools;
+  const narrowedTools = narrowedRun ? [...narrowCapabilities(ownTools, parentCapabilities)] : ownTools;
   const effectiveTools = run.toolAllowlist
     ? narrowedTools
     // A delegated task's bots share its scratchpad: the task's own notes, not the parent's reach. Kept only when the parent could be read.
@@ -567,6 +574,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
     clockKey,
     principal,
     capabilities: callableTools,
+    ...(narrowedRun ? { narrowed: true } : {}),
     registry,
     isUnloaded: (name) => deferred.includes(name) && !loadedTools.has(name),
     // The owner's own words, for "send only where the owner said": what the owner typed in this thread (kept in its

@@ -159,6 +159,7 @@ function judge(run: RunContext, input: PolicyInput, record: boolean): Decision {
     ...(refusedRun ? { refusedRun } : {}),
     ...(standing !== null && standingKind !== null ? { standingRule: standing, standingKind } : {}),
     ...(standing !== null && tainted ? { standingTainted: true } : {}),
+    ...(standing !== null && run.narrowed ? { standingNarrowed: true } : {}),
   };
   // A card that cannot show the owner everything that will run is not raised (fail closed): the call is refused, and the model told why.
   const unshowable = cardProblem(tool, args, { bot: run.services.botName?.trim() || "A bot", card, db: run.services.db, agentID: run.bot });

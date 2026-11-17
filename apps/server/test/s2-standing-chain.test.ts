@@ -6,7 +6,7 @@
  *     the tools of the run that asked, never with its persona's full set; unreadable means the inert tools only.
  *  3. A routine's creation or resumption from a run a routine's own tool would refuse is refused before any card.
  */
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
 import { resetS2Startup } from "../src/startup/s2";
 import { createJobTools, scheduleJob } from "../src/tools/jobs-tool";
 import { createRoutineTools } from "../src/tools/routines-tool";
@@ -16,12 +16,12 @@ import { standingRuleOrigin, standingScheduleKind } from "../src/policy/standing
 import { enqueueJob } from "../src/stores/jobs";
 import type { RunContext } from "../src/policy/types";
 import { scenarioTest, useScenarios, say } from "./scenarios/harness";
-import { allCallsTo, answerCards, call, playTurn, resultJson, scripted, useWeb } from "./invariants/support";
+import { allCallsTo, answerCards, call, later, minutes, playTurn, resultJson, scripted, useWeb } from "./invariants/support";
 import { policyRig, type PolicyRig } from "./policy-fixture";
 
 const scenarios = useScenarios();
 useWeb();
-afterEach(() => { resetS2Startup(); });
+afterEach(() => { setSystemTime(); resetS2Startup(); });
 
 const future = (): string => new Date(Date.now() + 3_600_000).toISOString();
 const past = (): string => new Date(Date.now() - 1_000).toISOString();
@@ -101,5 +101,105 @@ describe("a wake in a chain a bot-made job started may not schedule the next one
     expect(owner.cards[0]!.buttons).toEqual(["once", "reject"]);
     expect(String(resultJson(next).error ?? "(no error)")).toMatch(/denied|not approved/i);
     expect(s.all("SELECT id FROM jobs WHERE kind = 'turn' AND payload LIKE '%Count them again.%'")).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2. a job approved from a narrowed run fires narrowed
+// ---------------------------------------------------------------------------
+
+describe("a job approved from a run whose tools were narrowed fires with the tools of the run that asked", () => {
+  let rig: PolicyRig | undefined;
+  afterEach(() => { rig?.close(); rig = undefined; });
+  const recur = { text: "do it", everyMinutes: 60 };
+  const stored = (r: PolicyRig): { capabilities?: unknown } => JSON.parse(r.db.query<{ payload: string }, []>("SELECT payload FROM jobs WHERE kind = 'turn' ORDER BY rowid DESC").get()!.payload) as { capabilities?: unknown };
+
+  test("a narrowed run's job stores the run's effective tools; a run that was not narrowed stores none", async () => {
+    rig = policyRig();
+    const narrowed = rig.another({ principal: { kind: "peer", from: "boss" }, capabilities: ["job_schedule", "say", "ask"], narrowed: true });
+    const made = await jobHandler(rig)(recur, ctxOf(narrowed, { ownerApproved: true }));
+    expect(made.id, "the owner-approved job was not made").toBeDefined();
+    expect([...(stored(rig).capabilities as string[])].sort(), "the job does not carry the tools of the run that asked").toEqual(["ask", "job_schedule", "say"]);
+
+    // A one-shot job a narrowed run schedules (a narrowed job's own next link) carries them too.
+    const link = await jobHandler(rig)({ text: "next", at: future() }, ctxOf(rig.another({ principal: { kind: "job" }, capabilities: ["job_schedule", "say"], narrowed: true }), { ownerApproved: true }));
+    expect(link.id).toBeDefined();
+    expect([...(stored(rig).capabilities as string[])].sort()).toEqual(["job_schedule", "say"]);
+
+    const owners = await jobHandler(rig)(recur, ctxOf(rig.run));
+    expect(owners.id).toBeDefined();
+    expect(stored(rig).capabilities, "a run that was not narrowed stored a cut-down tool list").toBeUndefined();
+  });
+
+  test("a narrowed run whose tool set cannot be read stores a list that reads as unknown, not no list", async () => {
+    rig = policyRig();
+    const broken = { ...rig.another({ principal: { kind: "peer", from: "boss" }, narrowed: true }), effectiveCapabilities: undefined } as unknown as RunContext;
+    const made = await jobHandler(rig)(recur, ctxOf(broken, { ownerApproved: true }));
+    expect(made.id).toBeDefined();
+    expect(Object.hasOwn(stored(rig), "capabilities"), "the job carries no mark that its tools were narrowed").toBe(true);
+    expect(stored(rig).capabilities).toBeNull();
+  });
+
+  test("the card says the job runs with the tools of the run that asked", () => {
+    rig = policyRig();
+    const narrowed = rig.another({ principal: { kind: "peer", from: "boss" }, narrowed: true });
+    const asked = decide(narrowed, { tool: "job_schedule", args: recur, callID: "call_1" });
+    expect(asked.action).toBe("ask");
+    if (asked.action === "ask") expect(asked.card.standingNarrowed).toBe(true);
+    const plain = decide(rig.another({ principal: { kind: "job" }, jobID: "job_bot" }), { tool: "job_schedule", args: recur, callID: "call_1" });
+    expect(plain.action).toBe("ask");
+    if (plain.action === "ask") expect(plain.card.standingNarrowed).toBeUndefined();
+  });
+
+  scenarioTest("through the real loop: approved from a bot's brief, the job stores the tools and every fire is cut down to them", async () => {
+    const s = await scenarios.start();
+    const a = await s.connect({ label: "A" });
+    // A brief from another bot that says it read nothing outside: its child holds only what the brief's sender could call.
+    enqueueJob(s.db, {
+      kind: "turn",
+      payload: {
+        text: "Keep an eye on the pallets.", agentID: "ea", notify: false, inputRole: "system",
+        peer: { from: "Someone", intent: "request" }, taint: [],
+        capabilities: ["job_schedule", "say", "ask"],
+      },
+    });
+    const owner = answerCards(a, "once");
+    s.model.queue(call("job_schedule", { text: "Count the pallets.", everyMinutes: 5 }, "call_recur"), say("Scheduled."));
+    const made = (): Array<{ payload: string }> => s.all<{ payload: string }>("SELECT payload FROM jobs WHERE payload LIKE '%Count the pallets.%' AND payload LIKE '%everyMs%'");
+    for (let tick = 0; tick < 6 && made().length === 0; tick += 1) await s.runner().tick();
+    const [row] = made();
+    expect(row, "the approved job was not made; the script is out of step").toBeDefined();
+    expect(owner.cards.length, "the brief's run was not asked").toBe(1);
+    expect(owner.cards[0]!.preview, "the card does not say the job runs with the tools of the run that asked").toMatch(/tools of the run that asked/i);
+    const payload = JSON.parse(row!.payload) as { capabilities?: string[] };
+    // The run's own set: what its sender could call, plus the inert tools every bot has (saying and asking, drafting).
+    expect(payload.capabilities, "the job does not carry the tools of the run that asked").toEqual(expect.arrayContaining(["ask", "job_schedule", "say"]));
+    expect(payload.capabilities ?? [], "the job carries a tool the run that asked could not call").not.toContain("bash");
+
+    // The fire: the persona has many more tools, but only these are callable.
+    later(minutes(6));
+    s.model.queue(...scripted(true, [call("job_list", {}, "call_fire_list"), call("bash", { command: "ls" }, "call_fire_bash"), say("Counted.")]));
+    for (let tick = 0; tick < 6 && !allCallsTo(s, "bash", a).length; tick += 1) await s.runner().tick();
+    owner.stop();
+    for (const [tool, id] of [["job_list", "call_fire_list"], ["bash", "call_fire_bash"]] as const) {
+      const record = allCallsTo(s, tool, a).find((entry) => entry.callID === id);
+      expect(record, `the fire never made ${id}; the script is out of step`).toBeDefined();
+      expect({ call: id, error: String(resultJson(record).error ?? "(no error)") }).toEqual({ call: id, error: expect.stringMatching(/not available/i) });
+    }
+  });
+
+  scenarioTest("a job whose stored tools cannot be read fires with the inert tools only, and one with no stored tools is as before", async () => {
+    const s = await scenarios.start();
+    const a = await s.connect({ label: "A" });
+    enqueueJob(s.db, { kind: "turn", payload: { text: "Unreadable.", agentID: "ea", notify: false, inputRole: "system", scheduledBy: "bot", capabilities: "everything" } });
+    enqueueJob(s.db, { kind: "turn", payload: { text: "Plain.", agentID: "ea", notify: false, inputRole: "system", scheduledBy: "bot" } });
+    s.model.queue(...scripted(true, [call("job_list", {}, "call_unreadable"), say("Tried.")]), ...scripted(true, [call("job_list", {}, "call_plain"), say("Listed.")]));
+    for (let tick = 0; tick < 6 && !allCallsTo(s, "job_list", a).some((entry) => entry.callID === "call_plain"); tick += 1) await s.runner().tick();
+    const unreadable = allCallsTo(s, "job_list", a).find((entry) => entry.callID === "call_unreadable");
+    const plain = allCallsTo(s, "job_list", a).find((entry) => entry.callID === "call_plain");
+    expect(unreadable, "the first fire never made its call; the script is out of step").toBeDefined();
+    expect(String(resultJson(unreadable).error ?? "(no error)"), "a fire whose stored tools cannot be read got its persona's tools").toMatch(/not available/i);
+    expect(plain, "the second fire never made its call; the script is out of step").toBeDefined();
+    expect(Object.hasOwn(resultJson(plain), "error"), "a job with no stored tools was cut down").toBe(false);
   });
 });
