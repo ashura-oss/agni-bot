@@ -38,7 +38,7 @@ function freshDB(): Database {
  * over twice, then ask in a vague way. The question is whether the facts
  * are still findable.
  */
-export async function evalNeedle(): Promise<EvalResult> {
+export async function evalNeedle(): Promise<EvalResult[]> {
   const db = freshDB();
   try {
     const conversation = ensureConversation(db, "ea");
