@@ -97,14 +97,17 @@ describe("server-chosen working directory", () => {
 });
 
 describe("isReadOnlyCommand and date", () => {
-  test("bare date and date +FORMAT are read-only", () => {
+  // The gate asks the shell proof (policy/shell-proof.ts), which reads the bare command, `-u` (print in UTC) and one `+FORMAT` word.
+  test("bare date, date -u and date +FORMAT are read-only", () => {
     expect(isReadOnlyCommand("date")).toBe(true);
     expect(isReadOnlyCommand("date +%Y-%m-%d")).toBe(true);
     expect(isReadOnlyCommand("date +%s")).toBe(true);
+    expect(isReadOnlyCommand("date -u")).toBe(true);
+    expect(isReadOnlyCommand("date -u +%s")).toBe(true);
   });
 
-  test("any option can set the clock or read files, so it needs the owner's click", () => {
-    for (const command of ["date -s 2030-01-01", "date --set=2030-01-01", "date -u", "date -d tomorrow", "date --date=tomorrow", "date -r somefile", "date --utc", "date -I", "date -f dates.txt", "date -u +%s", "date +%s -s x", "date 010112002030", "date +%Y %m"]) {
+  test("any other option can set the clock or read files, so it needs the owner's click", () => {
+    for (const command of ["date -s 2030-01-01", "date --set=2030-01-01", "date -d tomorrow", "date --date=tomorrow", "date -r somefile", "date --utc", "date -I", "date -f dates.txt", "date +%s -s x", "date 010112002030", "date +%Y %m"]) {
       expect(isReadOnlyCommand(command)).toBe(false);
     }
   });

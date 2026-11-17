@@ -117,7 +117,8 @@ export function isDestructive(command: string): boolean {
  * (policy/shell-proof.ts: plain words, only the options the allowlist names, no `..` segment and no link
  * in any operand), and whose every file operand really lives in scratch (relative to `cwd`). Anything else
  * needs the owner's click. The program list and the word rules are the proof's, in one place: `env` is out
- * of the list because the daemon's env holds provider keys, and `date` is read-only only without `-s`.
+ * of the list because the daemon's env holds provider keys, and `date` is read-only only as the bare command,
+ * with `-u`, or with one `+FORMAT` word (the proof's rule for it; a `date` that could set the clock is not proven).
  */
 export function isReadOnlyCommand(command: string, cwd?: string): boolean {
   // The same directory the command would run in: a relative cwd is under scratch.
@@ -125,8 +126,6 @@ export function isReadOnlyCommand(command: string, cwd?: string): boolean {
   if (isOutsideScratch(dir)) return false;
   const words = command.trim().split(/[ \t]+/);
   if (!READ_ONLY_PROGRAMS.has(words[0] ?? "")) return false;
-  // The proof reads `date -u`; the free pass is for the bare command and a `+FORMAT` only.
-  if (words[0] === "date" && words.slice(1).some((word) => !word.startsWith("+"))) return false;
   const proof = proveShell(command, dir);
   return proof.proven && proof.paths.every((path) => !isOutsideScratch(path));
 }

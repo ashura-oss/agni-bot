@@ -14,7 +14,20 @@ const WINDOWS = process.platform === "win32";
 let root = "";
 let scratch = "";
 let saved: string | undefined;
-let linked = false;
+
+/** Can this account make a folder link? Asked once with a throwaway folder, so the test that needs one is reported as skipped for want of one, not passed. */
+const CAN_LINK = (() => {
+  const probe = mkdtempSync(join(tmpdir(), "agni-ro-gate-probe-"));
+  try {
+    mkdirSync(join(probe, "target"));
+    symlinkSync(join(probe, "target"), join(probe, "link"), WINDOWS ? "junction" : "dir");
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(probe, { recursive: true, force: true });
+  }
+})();
 
 beforeAll(() => {
   root = mkdtempSync(join(tmpdir(), "agni-ro-gate-"));
@@ -24,7 +37,7 @@ beforeAll(() => {
   mkdirSync(join(root, "outside", ".ssh"), { recursive: true });
   writeFileSync(join(root, "outside", ".ssh", "id_rsa"), "PRIVATE KEY");
   writeFileSync(join(scratch, "notes.txt"), "notes");
-  try { symlinkSync(join(root, "outside", "deep"), join(scratch, "l"), WINDOWS ? "junction" : "dir"); linked = true; } catch { linked = false; }
+  if (CAN_LINK) symlinkSync(join(root, "outside", "deep"), join(scratch, "l"), WINDOWS ? "junction" : "dir");
   saved = process.env.AGNI_SCRATCH_DIR;
   process.env.AGNI_SCRATCH_DIR = scratch;
 });
@@ -34,8 +47,7 @@ afterAll(() => {
 });
 
 describe("a command the shell proof cannot read is not free", () => {
-  test("`cat l/../.ssh/id_rsa` through a link in scratch needs a card", () => {
-    if (!linked) return; // this account cannot make a folder link
+  test.skipIf(!CAN_LINK)("`cat l/../.ssh/id_rsa` through a link in scratch needs a card (needs an account that can make a folder link)", () => {
     expect(isReadOnlyCommand("cat l/../.ssh/id_rsa")).toBe(false);
     expect(isReadOnlyCommand("cat l/deep-file")).toBe(false);
   });
@@ -63,6 +75,13 @@ describe("the gate and the proof are one list", () => {
     expect(isReadOnlyCommand("ls -1")).toBe(true);
     expect(proveShell("ls -1", scratch).proven).toBe(true);
     expect(isReadOnlyCommand("ls -1 sub")).toBe(true);
+  });
+
+  test("`date` is free exactly when the proof proves it: one definition of what reads the clock and what sets it", () => {
+    const free = ["date", "date -u", "date +%F", "date -u +%F", "date +%F -u"];
+    const needsCard = ["date -s tomorrow", "date 010100002027", "date +%F +%T", "date -u -s tomorrow", "date -d yesterday", "date --set=tomorrow"];
+    for (const command of free) expect({ command, free: isReadOnlyCommand(command), proven: proveShell(command, scratch).proven }).toEqual({ command, free: true, proven: true });
+    for (const command of needsCard) expect({ command, free: isReadOnlyCommand(command), proven: proveShell(command, scratch).proven }).toEqual({ command, free: false, proven: false });
   });
 
   test("a mutating program is not on the list", () => {
