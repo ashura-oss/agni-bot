@@ -214,6 +214,8 @@ describe("agni vault migrate / export while a server runs that no pid file names
     expect(existsSync(join(home, "run", "agni.pid"))).toBe(false);
     // What stops them is the lock the running serve holds: it is there for as long as the server runs.
     expect(existsSync(join(home, "serve.lock"))).toBe(true);
+    // Once listening it says where, which is how a later `serve` tells it from a pid the machine reused.
+    expect(JSON.parse(readFileSync(join(home, "serve.lock"), "utf8"))).toMatchObject({ host: "127.0.0.1", port });
     const migrate = await vaultCommand(home, parent, port, ["migrate"]);
     expect(migrate.code).not.toBe(0);
     expect(migrate.printed).toContain("stop the daemon first");
