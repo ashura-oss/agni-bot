@@ -4,6 +4,7 @@ import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDatabase } from "../src/db";
+import { runPreflight } from "../src/routines/preflight";
 import { executeRoutine, ROUTINE_TOOL_ALLOWLIST, routineTools } from "../src/routines/run";
 import { buildRoutinePrompt, stripRoutineState } from "../src/routines/prompt";
 import type { Routine } from "../src/routines/types";
@@ -49,8 +50,11 @@ const settings = { firstTokenTimeoutMs: 1_000, turnTimeoutMs: 10_000 };
 
 describe("routine execution", () => {
   test("unchanged hash records a silent skip without calling the router", async () => {
-    const r = routine({ preflight: { kind: "sql", query: "SELECT 1 AS value" }, lastStateHash: new Bun.CryptoHasher("sha256").update('[{"value":1}]').digest("hex") });
-    const database = setup(r, true);
+    // The hash a named check produced last time; the state has not moved since.
+    const check = { kind: "check", name: "pending_approvals", params: {} } as const;
+    const r = routine({ preflight: check as never });
+    const database = setup(r);
+    r.lastStateHash = (await runPreflight(check, database, null)).hash;
     const fake = routerWith(() => { throw new Error("router must not be called"); });
     const posted: unknown[] = [];
     const run = await executeRoutine({ db: database, router: fake.router, settings, emit: (frame) => posted.push(frame) }, r);

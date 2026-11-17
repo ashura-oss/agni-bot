@@ -1,13 +1,27 @@
 /**
- * Secret redaction. A stub for now: Sprint 3 implements it. Callers use these
- * two names today so the behaviour can change without touching them.
- * Frozen shared signatures: change them only through the tech lead.
+ * Secret redaction: the surface production code imports. The implementation, and the two functions that exist
+ * only so tests can start from an empty registry (`clearSecretsForTests`, `unregisterSecret`), are in
+ * `redact-core.ts`; tests import those from there, and `test/s3-redact-surface.test.ts` checks that no
+ * production file does. `redact` and `registerSecret` are frozen shared API; read `redact-core.ts` for how the
+ * registry works.
  */
-
-/** Return `text` with registered secrets masked. Currently returns it unchanged. */
-export function redact(text: string): string {
-  return text;
-}
-
-/** Remember a secret value so `redact` masks it. Currently does nothing. */
-export function registerSecret(_value: string): void {}
+export {
+  MAX_SECRETS,
+  MIN_SECRET_LENGTH,
+  REDACTED,
+  RETIRED_MAX,
+  RETIRED_PER_SLOT,
+  forgetSecretSlots,
+  holdbackLength,
+  redact,
+  registerSecret,
+  registerSecretFor,
+  registerSecretsFromEnv,
+  releaseExpiredSecrets,
+  releaseSecretFor,
+  rememberSecretsAt,
+  secretCount,
+  secretEnvNames,
+  stageSecretsAt,
+} from "./redact-core";
+export type { SlotSecret } from "./redact-core";

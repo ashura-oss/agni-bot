@@ -1,6 +1,11 @@
 import { readFileSync } from "node:fs";
+import { isIP } from "node:net";
 import { homePath } from "../home";
 import { resolve } from "node:path";
+import "../credentials/register"; // the vault's credential migrators; see that file for why it is imported here
+import { entryName, vaultForReads } from "../credentials/vault-mode";
+import { log } from "../log";
+import { isPrivateAddress } from "../tools/fetch-url";
 
 /**
  * Provider catalog — every source is OpenAI-compatible `chat/completions`,
@@ -30,6 +35,13 @@ export interface CustomProviderEntry {
   model: string;
   /** The env variable that carries this endpoint's key. */
   envKey: string;
+  /**
+   * The owner's statement that this endpoint is on a private network (a LAN
+   * model server, a tunnel). Without the literal `true`, a private, link-local
+   * or metadata host is refused (S3-07). Edited by hand in providers.json:
+   * Settings cannot set it.
+   */
+  local?: boolean;
 }
 
 interface ProviderSpec {
@@ -161,6 +173,7 @@ function customEntries(value: unknown): CustomProviderEntry[] {
       baseUrl: entry.baseUrl,
       model: typeof entry.model === "string" ? entry.model : "",
       envKey: entry.envKey,
+      ...(entry.local === true ? { local: true } : {}),
     });
   }
   return entries;
@@ -185,27 +198,93 @@ export function nextCustomProviderID(existing: CustomProviderEntry[]): string {
   return `${CUSTOM_PROVIDER_PREFIX}-${Date.now()}`;
 }
 
+/** Why an endpoint URL is not acceptable. */
+export type BaseUrlRefusal = "invalid" | "scheme" | "private";
+export type BaseUrlVerdict = { ok: true; url: string } | { ok: false; reason: BaseUrlRefusal };
+
+/** Hostnames that name a metadata service or a private network, not the internet. Lower case, no trailing dot. */
+const PRIVATE_HOSTNAMES: ReadonlySet<string> = new Set(["metadata", "metadata.google.internal", "instance-data", "instance-data.ec2.internal"]);
+const PRIVATE_SUFFIXES = [".local", ".internal", ".lan", ".home.arpa", ".localdomain", ".intranet", ".corp", ".private"];
+
+/** The host of `url` without brackets, a trailing dot or capitals. */
+function bareHost(url: URL): string {
+  return url.hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "").toLowerCase();
+}
+
+/** This machine: `localhost`, `*.localhost`, `::1`, and 127.0.0.0/8 (URL parsing has already turned `127.1` and `2130706433` into dotted form). */
+function isLoopbackHost(host: string): boolean {
+  if (host === "localhost" || host.endsWith(".localhost") || host === "::1") return true;
+  return isIP(host) === 4 && host.startsWith("127.");
+}
+
 /**
- * A base URL for an OpenAI-compatible endpoint. The path is kept as given:
- * gateways differ (`/v1`, `/openai/v1`, nothing at all).
+ * A private network, link-local or metadata host (or an unqualified name, which can only mean the
+ * local network). Loopback is checked before this. The check reads the host as written: a name
+ * that resolves to a private address later is not seen here.
  */
-export function validateCustomBaseUrl(raw: string): string | null {
+function isPrivateHost(host: string): boolean {
+  if (isIP(host) !== 0) return isPrivateAddress(host);
+  if (PRIVATE_HOSTNAMES.has(host)) return true;
+  if (PRIVATE_SUFFIXES.some((suffix) => host.endsWith(suffix))) return true;
+  return !host.includes(".");
+}
+
+/**
+ * The rule for a custom endpoint (S3-07), with the reason when it fails.
+ *  - Only http and https URLs with a host are endpoints.
+ *  - This machine may use either scheme.
+ *  - A private-network, link-local or metadata host is refused unless the
+ *    owner marked the entry `"local": true`; then either scheme works, because
+ *    a model server on the LAN is usually plain http.
+ *  - Any other host must be https: a key must not cross the internet in the clear.
+ * The path is kept as given: gateways differ (`/v1`, `/openai/v1`, nothing at all).
+ */
+export function checkCustomBaseUrl(raw: string, options: { local?: boolean } = {}): BaseUrlVerdict {
   const value = raw.trim().replace(/\/+$/, "");
-  if (!value || value.length > 500 || /[\s\u0000-\u001f]/.test(value)) return null;
+  if (!value || value.length > 500 || /[\s\u0000-\u001f]/.test(value)) return { ok: false, reason: "invalid" };
   let url: URL;
   try {
     url = new URL(value);
   } catch {
-    return null;
+    return { ok: false, reason: "invalid" };
   }
-  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-  if (!url.hostname) return null;
-  return value;
+  if (url.protocol !== "http:" && url.protocol !== "https:") return { ok: false, reason: "invalid" };
+  const host = bareHost(url);
+  if (!host) return { ok: false, reason: "invalid" };
+  if (isLoopbackHost(host)) return { ok: true, url: value };
+  if (isPrivateHost(host)) return options.local === true ? { ok: true, url: value } : { ok: false, reason: "private" };
+  if (url.protocol !== "https:") return { ok: false, reason: "scheme" };
+  return { ok: true, url: value };
+}
+
+/** `checkCustomBaseUrl` for callers that only need the URL or nothing. */
+export function validateCustomBaseUrl(raw: string, options: { local?: boolean } = {}): string | null {
+  const verdict = checkCustomBaseUrl(raw, options);
+  return verdict.ok ? verdict.url : null;
 }
 
 /** The name shown for a provider: OpenRouter says "(:free)" only while its configured model is one of the free ones. */
 function labelFor(spec: ProviderSpec, model: string): string {
   return spec.id === "openrouter" && model.endsWith(":free") ? `${spec.label} (:free)` : spec.label;
+}
+
+/**
+ * A custom endpoint's full address from the vault, when it was kept there (vault mode, vault open).
+ * The file holds the same address with its credential taken out; if the owner has since pointed the
+ * file at another host or path, that edit is newer and the vault's copy of the old address is not used.
+ */
+function vaultBaseUrl(providerID: string, fileUrl: string): string | undefined {
+  try {
+    const full = vaultForReads()?.get(entryName.providerUrl(providerID));
+    if (full === undefined) return undefined;
+    const kept = new URL(full);
+    const edited = new URL(fileUrl);
+    const path = (url: URL): string => url.pathname.replace(/\/+$/, "");
+    return kept.origin === edited.origin && path(kept) === path(edited) ? full : undefined;
+  } catch {
+    // An id the vault will not name, or an address that does not parse (a hand edit): there is no usable vault copy.
+    return undefined;
+  }
 }
 
 export function loadProviders(env: Record<string, string | undefined>): ProviderConfig[] {
@@ -250,10 +329,19 @@ export function loadProviders(env: Record<string, string | undefined>): Provider
     if (!apiKey) continue;
     const model = (configuredModels[entry.id] || entry.model).trim();
     if (!model) continue;
+    // In vault mode an address that carries a credential is kept whole in the vault and the file holds
+    // a clean copy. The file can also be edited by hand, so the endpoint rule holds here too (S3-07):
+    // a refused endpoint never becomes a provider, and its key is never sent there.
+    const baseUrl = vaultBaseUrl(entry.id, entry.baseUrl) ?? entry.baseUrl;
+    const verdict = checkCustomBaseUrl(baseUrl, { local: entry.local });
+    if (!verdict.ok) {
+      log.warn(`provider ${entry.id}: endpoint not used (${verdict.reason === "private" ? 'a private-network host needs "local": true on its entry in providers.json' : verdict.reason === "scheme" ? "it must use https" : "it is not a valid http(s) URL"})`);
+      continue;
+    }
     providers.push({
       id: entry.id,
       label: entry.label,
-      baseUrl: entry.baseUrl,
+      baseUrl,
       apiKey,
       model,
     });

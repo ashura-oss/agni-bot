@@ -21,11 +21,14 @@
  *   6. rules      a stored "always allow" for exactly this bot, tool and target
  *   7. owner      ask with a card
  *
+ * A call that carries a saved secret is refused at steps 6 and 7 (`cannot_show`): its card would read "[redacted]" where the key
+ * is about to be sent, and a rule asks no one at all. A card never shows less than what will run.
+ *
  * It runs on every call, so it reads nothing slow: no model call, no network,
  * a handful of small database reads at most. Under a millisecond.
  */
 import { entry } from "../agent/card-text";
-import { cardProblem } from "../agent/card-preview";
+import { cardProblem, savedSecretProblem } from "../agent/card-preview";
 import { approvalTarget, matchApprovalRule } from "../stores/approval-rules";
 import { audit } from "./audit-sink";
 import { isTainted, newestFirst } from "./context";
@@ -147,7 +150,12 @@ function judge(run: RunContext, input: PolicyInput, record: boolean): Decision {
   if (!tainted && !refusedRun && standing === null) {
     // An exact rule (what "Always allow" stores) or a pattern rule over the call's resources (S2-08).
     const rule = matchApprovalRule(run.services.db, { agentID: run.bot, toolName: tool, args, resources: assessment.resources });
-    if (rule) return { action: "run", via: "rule", reason: `stored rule ${rule.id}`, assessment: { ...assessment, tier }, ruleID: rule.id, rule: { id: rule.id, agentID: rule.agentID, toolName: rule.toolName, createdAt: rule.createdAt } };
+    if (rule) {
+      // Nobody is asked, so nobody would see a saved secret in the call: refused like a card that cannot show it.
+      const carried = savedSecretProblem(tool, args, { bot: run.services.botName?.trim() || "A bot", db: run.services.db, agentID: run.bot });
+      if (carried !== null) return refuse("cannot_show", `Not done: ${carried}`, "the call carries a saved secret that no card would show");
+      return { action: "run", via: "rule", reason: `stored rule ${rule.id}`, assessment: { ...assessment, tier }, ruleID: rule.id, rule: { id: rule.id, agentID: rule.agentID, toolName: rule.toolName, createdAt: rule.createdAt } };
+    }
   }
 
   // 7. owner

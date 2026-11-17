@@ -4,6 +4,7 @@
  * place that knows how to talk to a model endpoint.
  */
 import { log } from "../log";
+import { redact } from "../util/redact";
 import { estimateTokens } from "./prices";
 
 export interface ChatMessage {
@@ -193,7 +194,8 @@ export async function streamChat(request: ChatRequest): Promise<ChatResult> {
   if (!response.ok) {
     const body = await response.text().catch(() => "");
     cleanup();
-    throw new ProviderError(`HTTP ${response.status}: ${truncate(body, 300)}`, {
+    // Masked before it is cut: a cut through the middle of a key leaves a front half that no registered form matches.
+    throw new ProviderError(`HTTP ${response.status}: ${truncate(redact(body), 300)}`, {
       kind: "http",
       status: response.status,
       retryAfterMs: parseRetryAfter(response.headers.get("retry-after")),

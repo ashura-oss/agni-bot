@@ -4,11 +4,14 @@
 // The job row is the single source of truth for `enabled` and `next run`
 // (jobs.enabled, jobs.run_at). Routine rows store neither.
 
+import type { CheckPreflight } from "./preflight-checks";
+
 export type MisfirePolicy = "skip" | "run_once";
 
 export type Preflight =
   | { kind: "http"; url: string } // compares ETag, else status + body hash
-  | { kind: "sql"; query: string } // read-only SELECT on the Agni DB
+  | CheckPreflight // a named, fixed question about the Agni DB (routines/preflight-checks.ts)
+  | { kind: "sql"; query: string } // retired: only an old stored row holds one, and it is never run (migration 63 pauses it)
   | { kind: "mail"; account: "agent" | "owner" } // changed when a newer unseen message arrived
   | { kind: "none" }; // always counts as changed
 

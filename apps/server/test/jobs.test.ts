@@ -86,6 +86,16 @@ describe("job store", () => {
     db.close();
   });
 
+  test("a job prefix is matched as text, ignoring case, and a wildcard matches only itself", () => {
+    const db = freshDb();
+    const job = enqueueJob(db, { kind: "turn", payload: { text: "only job" } });
+    // Sprint 2's lookup compared lower(prefix) to lower(id): a typed prefix in another case finds the job.
+    expect(getJobByPrefix(db, job.id.slice(0, 10).toUpperCase())?.id).toBe(job.id);
+    expect(getJobByPrefix(db, "%")).toBeNull();
+    expect(getJobByPrefix(db, "_")).toBeNull();
+    db.close();
+  });
+
   test("finished jobs are hidden unless asked for", () => {
     const db = freshDb();
     const done = enqueueJob(db, { kind: "turn", payload: { text: "done" } });

@@ -11,8 +11,9 @@
  *
  * MCP tools (`mcp_` prefix) get one default: an untrusted reader and an
  * effector at tier 2, asked every time unless the owner trusted that tool
- * (`MCP_FREE_TOOLS`, read only, until Sprint 3 gives connector tools their own
- * `meta`). A tool definition may carry its own `meta`; it can add to what the table says and never take away from it (`policyFor`).
+ * (`MCP_FREE_TOOLS`). That set is the one place trust is read: a tool's own
+ * `meta` can only add to what the table says, never take away from it
+ * (`policyFor`), so it cannot make a tool free. See `test/s3-mcp-policy-merge.test.ts`.
  */
 import { MCP_FREE_TOOLS } from "../plugins/mcp";
 import { entry } from "../agent/card-text";

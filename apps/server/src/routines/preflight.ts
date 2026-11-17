@@ -1,24 +1,18 @@
-import { Database } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import type { Preflight } from "./types";
+import { findCheck, parseCheckPreflight } from "./preflight-checks";
 import { isIP } from "node:net";
 import { requestPinned, resolvePublicHost } from "../tools/fetch-url";
 import { ImapClient } from "../mail/imap";
 import { resolveMailConfig } from "../tools/mail";
 import type { MailAccountResolver } from "../plugins/credentials";
 
-const SQL_FORBIDDEN = /\b(PRAGMA|ATTACH|DETACH|INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|VACUUM)\b/i;
 const MAX_BODY_BYTES = 1_000_000;
 const MAX_REDIRECTS = 5;
 
-/** Validate the deliberately narrow SQL preflight language. */
-export function assertReadOnlySelect(query: string): void {
-  const normalized = query.trim();
-  // shortcut: WITH is refused so a recursive CTE cannot block the daemon; allow it again only with a row or time bound.
-  if (/\bWITH\b/i.test(normalized)) throw new Error("preflight SQL may not use WITH");
-  if (!/^SELECT\b/i.test(normalized) || normalized.includes(";") || SQL_FORBIDDEN.test(normalized)) {
-    throw new Error("preflight SQL must be a single read-only SELECT");
-  }
-}
+/** What a routine that still holds a model-written SQL pre-check is told (and what the migration records for it). */
+export const SQL_PREFLIGHT_RETIRED =
+  "Model-written SQL pre-checks were removed for safety. Use a named check instead (for example pending_approvals, thread_activity or open_tasks), or no pre-check.";
 
 function sha256(value: string | Uint8Array): string {
   return new Bun.CryptoHasher("sha256").update(value).digest("hex");
@@ -71,18 +65,17 @@ export async function runPreflight(
     return { changed: hash !== lastHash, hash };
   }
 
-  const query = p.query.trim();
-  assertReadOnlySelect(query);
-  const path = db.filename;
-  if (!path || path === ":memory:") throw new Error("read-only preflight requires a file-backed database");
-  const readDB = new Database(path, { create: false, readonly: true });
-  try {
-    const rows = readDB.query(query).all();
-    const hash = sha256(JSON.stringify(rows));
+  if (p.kind === "check") {
+    // Validated again here: a stored routine is data too, and may have been edited by hand.
+    const check = parseCheckPreflight(p);
+    const entry = findCheck(check.name)!;
+    const row = db.query(entry.sql).get(...entry.bind(check.params));
+    const hash = sha256(JSON.stringify({ name: check.name, params: check.params, row }));
     return { changed: hash !== lastHash, hash };
-  } finally {
-    readDB.close();
   }
+
+  // The old model-written query: never run. Migration 63 pauses such routines; this covers any that slip through.
+  throw new Error(SQL_PREFLIGHT_RETIRED);
 }
 
 async function hashResponse(response: Response): Promise<string> {

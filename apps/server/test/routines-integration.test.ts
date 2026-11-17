@@ -48,15 +48,16 @@ describe("routine integration", () => {
     db.close();
   });
 
-  test("routine creation validates cron, timezone and SQL; domains stay empty", async () => {
+  test("routine creation validates cron, timezone and the pre-check; domains stay empty", async () => {
     const db = openDatabase(":memory:");
     const base = { name: "Check", prompt: "Review it", timezone: "UTC", preflight: { kind: "none" } };
     for (const cron of ["0 1 2 3 4 5", "*/2 * * * *", "0,2 * * * *"]) {
       await expect(callCreate(db, { ...base, cron })).rejects.toThrow();
     }
     await expect(callCreate(db, { ...base, cron: "*/5 * * * *", timezone: "Mars/Olympus" })).rejects.toThrow("invalid timezone");
-    await expect(callCreate(db, { ...base, cron: "*/5 * * * *", preflight: { kind: "sql", query: "DELETE FROM agents" } })).rejects.toThrow("single read-only SELECT");
-    await expect(callCreate(db, { ...base, cron: "*/5 * * * *", preflight: { kind: "sql", query: "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c) SELECT count(*) FROM c" } })).rejects.toThrow("preflight SQL may not use WITH");
+    // No model-written SQL is accepted, whatever it says (s3-routine-check-tool.test.ts covers the named checks that replace it).
+    await expect(callCreate(db, { ...base, cron: "*/5 * * * *", preflight: { kind: "sql", query: "DELETE FROM agents" } })).rejects.toThrow("SQL pre-checks were removed");
+    await expect(callCreate(db, { ...base, cron: "*/5 * * * *", preflight: { kind: "sql", query: "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c) SELECT count(*) FROM c" } })).rejects.toThrow("SQL pre-checks were removed");
     const created = await callCreate(db, { ...base, cron: "*/5 * * * *" }) as Routine;
     expect(created.allowedDomains).toEqual([]);
     expect(created.maxTokens).toBe(16000);

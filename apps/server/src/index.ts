@@ -15,11 +15,11 @@
  *   bun run job list         queued and running jobs (--all includes finished)
  *   bun run job rm|run <id>  cancel a job / make it due now
  */
-import { chmodSync, copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { PROTOCOL_VERSION } from "@agni/protocol";
-import { listDevices, mintPairCode, mintToken, revokeDevice } from "./auth/tokens";
+import { AmbiguousDevicePrefixError, listDevices, mintPairCode, mintToken, revokeDevice } from "./auth/tokens";
 import { serviceCommand } from "./service";
 import { loadConfig, type Config } from "./config";
 import { pluginMailResolver } from "./plugins/credentials";
@@ -52,9 +52,13 @@ import { formatDuration, parseDurationMs, parseWhen } from "./util/time";
 import { startServer, type RunningServer } from "./ws/server";
 import { agniHome, loadHomeEnv, migrateHomeLayout } from "./home";
 import { browserOpenCommand } from "./util/open-url";
-import { secureDirectory, secureDirectoryIfNeeded, secureFile } from "./util/private-file";
+import { verifyHomePrivate } from "./util/private-file";
 import { extraHelpLines, runExtraCommand } from "./cli/extra-commands";
+import { prepareHome } from "./cli/s3-setup";
 import { runStartupHooks } from "./startup";
+import { loadVaultEnvForCli, unlockVaultAtStart, vaultRefusalMessage } from "./startup/s3-vault";
+import { ServeLockError, type ServeLock } from "./startup/s3-serve-lock";
+import { acquireServeLockAtStart } from "./startup/s3-serve-start";
 
 const [command = "help", ...args] = Bun.argv.slice(2);
 
@@ -66,6 +70,9 @@ if (layout.blockedByPid !== undefined) {
   process.exit(1);
 }
 for (const from of layout.movedFrom) console.error(`moved ${from} into ${agniHome()}`);
+// These commands ask the running daemon how it is, sending the stored device token. In vault mode that token
+// lives in the vault, not in config.env (S3-01).
+if (command === "daemon" || command === "service" || command === "setup") await loadVaultEnvForCli();
 
 if (command === "serve") await serve();
 else if (command === "daemon") await daemonCommand(args);
@@ -89,12 +96,35 @@ else if (await runExtraCommand(command, args)) {
 // --- server ------------------------------------------------------------------
 
 async function serve(): Promise<void> {
-  // Windows: owner-only ACL on AGNI_HOME, inherited by the config, keys, database
-  // and logs beneath it. Warn rather than refuse to start: every secret write
-  // (provider keys, VAPID key) is protected and fail-closed on its own.
-  mkdirSync(agniHome(), { recursive: true, mode: 0o700 });
-  // Skipped when the ACL is already in place, so a restart does not re-walk the home tree.
-  secureDirectoryIfNeeded(agniHome(), "warn");
+  // AGNI_HOME must be readable by its owner only, checked at every start
+  // (S3-04). Windows: owner-only ACL inherited by the config, keys, database and
+  // logs beneath it. macOS/Linux: mode 700, and 600 on the secret files. If it
+  // cannot be made so, refuse to start. (The ACL is re-applied only when it is
+  // not already in place, so a restart does not re-walk the home tree.)
+  try {
+    mkdirSync(agniHome(), { recursive: true, mode: 0o700 });
+    if (verifyHomePrivate(agniHome()) === "fixed") log.warn(`${agniHome()} was readable by other accounts; it is now private to yours`);
+  } catch (error) {
+    console.error(`Agni cannot start: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
+  // The lock says "a server has this home open" to `agni vault migrate` and `export`, which the
+  // pid file cannot (a foreground or service-managed serve writes none). Held until exit.
+  let serveLock: ServeLock;
+  try {
+    serveLock = await acquireServeLockAtStart();
+  } catch (error) {
+    console.error(`Agni cannot start: ${error instanceof ServeLockError ? error.message : String(error)}`);
+    process.exit(1);
+  }
+  // The vault opens before the config is read, so providers see their keys.
+  // A vault that cannot be opened stops the start; there is no plaintext fallback (S3-01).
+  try {
+    await unlockVaultAtStart();
+  } catch (error) {
+    console.error(vaultRefusalMessage(error));
+    process.exit(1);
+  }
   const config = loadConfig();
   const db = openDatabase(config.dbPath);
   setOwnerName(config.userFirstName);
@@ -125,6 +155,9 @@ async function serve(): Promise<void> {
     }
     throw error;
   }
+  // The port is ours: the lock now says where this server listens, which is how a later `serve` tells this server from a
+  // pid the machine reused after it was killed. The socket's own host and port, not the configured ones (port 0 is "any").
+  serveLock.recordEndpoint(running.hostname, running.port);
   // Only after the port is ours: a second `serve` that hit EADDRINUSE must
   // not re-queue the live daemon's running jobs.
   const requeued = requeueStuckJobs(db);
@@ -466,37 +499,30 @@ async function openBrowser(args: string[]): Promise<void> {
 }
 
 /**
- * First run (and upgrade) in one command: AGNI_HOME + config.env, the login
- * service (or the detached daemon with --no-service), then a paired browser.
+ * First run (and upgrade) in one command: AGNI_HOME + config.env, the secrets mode (the vault for a fresh home), the
+ * login service (or the detached daemon with --no-service), then a paired browser. `--prepare-only` stops after the
+ * secrets mode (the installer uses it, because it starts the service itself).
  */
 async function setup(args: string[]): Promise<void> {
   const home = agniHome();
-  const envPath = join(home, "config.env");
-  let created = false;
+  let prepared: Awaited<ReturnType<typeof prepareHome>>;
   try {
-    mkdirSync(home, { recursive: true, mode: 0o700 });
-    // An older ~/.agni may be 755; the DB and logs inside rely on this being private.
-    chmodSync(home, 0o700);
-    // Windows has no mode bits. The directory gets an owner-only ACL before
-    // config.env exists, so the file is created already protected, and the
-    // files already under it (an upgrade) inherit it. Fail closed: the owner is
-    // about to put API keys in here.
-    secureDirectory(home, "throw");
-    if (!existsSync(envPath)) {
-      copyFileSync(resolve(import.meta.dir, "../../../infra/env.example"), envPath);
-      chmodSync(envPath, 0o600);
-      created = true;
-    }
-    // Also on a rerun: a config.env from an older setup may have its own ACL.
-    secureFile(envPath);
+    prepared = await prepareHome({ home, envExample: resolve(import.meta.dir, "../../../infra/env.example") });
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
   }
-  if (created) {
-    console.log(`created ${envPath} — add a model provider key there (or in the web app's settings)`);
+  console.log(prepared.secrets.message);
+  // From here on this process is in the mode setup chose, whether or not config.env was just made.
+  process.env.AGNI_SECRETS_MODE = prepared.secrets.mode;
+  if (prepared.created) {
+    const keys = prepared.secrets.mode === "vault"
+      ? "add a model provider key in the web app's settings (it goes into the vault)"
+      : "add a model provider key there (or in the web app's settings)";
+    console.log(`created ${join(home, "config.env")} — ${keys}`);
     loadHomeEnv();
   }
+  if (hasFlag(args, "--prepare-only")) return;
   const config = loadConfig();
   if (hasFlag(args, "--no-service")) await daemonCommand(["start"]);
   else await service(["install"]);
@@ -546,7 +572,15 @@ function revoke(args: string[]): void {
   }
   const config = loadConfig();
   const db = cliDatabase(config.dbPath);
-  const device = revokeDevice(db, target);
+  let device: ReturnType<typeof revokeDevice>;
+  try {
+    device = revokeDevice(db, target);
+  } catch (error) {
+    if (!(error instanceof AmbiguousDevicePrefixError)) throw error;
+    console.error(error.message);
+    db.close();
+    process.exit(1);
+  }
   if (!device) {
     console.error(`no device matching "${target}"`);
     db.close();
@@ -620,8 +654,9 @@ function usage(code = 0): void {
   const extraHelp = extraHelpLines().map((line) => `${String.fromCharCode(10)}${line}`).join("");
   (code === 0 ? console.log : console.error)(`agni ${agniVersion()}
 
-  setup              first run / upgrade: config.env, login service, open a paired browser
-                     (--no-service: detached daemon instead; --no-open: just print the link)
+  setup              first run / upgrade: config.env, secrets mode (vault for a fresh home), login service, open a paired browser
+                     (--no-service: detached daemon instead; --no-open: just print the link;
+                     --prepare-only: only config.env and the secrets mode, start nothing)
   open [--no-browser]  mint a pairing code and open the web app
   serve              start the HTTP/WebSocket server in the foreground
   daemon start       start it detached; waits for /health

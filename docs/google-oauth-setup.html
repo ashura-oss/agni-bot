@@ -139,6 +139,7 @@ Save and continue.</li>
 <pre><code>GOOGLE_OAUTH_CLIENT_ID=&lt;paste client id&gt;
 GOOGLE_OAUTH_CLIENT_SECRET=&lt;paste client secret&gt;</code></pre>
 <p>Restart the daemon (<code>bun run daemon restart</code>) so it picks them up.</p>
+<p>A fresh install keeps its secrets in an encrypted vault, and in that mode the server ignores credentials written in <code>config.env</code>. Run <code>agni doctor</code> to see the mode. If it says <b>vault</b>, stop the daemon, add the two lines above to <code>~/.agni/config.env</code>, run <code>agni vault migrate</code> (it moves them into the vault and removes them from the file), then start the daemon again. In <b>file</b> mode, the restart is all you need.</p>
 </div>
 
 <div class="step"><span class="n">7</span><b>Connect from the app.</b>

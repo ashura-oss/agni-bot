@@ -1,10 +1,12 @@
 /**
  * Plugin-stored credentials, read at the moment a tool needs them.
  *
- * The Plugins pane writes secrets into the daemon's mode-600 plugins.json.
- * The tools read them from there — not from .env — so that what the owner
- * connects in the UI is exactly what the agent can use. A mailbox connected
- * in Settings → Plugins has to work, or the connect is a lie.
+ * The Plugins pane saves secrets through plugins.json (`plugins/config.ts`):
+ * in file mode into the mode-600 file, in vault mode into the vault, with the
+ * file keeping only the settings. The tools read them back through the same
+ * `loadPluginsFile` — not from .env — so that what the owner connects in the UI
+ * is exactly what the agent can use, whichever mode holds it. A mailbox
+ * connected in Settings → Plugins has to work, or the connect is a lie.
  */
 import { loadPluginsFile, savePluginsFile } from "./config";
 import { manifestFor } from "./catalog";
@@ -52,8 +54,8 @@ export function modeFor(pluginID: string, capability: string, absent: "free" | "
 
 /**
  * A fresh Google access token for a connected OAuth plugin, read from
- * plugins.json on every call and written back after a refresh. Server-side
- * only: the model never sees it.
+ * plugins.json (and the vault, in vault mode) on every call and written back
+ * after a refresh. Server-side only: the model never sees it.
  */
 export async function pluginAccessToken(pluginsPath: string, pluginID: string, fetchImpl?: typeof fetch): Promise<string> {
   const file = loadPluginsFile(pluginsPath);
@@ -68,7 +70,7 @@ export async function pluginAccessToken(pluginsPath: string, pluginID: string, f
   // refresh() only needs the client id/secret and fetch, not the daemon config.
   const deps = { clientID: client?.clientID ?? "", clientSecret: client?.clientSecret ?? "", ...(fetchImpl ? { fetch: fetchImpl } : {}) } as OAuthDeps;
   const fresh = await refresh(deps, refresh_token);
-  entry.auth = { ...entry.auth, access_token: fresh.access_token, expires_at: fresh.expires_at };
+  entry.auth = { ...entry.auth, access_token: fresh.access_token, expires_at: fresh.expires_at, ...(fresh.refresh_token ? { refresh_token: fresh.refresh_token } : {}) };
   savePluginsFile(pluginsPath, file);
   return fresh.access_token!;
 }

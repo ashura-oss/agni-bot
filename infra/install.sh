@@ -69,6 +69,10 @@ if mkdir -p "$HOME/.local/bin" 2>/dev/null; then
 fi
 AGNI="$AGNI_HOME/bin/agni"
 
+# Secrets mode: a fresh home gets the encrypted vault. Where this machine has no usable keystore it says so and uses
+# an owner-only config.env instead. A home that already has a mode or data keeps it.
+"$AGNI" setup --prepare-only
+
 if [ "$SERVICE" = 1 ]; then
   "$AGNI" service install
   for _ in $(seq 1 20); do
@@ -83,7 +87,8 @@ cat <<MSG
 
 Agni Bot is installed.
   data:      $AGNI_HOME (database, logs, scratch)
-  keys:      put provider keys in $AGNI_HOME/config.env, then restart: agni service install
+  keys:      add provider keys in the web app's settings (run: agni doctor, to see where secrets are kept)
+             (file mode only: they can also go in $AGNI_HOME/config.env, then restart: agni service install)
   status:    agni service status
   uninstall: agni service uninstall   (data stays in $AGNI_HOME)
   pair again: agni open

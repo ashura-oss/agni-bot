@@ -1,0 +1,33 @@
+rules:
+  - id: agni-spawn-interpolated-arg
+    languages: [typescript]
+    severity: ERROR
+    message: >-
+      A spawn call takes a command or argument built by interpolation or
+      concatenation, or runs with shell: true. Built into the command, the
+      value reaches a shell; built into an argument, a leading dash turns it
+      into an option. Pass each value as its own array element, validate it
+      (an allowlist or a strict pattern), put "--" before values that may
+      start with a dash, and never set shell: true.
+    metadata:
+      category: security
+      cwe: "CWE-88: Argument Injection or Modification"
+      owasp: "A03:2021 - Injection"
+      sprint: S3-11
+    patterns:
+      - pattern-either:
+          - pattern: $F(`...${$X}...`, ...)
+          - pattern: $F("..." + $X, ...)
+          - pattern: $F($CMD, [..., `...${$X}...`, ...], ...)
+          - pattern: $F($CMD, [..., "..." + $X, ...], ...)
+          - pattern: $F([..., `...${$X}...`, ...], ...)
+          - pattern: $F([..., "..." + $X, ...], ...)
+          - pattern: |
+              $F({..., cmd: [..., `...${$X}...`, ...], ...}, ...)
+          - pattern: |
+              $F({..., cmd: [..., "..." + $X, ...], ...}, ...)
+          - pattern: |
+              $F(..., {..., shell: true, ...}, ...)
+      - metavariable-regex:
+          metavariable: $F
+          regex: ^((child_process|cp|childProcess|Bun)\.)?(spawn|spawnSync|execFile|execFileSync|fork)$

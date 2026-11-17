@@ -1310,12 +1310,13 @@ async function executeTool(
     return { content, awaiting: false };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const content = JSON.stringify({ error: truncate(message, 500) });
+    // Masked before it is cut: a key that straddles the cut would otherwise be no whole value when it is masked, and its first half would be stored and sent.
+    const content = JSON.stringify({ error: cutMasked(message, 500) });
     // The abort's own error has its own code; a tool's message that equals a loop code is prefixed (see closure.ts).
     // What the tool threw reaches the model; an abort cut it off before anything came back.
     if (!(error instanceof AbortedMidCall)) noteTaint(hooks.run, tool, args, { error: message });
     storeResult(content, false, error instanceof AbortedMidCall ? ABORTED_MID_CALL : toolErrorCode(message));
-    emit({ type: "tool.end", callID: call.id, ok: false, preview: truncate(message, 120) });
+    emit({ type: "tool.end", callID: call.id, ok: false, preview: cutMasked(message, 120) });
     return { content, awaiting: false };
   } finally {
     clearTimeout(ownerWaitCeiling);
@@ -1511,12 +1512,15 @@ export function compact(messages: ChatMessage[], previousSummary: string | null)
 /**
  * A tool result that fits the prompt and is still valid JSON: long strings
  * and arrays are cut step by step, and the result is marked truncated.
+ * Every string in it is masked first, and only then cut: a secret that straddles a cut is no longer whole
+ * when it is masked, so its first half would be stored and sent (see `cutMasked`).
  */
 export function fitToolResult(value: unknown, max = MAX_TOOL_RESULT_CHARS, keepChars = 1_000): string {
-  const full = JSON.stringify(value) ?? "null";
+  const full = JSON.stringify(value, (_key, item: unknown) => (typeof item === "string" ? redact(item) : item)) ?? "null";
   if (full.length <= max) return full;
+  const masked = JSON.parse(full) as unknown;
   for (const [items, chars] of [[20, keepChars], [10, 400], [5, 200], [3, 80]] as const) {
-    const text = JSON.stringify({ truncated: true, result: shrinkValue(value, items, chars) });
+    const text = JSON.stringify({ truncated: true, result: shrinkValue(masked, items, chars) });
     if (text.length <= max) return text;
   }
   // shortcut: very wide or deep objects can still overflow; they fall back to a plain cut.
@@ -1539,40 +1543,44 @@ function estimateTokens(text: string): number { return Math.ceil(text.length / 4
 /** Keep the newest end: summaries grow by appending. */
 function truncateTail(text: string, max: number): string { return text.length > max ? `…${text.slice(text.length - max + 1)}` : text; }
 function truncate(text: string, max: number): string { return text.length > max ? `${text.slice(0, max - 1)}…` : text; }
+/** `text` masked, then cut to `max`. In that order: a secret that straddles the cut is no longer whole when it is masked, so the half before the cut would go out. */
+function cutMasked(text: string, max: number): string { return truncate(redact(text), max); }
+/** The first `max` characters of a value written out, masked before they are cut (see `cutMasked`). */
+function headMasked(value: unknown, max: number): string { return redact(String(value ?? "")).slice(0, max); }
 
 /** Short human preview for a tool.start frame. */
 function describePreview(toolName: string, args: Record<string, unknown>): string {
   switch (toolName) {
-    case "handoff": return `hand off to ${String(args.toAgentID ?? "?")}: ${String(args.task ?? "").slice(0, 80)}`;
-    case "delegate_task": return `delegate to ${String(args.toAgentID ?? "?")}: ${String(args.goal ?? "").slice(0, 80)}`;
+    case "handoff": return `hand off to ${String(args.toAgentID ?? "?")}: ${headMasked(args.task, 80)}`;
+    case "delegate_task": return `delegate to ${String(args.toAgentID ?? "?")}: ${headMasked(args.goal, 80)}`;
     case "delegate_wait": return `wait for ${String(args.taskID ?? "?")}`;
     case "task_status": return `status of ${String(args.taskID ?? "?")}`;
     case "task_cancel": return `cancel ${String(args.taskID ?? "?")}`;
     case "rename_agent": return `rename to ${String(args.name ?? "?")}`;
-    case "bash": return String(args.command ?? "").slice(0, 120);
+    case "bash": return headMasked(args.command, 120);
     case "write_file": return `write ${args.path ?? "?"}`;
     case "read_file": return `read ${args.path ?? "?"}`;
-    case "memory_write": return `save memory: ${String(args.text ?? "").slice(0, 60)}`;
-    case "remember_fact": return `remember: ${String(args.fact ?? "").slice(0, 60)}`;
-    case "recall_fact": return `recall facts${args.query ? `: ${String(args.query).slice(0, 60)}` : ""}`;
+    case "memory_write": return `save memory: ${headMasked(args.text, 60)}`;
+    case "remember_fact": return `remember: ${headMasked(args.fact, 60)}`;
+    case "recall_fact": return `recall facts${args.query ? `: ${headMasked(args.query, 60)}` : ""}`;
     case "link_save": return `save link: ${args.url ?? "?"}`;
     case "web_search": return `search: ${args.query ?? "?"}`;
     case "web_fetch": return `fetch: ${args.url ?? "?"}`;
-    default: return `${toolName}(${JSON.stringify(args).slice(0, 80)})`;
+    default: return `${toolName}(${headMasked(JSON.stringify(args), 80)})`;
   }
 }
 
 /** Short preview for a tool.end frame, derived from the result object. */
 function toolPreview(result: unknown): string {
   if (result === null || result === undefined) return "done";
-  if (typeof result === "string") return truncate(result, 120);
+  if (typeof result === "string") return cutMasked(result, 120);
   if (typeof result === "object") {
     const record = result as Record<string, unknown>;
-    if (typeof record.text === "string") return truncate(record.text, 120);
-    if (typeof record.fact === "string") return truncate(record.fact, 120);
+    if (typeof record.text === "string") return cutMasked(record.text, 120);
+    if (typeof record.fact === "string") return cutMasked(record.fact, 120);
     if (Array.isArray(record.facts)) return `${record.facts.length} fact(s)`;
     if (typeof record.childTurnID === "string") return `delegated to ${record.agentID ?? "?"} (depth ${record.depth ?? "?"})`;
     if (record.deleted === true) return "fact deleted";
   }
-  return truncate(JSON.stringify(result), 120);
+  return cutMasked(JSON.stringify(result), 120);
 }

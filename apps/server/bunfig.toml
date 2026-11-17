@@ -1,0 +1,4 @@
+# Running `bun test` from this folder must load the same preload as the root run (see ../../bunfig.toml): it installs
+# an in-memory keystore, so no test reaches the real credential store. Relative to this file.
+[test]
+preload = ["./test/preload.ts"]

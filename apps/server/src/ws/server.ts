@@ -20,8 +20,11 @@ import { dayTotals, type DayTotals } from "../stores/usage";
 import { purgeExpiredShares } from "../share/document";
 import { shareRequest } from "../share/http";
 import { dispatch, errorFrame, purgeRevokedQueues, newSession, resumeQueuedMessages, type DispatchDeps, type Session } from "./dispatch";
-import { isDeviceRevoked, requestToken, verifyToken } from "../auth/tokens";
+import { isDeviceRevoked, requestToken, touchDevice, verifyToken } from "../auth/tokens";
 import { authRequest } from "../auth/web";
+import { gateDevice, requestDevice } from "../auth/gate";
+import { clientAddress, createPairLimiter } from "../auth/rate-limit";
+import { FrameBucket, MAX_FRAME_BYTES, RATE_LIMIT_CLOSE_CODE, RATE_LIMIT_CLOSE_REASON } from "./frame-limits";
 import { createOriginPolicy, originConfigProblem, parseOriginList } from "../auth/origin";
 import { staticPageHeaders } from "./csp";
 import { webAppRequest } from "./web-app";
@@ -32,8 +35,13 @@ import { dirname, resolve } from "node:path";
 import { ChatGPTAuth } from "../models/chatgpt-auth";
 import { PushService } from "../push/web-push";
 import { homePath } from "../home";
+import { loadCustomProviders, providerKeyEnvNames } from "../models/providers";
+import { redact, registerSecretsFromEnv, secretEnvNames } from "../util/redact";
+import { StreamRedactor } from "../util/redact-stream";
 
 export interface RunningServer {
+  /** The host the socket is bound to, as the runtime reports it (what `serve` records in its lock). */
+  readonly hostname: string;
   readonly port: number;
   readonly url: string;
   /** Plugin connection state lives here (settings pane snapshots, OAuth). */
@@ -49,17 +57,12 @@ export interface RunningServer {
 }
 
 /**
- * `GET /health` answers any origin, so a web client on another origin can tell
- * the daemon is up before it pairs. That is safe only because the answer to a
- * caller who is not paired carries no owner or config data (see `liveness`).
- * The full report also needs `Authorization`, which this header set does not
- * allow cross-origin, so it is only ever read same-origin or by a native client.
+ * `GET /health` is a liveness check for the daemon CLI and for supervisors on
+ * this machine. It sends no CORS headers, so a web page on another origin
+ * cannot read it (and the server refuses a foreign `Origin` outright). The
+ * answer to a caller who is not paired carries no owner or config data (see
+ * `liveness`); the full report needs a paired device's token.
  */
-const HEALTH_CORS = {
-  "access-control-allow-origin": "*",
-  "access-control-allow-methods": "GET, OPTIONS",
-  "access-control-allow-headers": "accept, content-type",
-} as const;
 
 /** Shape of the full `GET /health`, for a paired device — also what `daemon status` shows. */
 export interface HealthReport {
@@ -95,7 +98,20 @@ export function healthReport(db: Database, router: Router, seq: number, startedA
   };
 }
 
+/**
+ * Mask, from here on, every secret setting in the environment (config.env in file
+ * mode, the vault's entries in vault mode, the shell otherwise): provider keys,
+ * secret-shaped names, and the key variable of each custom provider, which the
+ * owner named freely.
+ */
+export function registerEnvSecrets(env: Record<string, string | undefined> = Bun.env): void {
+  const customKeys = loadCustomProviders(env).map((provider) => provider.envKey);
+  registerSecretsFromEnv(secretEnvNames(env, [...providerKeyEnvNames(), ...customKeys]), env);
+}
+
 export function startServer(config: Config, db: Database, router: Router, startedAt = Date.now()): RunningServer {
+  // Wherever the server logs, sends or stores text, the secrets in its environment are masked.
+  registerEnvSecrets(Bun.env);
   const frameLog = new FrameLog(config.frameLogCapacity, (seq) => writeMeta(db, "seq", String(seq)));
   // A fresh database has no persisted counter and starts at 1. After a clean stop the
   // counter is exact (the stop left a marker equal to it), so resume from it and
@@ -124,7 +140,25 @@ export function startServer(config: Config, db: Database, router: Router, starte
     timeZone: config.timeZone,
   });
 
+  // A secret can be split across streamed `token` frames; a short tail that could be the start of one waits for the next piece.
+  const tokenStreams = new StreamRedactor();
+
   const emit = (body: ServerFrameBody): ServerFrame => {
+    if (body.type === "token") {
+      // A reset clears the client's text for this step, so what was held with it is dropped too.
+      if (body.reset) tokenStreams.drop(body.turnID);
+      const delta = tokenStreams.push(body.turnID, body.delta);
+      if (delta.length === 0 && !body.reset) return { ...body, seq: frameLog.seq } as ServerFrame;
+      body = { ...body, delta };
+    } else if (body.type === "turn.end") {
+      // The stream is over: send what was held, before the frame that ends the turn.
+      const tail = tokenStreams.flush(body.turnID);
+      if (tail) sendToSessions({ type: "token", turnID: body.turnID, threadID: body.threadID, delta: tail });
+    }
+    return sendToSessions(body);
+  };
+
+  const sendToSessions = (body: ServerFrameBody): ServerFrame => {
     const frame = frameLog.next(body);
     const connected = new Set<string>();
     for (const [socket, session] of sessions) {
@@ -133,7 +167,7 @@ export function startServer(config: Config, db: Database, router: Router, starte
       if (session.device) connected.add(session.device.id);
     }
     // A closed app is reached by Web Push; a device with a live socket already saw it.
-    if (body.type === "notify") void push.notify(body, connected).catch((error) => log.warn("push notify failed", error));
+    if (body.type === "notify") void push.notify(redactFrameBody(body), connected).catch((error) => log.warn("push notify failed", error));
     return frame;
   };
 
@@ -141,7 +175,12 @@ export function startServer(config: Config, db: Database, router: Router, starte
   // devices among its open sessions and closes them.
   const revocationSweep = setInterval(() => {
     for (const [socket, session] of sessions) {
-      if (!session.authed || !session.device || !isDeviceRevoked(db, session.device.id)) continue;
+      if (!session.authed || !session.device) continue;
+      if (!isDeviceRevoked(db, session.device.id)) {
+        // An open socket is use: it keeps the device inside the idle limit (at most one write an hour).
+        touchDevice(db, session.device.id);
+        continue;
+      }
       session.authed = false;
       socket.close(4003, "revoked");
     }
@@ -182,6 +221,9 @@ export function startServer(config: Config, db: Database, router: Router, starte
   // Expired exports are deleted at boot (an in-memory test database has no real share directory).
   if (config.dbPath !== ":memory:") purgeExpiredShares();
 
+  const pairLimiter = createPairLimiter();
+  const frameBuckets = new WeakMap<Bun.ServerWebSocket<Session>, FrameBucket>();
+
   const server = Bun.serve<Session>({
     hostname: config.host,
     port: config.port,
@@ -194,6 +236,10 @@ export function startServer(config: Config, db: Database, router: Router, starte
         return new Response("forbidden host", { status: 403 });
       }
       const url = new URL(request.url);
+      // Every route that serves the owner's data needs a paired device, decided here
+      // once (auth/route-access.ts), so a handler that forgets its own check is still behind it.
+      const denied = await gateDevice(request, db, policy);
+      if (denied) return denied;
       if (url.pathname === "/attachments" || url.pathname.startsWith("/attachments/")) {
         return attachmentRequest(request, db, config.dbPath, router, policy);
       }
@@ -204,18 +250,23 @@ export function startServer(config: Config, db: Database, router: Router, starte
         return debugRequest(request, db, router, config, policy);
       }
       if (url.pathname === "/health") {
-        if (request.method === "OPTIONS") {
-          return new Response(null, { status: 204, headers: HEALTH_CORS });
+        const foreign = policy.rejectForeignOrigin(request);
+        if (foreign) return foreign;
+        if (request.method !== "GET" && request.method !== "HEAD") {
+          return new Response("method not allowed", { status: 405, headers: { allow: "GET, HEAD", "x-content-type-options": "nosniff" } });
         }
         // Only a paired device (cookie or bearer token) gets providers, usage and capacity.
-        const credential = requestToken(request);
-        const paired = credential ? await verifyToken(db, credential) : null;
+        const paired = await requestDevice(request, db);
         return Response.json(paired ? healthReport(db, router, frameLog.seq, startedAt) : liveness(startedAt), {
-          headers: { ...HEALTH_CORS, "cache-control": "no-store" },
+          headers: { "cache-control": "no-store", "x-content-type-options": "nosniff" },
         });
       }
       if (url.pathname.startsWith("/auth/")) {
-        return authRequest(request, db, policy.originAllowed);
+        return authRequest(request, db, policy.originAllowed, {
+          clientKey: clientAddress(srv.requestIP(request)?.address, request.headers.get("x-forwarded-for"), Bun.env.AGNI_TRUST_PROXY === "1"),
+          pairLimiter,
+          publicOrigin: config.publicOrigin,
+        });
       }
       if (url.pathname === "/oauth/callback") {
         return handleOAuthCallback(plugins, url);
@@ -251,14 +302,24 @@ export function startServer(config: Config, db: Database, router: Router, starte
       return new Response("not found", { status: 404 });
     },
     websocket: {
+      maxPayloadLength: MAX_FRAME_BYTES,
       open(socket) {
         sessions.set(socket, socket.data);
+        frameBuckets.set(socket, new FrameBucket());
         socket.data.helloTimer = setTimeout(() => {
           if (!socket.data.authed) socket.close(4001, "hello timeout");
         }, config.helloTimeoutMs);
         log.debug(`connection ${socket.data.id} opened (${sessions.size} open)`);
       },
       async message(socket, message) {
+        // Frames still queued behind a close we already sent are not worth a second look.
+        if (socket.readyState !== 1) return;
+        // Counted before anything is decoded, so a flood of junk costs the server nothing but this check.
+        if (frameBuckets.get(socket)?.take() === false) {
+          log.warn(`connection ${socket.data.id} closed: over the frame rate`);
+          socket.close(RATE_LIMIT_CLOSE_CODE, RATE_LIMIT_CLOSE_REASON);
+          return;
+        }
         if (typeof message !== "string") return;
         const session = socket.data;
         try {
@@ -317,6 +378,7 @@ export function startServer(config: Config, db: Database, router: Router, starte
   if (resumed > 0) log.warn(`resumed ${resumed} owner message(s) a previous process left queued`);
 
   return {
+    hostname: server.hostname ?? config.host,
     port: server.port ?? config.port,
     url: `ws://${config.host}:${server.port ?? config.port}/ws`,
     plugins,
@@ -328,6 +390,7 @@ export function startServer(config: Config, db: Database, router: Router, starte
       markServerStopping(db);
       cancelAllTurns();
       sessions.clear();
+      tokenStreams.clear();
       chatgpt.stop();
       server.stop(true);
       frameLog.flush();
@@ -352,7 +415,13 @@ export function startServer(config: Config, db: Database, router: Router, starte
  */
 function sendIfOpen(socket: Bun.ServerWebSocket<Session>, frame: ServerFrame): void {
   if (socket.readyState !== 1) return;
-  socket.send(encodeFrame(frame));
+  // The one place a frame leaves for a client, live or replayed: mask registered secrets in the wire text.
+  socket.send(redact(encodeFrame(frame)));
+}
+
+/** A frame body with registered secrets masked, for the paths that do not go through `sendIfOpen` (Web Push). */
+function redactFrameBody<T extends ServerFrameBody>(body: T): T {
+  return JSON.parse(redact(JSON.stringify(body))) as T;
 }
 
 const REVOCATION_SWEEP_MS = 2_000;

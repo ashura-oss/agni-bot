@@ -29,9 +29,9 @@ describe("formatting", () => {
 
   test("server addresses are accepted in the forms people type", () => {
     expect(websocketURL({ url: "127.0.0.1:8787" })).toBe("ws://127.0.0.1:8787/ws");
-    expect(websocketURL({ url: "http://100.64.1.7:8787" })).toBe("ws://100.64.1.7:8787/ws");
+    expect(websocketURL({ url: "http://localhost:8787" })).toBe("ws://localhost:8787/ws");
     expect(websocketURL({ url: "wss://agni.example/ws" })).toBe("wss://agni.example/ws");
-    expect(websocketURL({ url: "100.64.1.7" })).toBe("ws://100.64.1.7:8787/ws");
+    expect(websocketURL({ url: "100.64.1.7" })).toBe("wss://100.64.1.7:8787/ws");
     expect(websocketURL({ url: "" })).toBeNull();
     expect(healthURL({ url: "127.0.0.1:8787" })).toBe("http://127.0.0.1:8787/health");
   });
