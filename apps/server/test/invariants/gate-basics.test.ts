@@ -115,7 +115,8 @@ describe("INV-13 a long command's card shows all of it, and one too long to show
     const whole = await playTurn(s, a, "run the short command");
     expect(long.cards.length).toBe(1);
     expect(whole.cards.length).toBe(1);
-    expect(long.cards[0]!.preview, "a long card hid part of the command").toContain(`${LONG}${marker}`.slice(-4_900));
+    // The whole command, in the quoted form the card shows model-written text in (a single line here): not its last few thousand characters.
+    expect(long.cards[0]!.preview, "a long card hid part of the command").toContain(`> ${LONG}${marker}`);
     expect(long.cards[0]!.raw.truncated ?? false, "a card that shows everything said it was cut").toBe(false);
     expect(whole.cards[0]!.raw.truncated ?? false, "a whole card claimed to be cut").toBe(false);
 
