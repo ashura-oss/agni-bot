@@ -143,7 +143,8 @@ describe("agni daemon status in vault mode (real child processes)", () => {
     await Bun.write(join(home, "config.env"), `AGNI_HOST=127.0.0.1\nAGNI_TOKEN=${TOKEN}\n`);
     const daemon = stubDaemon();
     try {
-      const migrated = await agni(home, daemon.port, ["vault", "migrate"]);
+      // Not on the stub's port: migrate refuses while anything answers /health there (a server would hold the files open).
+      const migrated = await agni(home, 1, ["vault", "migrate"]);
       expect(migrated.code).toBe(0);
       expect(migrated.out).toContain("config-env: 1 moved");
 
