@@ -226,8 +226,14 @@ export function childEnv(kind: ChildKind, options: ChildEnvOptions = {}): Record
   for (const [name, value] of Object.entries(source)) {
     if (value === undefined || name.toLowerCase() === "path") continue;
     if (!isAllowed(kind, name)) continue;
-    // A command the model wrote may print its environment: it gets the proxy's address, not the password in it.
-    env[name] = kind === "shell" && PROXY_VARIABLE.test(name) ? stripProxyUserinfo(value) : value;
+    // A command the model wrote may print its environment: it gets the proxy's address, not the password in it, or no proxy variable
+    // at all when the address cannot be split with certainty (`stripProxyUserinfo` returns null).
+    if (kind === "shell" && PROXY_VARIABLE.test(name)) {
+      const safe = stripProxyUserinfo(value);
+      if (safe !== null) env[name] = safe;
+      continue;
+    }
+    env[name] = value;
   }
   if (kind === "daemon") {
     const inherited = inheritedPath(source, platform === "win32");
