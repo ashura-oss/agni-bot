@@ -9,7 +9,7 @@
  * values is full the size of the registry must not move. File mode and vault mode both.
  * Throwaway homes, in-memory keystore.
  */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setSystemTime, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -85,8 +85,13 @@ describe.each(MODES)("%s", (_name, enter, rounds) => {
     savePluginsFile(path, emptyPluginsFile());
     expect(redact("gone-with-the-plugin-1234")).toBe("[redacted]");
     // A password has no expiry: only the queue's age lets it go, so it is still masked a day later.
-    releaseExpiredSecrets(Date.now() + 24 * 3_600_000);
-    expect(redact("gone-with-the-plugin-1234")).toBe("[redacted]");
+    setSystemTime(new Date(Date.now() + 24 * 3_600_000));
+    try {
+      releaseExpiredSecrets();
+      expect(redact("gone-with-the-plugin-1234")).toBe("[redacted]");
+    } finally {
+      setSystemTime();
+    }
   });
 
   test("plugin connections: refreshed token blobs (1,000 in file mode) keep the registry the same size once the queue is full", async () => {

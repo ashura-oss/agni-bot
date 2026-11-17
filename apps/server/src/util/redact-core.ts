@@ -370,8 +370,13 @@ export function forgetSecretSlots(prefix: string, keep: ReadonlySet<string> = ne
   for (const slot of [...slots.keys()]) if (slot.startsWith(prefix) && !keep.has(slot)) rememberSecretsAt(slot);
 }
 
-/** Release the queued values whose expiry is at or before `now`. A value a slot holds live is never released here. */
-export function releaseExpiredSecrets(now: number = Date.now()): void {
+/**
+ * Release the queued values whose expiry has passed. A value a slot holds live is never released here. It reads the clock
+ * itself and takes no time argument: a caller that could name a future time could unmask tokens that still work (tests move
+ * the clock with `setSystemTime`).
+ */
+export function releaseExpiredSecrets(): void {
+  const now = Date.now();
   nextExpiry = Infinity;
   for (const [name, slot] of [...slots]) {
     const due = (entry: Queued): boolean => entry.until !== undefined && entry.until <= now;

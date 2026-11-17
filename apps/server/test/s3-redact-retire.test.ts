@@ -7,7 +7,7 @@
  * only by age: oldest first once more than RETIRED_PER_SLOT pile up in the slot, or RETIRED_MAX
  * across all slots.
  */
-import { describe, expect, setSystemTime, test } from "bun:test";
+import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
 import {
   RETIRED_MAX,
   RETIRED_PER_SLOT,
@@ -21,6 +21,8 @@ import {
 
 const masked = (value: string): boolean => redact(`before ${value} after`) === "before [redacted] after";
 const HOUR = 3_600_000;
+
+afterEach(() => setSystemTime());
 
 describe("a replaced secret stays masked", () => {
   test("a replaced access and refresh token are both still masked, next to the new ones", () => {
@@ -80,11 +82,12 @@ describe("a replaced secret is let go at its expiry", () => {
     }
   });
 
-  test("releaseExpiredSecrets releases what has expired by the given time, and no more", () => {
+  test("releaseExpiredSecrets releases what has expired by now, and no more", () => {
     const now = Date.now();
     rememberSecretsAt("conn", { value: "access-token-one-aaaa", expiresAt: now + HOUR }, "refresh-token-one-aaaa");
     rememberSecretsAt("conn");
-    releaseExpiredSecrets(now + 2 * HOUR);
+    setSystemTime(new Date(now + 2 * HOUR));
+    releaseExpiredSecrets();
     expect(masked("access-token-one-aaaa")).toBe(false);
     expect(masked("refresh-token-one-aaaa")).toBe(true); // no known expiry
   });
@@ -92,7 +95,8 @@ describe("a replaced secret is let go at its expiry", () => {
   test("a live value is never released by its expiry", () => {
     const now = Date.now();
     rememberSecretsAt("conn", { value: "access-token-one-aaaa", expiresAt: now + HOUR });
-    releaseExpiredSecrets(now + 2 * HOUR);
+    setSystemTime(new Date(now + 2 * HOUR));
+    releaseExpiredSecrets();
     expect(masked("access-token-one-aaaa")).toBe(true);
   });
 });
@@ -180,7 +184,8 @@ describe("staging a value before the save that will hold it", () => {
   test("a staged value that was never settled is let go like any queued one", () => {
     rememberSecretsAt("conn", "access-token-one-aaaa");
     stageSecretsAt("conn", { value: "access-token-two-bbbb", expiresAt: Date.now() + HOUR });
-    releaseExpiredSecrets(Date.now() + 2 * HOUR);
+    setSystemTime(new Date(Date.now() + 2 * HOUR));
+    releaseExpiredSecrets();
     expect(masked("access-token-two-bbbb")).toBe(false);
     expect(masked("access-token-one-aaaa")).toBe(true);
   });
