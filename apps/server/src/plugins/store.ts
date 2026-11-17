@@ -17,6 +17,7 @@ import { entryName, vaultForReads, vaultForWrites } from "../credentials/vault-m
 import { VaultError } from "../secrets/types";
 import { newID, nowISO } from "../util/ids";
 import { rememberSecretsAt, stageSecretsAt, type SlotSecret } from "../util/redact";
+import { redactForStorage } from "../util/redact-storage";
 
 export interface PluginConnectionRow {
   id: string;
@@ -192,8 +193,12 @@ export function updateTokens(db: Database, id: string, tokens: TokenBlob): void 
   rememberSecretsAt(tokenSlot(id), ...tokenSecrets(tokens)); // after the write, like `completeConnect`
 }
 
+/**
+ * Record why a connection failed. The text is the server's own answer or an exception built from it, so it is
+ * masked before it is stored: a server that echoes the bearer in its 500 page must not leave it in the row.
+ */
 export function markError(db: Database, id: string, error: string): void {
-  db.run("UPDATE plugin_connections SET status = 'error', error = ?, updated_at = ? WHERE id = ?", [error, nowISO(), id]);
+  db.run("UPDATE plugin_connections SET status = 'error', error = ?, updated_at = ? WHERE id = ?", [redactForStorage(error), nowISO(), id]);
 }
 
 /** Drop the row entirely, and its vault entry; a disconnected plugin falls back to its catalog row. */
