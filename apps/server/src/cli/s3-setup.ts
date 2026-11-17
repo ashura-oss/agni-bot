@@ -40,18 +40,30 @@ export interface ChooseOptions {
 
 const MIGRATE = "`agni vault migrate`";
 
+/**
+ * The headless way, in the order it is done: the file named by `AGNI_VAULT_PASSPHRASE_FILE` is what `agni setup`,
+ * `agni vault migrate` and `agni service install` read; `service install` then hands that file to the service as a
+ * systemd credential, which is where the server reads it.
+ */
+const PASSPHRASE_STEPS =
+  "put it in a file only you can read and set AGNI_VAULT_PASSPHRASE_FILE to that file for setup, migrate and service install " +
+  "(service install passes it to the service as LoadCredential=agni-vault-passphrase:<file>)";
+
 /** The first sentence of a keystore error, without its closing full stop. */
 function reasonOf(error: VaultError): string {
-  const first = error.message.split(/(?<=\.)\s/)[0] ?? error.message;
+  // The text comes from the operating system. A line break in it would end the `# ...` note in config.env and let the
+  // rest of the message become a setting, so every CR and LF is a space before anything is split or kept.
+  const text = error.message.replace(/[\r\n]+/g, " ");
+  const first = text.split(/(?<=\.)\s/)[0] ?? text;
   return first.replace(/\.$/, "").slice(0, 240);
 }
 
 function howToEnable(code: VaultError["code"], platform: NodeJS.Platform): string {
   if (code === "PASSPHRASE_MISSING") {
-    return "give the vault a passphrase (a systemd credential, LoadCredential=agni-vault-passphrase:<file>, or AGNI_VAULT_PASSPHRASE_FILE)";
+    return `give the vault a passphrase: ${PASSPHRASE_STEPS}`;
   }
   if (platform === "linux") {
-    return "start a desktop keyring (a Secret Service), or on a headless server give the vault a passphrase with a systemd credential (LoadCredential=agni-vault-passphrase:<file>)";
+    return `start a desktop keyring (a Secret Service), or on a headless server give the vault a passphrase: ${PASSPHRASE_STEPS}`;
   }
   if (platform === "darwin") return "unlock the login keychain and allow Agni to use it";
   return "make sure Windows Credential Manager is available to this account";

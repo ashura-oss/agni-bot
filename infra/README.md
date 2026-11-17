@@ -30,8 +30,10 @@ A fresh install keeps credentials in an encrypted vault (`$AGNI_HOME/vault.bin`)
 OS credential store. `agni setup` (the installer runs `agni setup --prepare-only`) chooses and records
 the mode in `config.env` as `AGNI_SECRETS_MODE`. If the machine has no usable keystore, it says why and
 uses file mode with an owner-only `config.env` instead. A home that already has a mode or data keeps it;
-`agni vault migrate` moves it to the vault. On a headless Linux server give the vault a passphrase with
-`LoadCredential=agni-vault-passphrase:<file>` in the service unit (or `AGNI_VAULT_PASSPHRASE_FILE`).
+`agni vault migrate` moves it to the vault. On a headless Linux server give the vault a passphrase: put it in a
+file only you can read and set `AGNI_VAULT_PASSPHRASE_FILE` to that file for `agni setup`, `agni vault migrate`
+and `agni service install`; `service install` passes the file to the service as
+`LoadCredential=agni-vault-passphrase:<file>` in the systemd unit.
 `agni doctor` shows the active mode and keystore. A service in vault mode whose keystore is gone refuses
 to start; it never falls back to plaintext.
 

@@ -138,6 +138,41 @@ describe("chooseSecretsMode: a fresh home", () => {
     expect(isOwnerOnlyFile(join(home, "config.env"))).toBe(true);
   });
 
+  test("an error text with line breaks stays one comment line in config.env and cannot add a setting", async () => {
+    const home = fresh();
+    const hostile = new VaultError(
+      "KEYSTORE_UNAVAILABLE",
+      "the store said: no\r\nGROQ_API_KEY=gsk_injected_value_long_enough_123\nAGNI_PORT=1\rAGNI_SECRETS_MODE=vault",
+    );
+    const broken: KeyStore = { kind: "bun-secrets", open: async () => { throw hostile; }, create: async () => { throw hostile; }, remove: async () => {} };
+    const result = await chooseSecretsMode({ home, env: {}, keystore: broken, platform: "linux", now: new Date("2026-11-17T10:00:00Z") });
+    const lines = configOf(home).split(/\r\n|\r|\n/);
+    expect(lines.filter((line) => line.startsWith("GROQ_API_KEY")).length).toBe(0);
+    expect(lines.filter((line) => line.startsWith("AGNI_PORT=1")).length).toBe(0);
+    expect(lines.filter((line) => line.startsWith("AGNI_SECRETS_MODE")).length).toBe(1);
+    expect(lines.filter((line) => line.startsWith("AGNI_SECRETS_MODE"))[0]).toBe("AGNI_SECRETS_MODE=file");
+    expect(configOf(home)).toContain("the store said: no");
+    expect(result.message).not.toMatch(/[\r\n]GROQ_API_KEY/);
+    expect(result.message).not.toContain("\r");
+  });
+
+  test("the headless hint leads with AGNI_VAULT_PASSPHRASE_FILE (the step setup, migrate and service install all use), then the service credential", async () => {
+    for (const keystore of [unavailableKeyStore(), {
+      kind: "passphrase" as const,
+      open: async () => { throw new VaultError("PASSPHRASE_MISSING", "The vault needs a passphrase to unlock and none was provided."); },
+      create: async () => { throw new VaultError("PASSPHRASE_MISSING", "The vault needs a passphrase to unlock and none was provided."); },
+      remove: async () => {},
+    }]) {
+      const home = fresh();
+      const result = await chooseSecretsMode({ home, env: {}, keystore, platform: "linux" });
+      const file = result.message.indexOf("AGNI_VAULT_PASSPHRASE_FILE");
+      const credential = result.message.indexOf("LoadCredential=");
+      expect(file).toBeGreaterThan(-1);
+      expect(credential).toBeGreaterThan(file);
+      expect(configOf(home)).toContain("AGNI_VAULT_PASSPHRASE_FILE");
+    }
+  });
+
   test("a missing passphrase counts as no keystore", async () => {
     const home = fresh();
     const missing: KeyStore = {
@@ -378,9 +413,32 @@ describe("agni doctor", () => {
     expect(text(report.lines)).toMatch(/secrets mode:\s+file \(no mode recorded/);
   });
 
-  test("the command is registered, listed in help, and sets a failing exit code when the report is not ok", async () => {
+  test("the command is registered and listed in help", () => {
     expect(Object.keys(s3Commands.commands)).toContain("doctor");
     expect(s3Commands.help.join("\n")).toContain("doctor");
+  });
+
+  test("the registered command sets a failing exit code when the report is not ok, and leaves it alone when it is", async () => {
+    const saved = { home: process.env.AGNI_HOME, mode: process.env.AGNI_SECRETS_MODE, log: console.log };
+    const home = fresh();
+    const printed: string[] = [];
+    console.log = (...args: unknown[]) => { printed.push(args.join(" ")); };
+    try {
+      process.env.AGNI_HOME = home;
+      process.env.AGNI_SECRETS_MODE = "vault";
+      setKeyStoreOverride(unavailableKeyStore());
+      await s3Commands.commands.doctor!([]);
+      expect(printed.join("\n")).toContain("error: vault mode is active but the keystore is not available");
+      expect(process.exitCode).toBe(1);
+      process.exitCode = 0;
+      setKeyStoreOverride(createMemoryKeyStore());
+      await s3Commands.commands.doctor!([]);
+      expect(process.exitCode).toBe(0);
+    } finally {
+      console.log = saved.log;
+      if (saved.home === undefined) delete process.env.AGNI_HOME; else process.env.AGNI_HOME = saved.home;
+      if (saved.mode === undefined) delete process.env.AGNI_SECRETS_MODE; else process.env.AGNI_SECRETS_MODE = saved.mode;
+    }
   });
 });
 

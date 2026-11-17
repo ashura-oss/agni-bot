@@ -368,8 +368,11 @@ Keychain, or a Linux Secret Service. `config.env` then holds only settings, and
   *file mode*: credentials stay in `config.env`, readable only by you (mode 600,
   or an owner-only ACL on Windows). It records `AGNI_SECRETS_MODE=file` and the
   reason, so nothing is downgraded silently. On a headless Linux server you can
-  give the vault a passphrase instead, with a systemd credential
-  (`LoadCredential=agni-vault-passphrase:<file>`) or `AGNI_VAULT_PASSPHRASE_FILE`.
+  give the vault a passphrase instead: put it in a file only you can read and
+  set `AGNI_VAULT_PASSPHRASE_FILE` to that file when you run `agni setup`,
+  `agni vault migrate` and `agni service install`. `service install` then hands
+  the file to the service as a systemd credential
+  (`LoadCredential=agni-vault-passphrase:<file>` in the unit it writes).
 - **Existing installs keep their mode.** A home made before the vault, or one
   with data or credentials in `config.env`, stays in file mode until you run
   `agni vault migrate`. Nothing is moved on its own.
