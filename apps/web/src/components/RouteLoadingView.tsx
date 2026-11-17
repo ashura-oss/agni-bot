@@ -11,6 +11,8 @@ export function RouteLoadingView({ onToggleSidebar }: { onToggleSidebar?: () => 
   const model = useAppModel();
   // Not connected yet, the roster cannot come: say what is being waited for.
   const connected = useAppSnapshot().connectionState.kind === "ready";
+  // The visible words are the accessible name too (a status region takes no name from its content).
+  const text = connected ? "Loading…" : "Waiting for the daemon…";
   return (
     <main className="chat-main route-state" aria-busy="true">
       <header className="route-state-bar">
@@ -25,7 +27,7 @@ export function RouteLoadingView({ onToggleSidebar }: { onToggleSidebar?: () => 
       </header>
       <ConnectionBanner />
       <div className="route-state-body">
-        <p role="status" aria-label="Loading" className="route-state-loading">{connected ? "Loading…" : "Waiting for the daemon…"}</p>
+        <p role="status" aria-label={text} className="route-state-loading">{text}</p>
       </div>
     </main>
   );

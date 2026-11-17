@@ -59,10 +59,10 @@ describe("a stale session (resync_gap)", () => {
   it("shows loading, never the default bot's thread, until the roster has arrived", () => {
     const { model } = openAt("/agent/scout");
     show(model);
-    expect(screen.getByRole("status", { name: /loading/i })).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: /loading|waiting for the daemon/i })).toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: /message/i })).not.toBeInTheDocument();
     frame(model, rosterFrame);
-    expect(screen.queryByRole("status", { name: /loading/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: /loading|waiting for the daemon/i })).not.toBeInTheDocument();
     expect(model.getSnapshot().conversation.agentID).toBe("scout");
     expect(screen.getByRole("textbox", { name: /message scout/i })).toBeInTheDocument();
     expect(document.title).toBe("Scout");
@@ -73,11 +73,11 @@ describe("a stale session (resync_gap)", () => {
     show(model);
     event(model, { type: "durableReloadRequired", restarted: false });
     frame(model, { type: "error", seq: 95, code: "resync_gap", message: "cannot replay from 3" });
-    expect(screen.getByRole("status", { name: /loading/i })).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: /loading|waiting for the daemon/i })).toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: /message/i })).not.toBeInTheDocument();
 
     frame(model, { ...rosterFrame, seq: 96 });
-    expect(screen.queryByRole("status", { name: /loading/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: /loading|waiting for the daemon/i })).not.toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: /message scout/i })).toBeInTheDocument();
   });
 
@@ -91,7 +91,7 @@ describe("a stale session (resync_gap)", () => {
 
     event(model, { type: "durableReloadRequired", restarted: false });
     frame(model, { type: "error", seq: 95, code: "resync_gap", message: "cannot replay from 3" });
-    expect(screen.queryByRole("status", { name: /loading/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("status", { name: /loading|waiting for the daemon/i })).not.toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: /message scout/i })).toBeInTheDocument();
     expect(model.getSnapshot().conversation.agentID).toBe("scout");
     expect(document.title).toBe("Scout");
@@ -102,13 +102,14 @@ describe("a stale session (resync_gap)", () => {
     (model as unknown as { connectionState: unknown; publish: () => void }).connectionState = { kind: "connecting" };
     act(() => (model as unknown as { publish: () => void }).publish());
     show(model);
-    expect(screen.getByRole("status", { name: /loading/i })).toHaveTextContent("Waiting for the daemon…");
+    // The accessible name is the visible text: no aria-label that says something else.
+    expect(screen.getByRole("status", { name: "Waiting for the daemon…" })).toBeInTheDocument();
     // Connected, the roster is what it waits for.
     act(() => {
       (model as unknown as { connectionState: unknown }).connectionState = { kind: "ready", lastSeq: 0 };
       (model as unknown as { publish: () => void }).publish();
     });
-    expect(screen.getByRole("status", { name: /loading/i })).toHaveTextContent("Loading…");
+    expect(screen.getByRole("status", { name: "Loading…" })).toBeInTheDocument();
   });
 
   it("calls an unknown bot not found once the roster is known, with no default thread", () => {
