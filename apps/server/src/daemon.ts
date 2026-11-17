@@ -19,6 +19,10 @@ import { type HealthReport, type Liveness } from "./ws/server";
 import { formatDuration } from "./util/time";
 import { log } from "./log";
 import { restrictToOwnerOnWindows } from "./util/windows-acl";
+import { isProcessAlive } from "./util/process-alive";
+import { removeServeLockOf } from "./startup/s3-serve-lock";
+
+export { isProcessAlive };
 
 export interface PidInfo {
   pid: number;
@@ -101,16 +105,6 @@ export function removePidFile(path: string): void {
     unlinkSync(path);
   } catch {
     // Already gone — the only outcome we wanted.
-  }
-}
-
-/** True when the pid exists and signals can be delivered to it. */
-export function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
   }
 }
 
@@ -243,13 +237,31 @@ export async function startDaemon(config: Config, options: StartOptions = {}): P
 export interface StopOptions {
   /** How long SIGTERM gets before SIGKILL. */
   timeoutMs?: number;
+  /** The home whose `serve.lock` goes with the process (default: AGNI_HOME). */
+  home?: string;
+}
+
+/**
+ * The process is gone: take its serve lock with it. A graceful exit removes the lock itself, but on Windows `daemon stop`
+ * ends the process outright and a SIGKILL runs no exit handler, so the lock would stay and block `serve` once the pid is
+ * reused. Only a lock that names this pid is removed: a newer server's is not ours to touch.
+ */
+function releaseServeLockOf(pid: number, options: StopOptions): void {
+  try {
+    removeServeLockOf(pid, options.home === undefined ? {} : { home: options.home });
+  } catch {
+    // Not removable: the message `serve` prints says how to delete it by hand.
+  }
 }
 
 export async function stopDaemon(config: Config, options: StopOptions = {}): Promise<StopOutcome> {
   const pidPath = pidFilePath(config);
   const info = readPidFile(pidPath);
   if (!info || !isProcessAlive(info.pid)) {
-    if (info) removePidFile(pidPath);
+    if (info) {
+      removePidFile(pidPath);
+      releaseServeLockOf(info.pid, options);
+    }
     return { ok: true, message: "not running" };
   }
 
@@ -265,6 +277,7 @@ export async function stopDaemon(config: Config, options: StopOptions = {}): Pro
   while (Date.now() < deadline) {
     if (!isProcessAlive(info.pid)) {
       removePidFile(pidPath);
+      releaseServeLockOf(info.pid, options);
       return { ok: true, pid: info.pid, message: `stopped (pid ${info.pid})` };
     }
     await Bun.sleep(100);
@@ -277,7 +290,10 @@ export async function stopDaemon(config: Config, options: StopOptions = {}): Pro
   }
   await Bun.sleep(200);
   const alive = isProcessAlive(info.pid);
-  if (!alive) removePidFile(pidPath);
+  if (!alive) {
+    removePidFile(pidPath);
+    releaseServeLockOf(info.pid, options);
+  }
   return {
     ok: !alive,
     pid: info.pid,
