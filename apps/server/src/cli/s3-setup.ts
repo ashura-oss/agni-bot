@@ -95,7 +95,7 @@ export async function chooseSecretsMode(options: ChooseOptions): Promise<Secrets
       mode: "file",
       reason: "existing",
       message:
-        "secrets mode: file\n  This install was made before the vault became the default, so it keeps file mode and its credentials stay in config.env. " +
+        "secrets mode: file\n  This home already holds data or credentials and has no mode recorded, so it stays in file mode and its credentials stay in config.env. " +
         `Run ${MIGRATE} to encrypt them.`,
     };
   }

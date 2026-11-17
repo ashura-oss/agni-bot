@@ -33,7 +33,7 @@ Install and run as a login service (macOS launchd, Linux systemd --user):
 
 ```sh
 npm i -g agni-bot           # or: bun add -g agni-bot  (needs Bun 1.3+)
-agni setup                  # ~/.agni, login service, opens the browser already paired
+agni setup                  # ~/.agni, secrets vault, login service, opens the browser already paired
 ```
 
 Or with the install script (clones the repo into `~/.agni/app`):
@@ -46,8 +46,9 @@ agni service status
 ```
 
 The installer installs deps, builds the web app, writes `~/.agni/config.env`,
+chooses where secrets are kept (see [Where secrets are kept](#where-secrets-are-kept)),
 installs the `agni` command, and registers the service. Manage it with
-`agni service install|uninstall|status`.
+`agni service install|uninstall|status`. `agni doctor` shows how secrets are stored.
 
 Dev flow from a checkout:
 
@@ -118,7 +119,8 @@ disconnect. Disconnecting returns routing to your other configured providers.
 Your ChatGPT conversations and memories are not imported.
 
 The daemon owns OAuth, token renewal, and Responses streaming. Registration and
-tokens live in `~/.agni/data/chatgpt/accounts.json` beside the configured database, with
+tokens live in the encrypted vault on a fresh install. In file mode they live in
+`~/.agni/data/chatgpt/accounts.json` beside the configured database, with
 owner-only Unix permissions or a restricted Windows ACL. Browser storage, frame
 replay, and model prompts never receive those credentials. Remote sign-out is
 attempted before the disconnect completes; a warning explains when revocation
@@ -350,7 +352,36 @@ Configuration lives in `~/.agni/config.env` (mode 600), written by the installer
 A repo-root `.env` still works in dev and wins over it. See
 [`infra/env.example`](infra/env.example) for the full list — providers are enabled
 by the presence of their key, everything else has a working default. API keys
-added in the web UI are written to `~/.agni/config.env`.
+added in the web UI go into the encrypted vault on a fresh install, and into
+`~/.agni/config.env` in file mode (below).
+
+### Where secrets are kept
+
+A fresh install keeps provider keys, plugin tokens and other credentials in an
+encrypted vault, `~/.agni/vault.bin` (AES-256-GCM). Its key is held by the
+operating system's credential store: Windows Credential Manager, the macOS
+Keychain, or a Linux Secret Service. `config.env` then holds only settings, and
+`AGNI_SECRETS_MODE=vault` is recorded in it by `agni setup`.
+
+- **No usable keystore** (headless Linux with no Secret Service, no Credential
+  Manager): `agni setup` says why and how to enable the vault later, then uses
+  *file mode*: credentials stay in `config.env`, readable only by you (mode 600,
+  or an owner-only ACL on Windows). It records `AGNI_SECRETS_MODE=file` and the
+  reason, so nothing is downgraded silently. On a headless Linux server you can
+  give the vault a passphrase instead, with a systemd credential
+  (`LoadCredential=agni-vault-passphrase:<file>`) or `AGNI_VAULT_PASSPHRASE_FILE`.
+- **Existing installs keep their mode.** A home made before the vault, or one
+  with data or credentials in `config.env`, stays in file mode until you run
+  `agni vault migrate`. Nothing is moved on its own.
+- **A vault whose keystore goes away stops the server.** Agni refuses to start
+  and says why; it never falls back to plaintext keys.
+- `agni doctor` shows the active mode, the keystore backend (or why there is
+  none), and warns when file mode is active on a machine where the vault would
+  work. `agni vault status|list|migrate|export` manage the vault; `export --yes`
+  goes back to plaintext.
+- A server you start by hand on a home that never went through `agni setup` (a
+  dev checkout) has no recorded mode and runs in file mode; set
+  `AGNI_SECRETS_MODE=vault` to use the vault there.
 
 Everything lives under `AGNI_HOME` (default `~/.agni`): `config.env`,
 `providers.json`, `plugins.json`, `data/agni.sqlite` (with `backups/`, `share/`,
@@ -359,8 +390,9 @@ Everything lives under `AGNI_HOME` (default `~/.agni`): `config.env`,
 overrides (`AGNI_DB_PATH`, `AGNI_PID_PATH`, `AGNI_LOG_PATH`, `AGNI_PLUGINS_PATH`,
 `AGNI_PROVIDER_CONFIG_PATH`, `AGNI_SCRATCH_DIR`, `AGNI_SHARE_DIR`) still work.
 Model choices changed in the Mac app are stored in `~/.agni/providers.json`
-(mode 600). Provider API keys stay in `config.env`; the JSON file contains model
-IDs only. `AGNI_HOME` itself must be set in the process environment.
+(mode 600). Provider API keys are kept as described under
+[Where secrets are kept](#where-secrets-are-kept) (the vault, or `config.env` in
+file mode); the JSON file contains model IDs only. `AGNI_HOME` itself must be set in the process environment.
 
 ## Phases
 

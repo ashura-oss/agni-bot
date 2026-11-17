@@ -4,7 +4,7 @@ Deployment and operations files for Agni Bot.
 
 - `npm/` - the `agni-bot` npm package: `bun run npm:build` stages it in `dist/npm`, then
   `cd dist/npm && npm publish`. Bump `version` in `npm/package.json` first.
-- `install.sh` - one-shot installer (checkout or clone, `bun install`, web build, config, `agni` wrapper, service).
+- `install.sh` - one-shot installer (checkout or clone, `bun install`, web build, config, secrets mode, `agni` wrapper, service).
 - `env.example` - config template; the installer copies it to `$AGNI_HOME/config.env` (mode 600).
 - `launchd/dev.agni.server.plist`, `systemd/agni.service` - reference copies of what `agni service install`
   writes (paths are placeholders; the real ones are generated in `apps/server/src/service.ts`).
@@ -23,6 +23,17 @@ Or from source:
 
 Or `bash infra/install.sh` from a checkout. Flags: `--no-service`, `--no-open`. Requires bun
 (`curl -fsSL https://bun.sh/install | bash`) and git. State lives in `AGNI_HOME` (default `~/.agni`).
+
+## Secrets
+
+A fresh install keeps credentials in an encrypted vault (`$AGNI_HOME/vault.bin`); its key is in the
+OS credential store. `agni setup` (the installer runs `agni setup --prepare-only`) chooses and records
+the mode in `config.env` as `AGNI_SECRETS_MODE`. If the machine has no usable keystore, it says why and
+uses file mode with an owner-only `config.env` instead. A home that already has a mode or data keeps it;
+`agni vault migrate` moves it to the vault. On a headless Linux server give the vault a passphrase with
+`LoadCredential=agni-vault-passphrase:<file>` in the service unit (or `AGNI_VAULT_PASSPHRASE_FILE`).
+`agni doctor` shows the active mode and keystore. A service in vault mode whose keystore is gone refuses
+to start; it never falls back to plaintext.
 
 ## Service
 
