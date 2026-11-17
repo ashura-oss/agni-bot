@@ -10,6 +10,7 @@ import type { ServerFrameBody } from "@agni/protocol";
 import type { ToolRegistry } from "./registry";
 import { requestSecret } from "../agent/secret-broker";
 import { runBash } from "./bash";
+import { exactString } from "./exact-arg";
 import {
   runPrivilegedWithOSAuth,
   resolveAuthMode,
@@ -50,7 +51,7 @@ export function registerSecureExecTool(registry: ToolRegistry, deps: SecureExecD
     timeoutMs: 180_000,
     handler: async (args, ctx) => {
       const input = (args ?? {}) as Record<string, unknown>;
-      const command = String(input.command ?? "").trim();
+      const command = exactString(input.command, "command");
       const purpose = String(input.purpose ?? "").trim();
       if (!command) throw new Error("command is required");
       if (!purpose) throw new Error("purpose is required");

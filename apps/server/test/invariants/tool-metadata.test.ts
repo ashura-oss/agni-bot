@@ -12,8 +12,11 @@
  * definition carries), read the way the engine reads it: `policyFor(name, tool.meta)`.
  * `metaOf` below is the single place that does it.
  */
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { DEFAULT_AGENT_TOOLS, IMPLICIT_AGENT_TOOLS, PERSONAS } from "../../src/agent/personas";
 import { openDatabase } from "../../src/db";
 import { assessCall, policyFor, toolsMissingMetadata } from "../../src/policy/metadata";
@@ -185,5 +188,86 @@ describe("INV-03 a tool the policy does not know is tier 3; an MCP tool is tier 
     const tool = registry.get("mcp_notes_delete_all")!;
     expect(metaOf(tool as ToolDefinition<never, unknown>), "an MCP tool has no row").not.toBeNull();
     expect(effectiveTier("mcp_notes_delete_all"), "an MCP tool's own claim lowered its tier").toBeGreaterThanOrEqual(2);
+  });
+});
+
+/**
+ * C1 (Sprint 5 hotfix): the gate judges a call's arguments and the handler acts on them, so the two must see the same
+ * thing. For every tool whose row has `assess` or `resources`, an argument padded with whitespace is either refused by the
+ * handler (JUDGED: the value would otherwise be read two ways) or judged exactly as the unpadded one (EQUIVALENT: the
+ * gate's own extractor trims or parses it the way the handler does). A new tool with `assess` or `resources` fails here
+ * until it is put in one of the two lists.
+ */
+describe("INV-03 the gate and the handler read a padded argument the same way", () => {
+  // The handlers below may touch files: they run against a scratch folder of their own, never the owner's.
+  let scratch = "";
+  let savedScratch: string | undefined;
+  beforeEach(() => {
+    scratch = mkdtempSync(join(tmpdir(), "agni-inv03-"));
+    savedScratch = process.env.AGNI_SCRATCH_DIR;
+    process.env.AGNI_SCRATCH_DIR = scratch;
+  });
+  afterEach(() => {
+    if (savedScratch === undefined) delete process.env.AGNI_SCRATCH_DIR;
+    else process.env.AGNI_SCRATCH_DIR = savedScratch;
+    rmSync(scratch, { recursive: true, force: true });
+  });
+  const PADS = [(v: string) => ` ${v}`, (v: string) => `${v} `, (v: string) => `\t${v}`, (v: string) => `${v}\n`];
+  const JUDGED: Record<string, { args: Record<string, unknown>; fields: string[] }> = {
+    write_file: { args: { path: "out.txt", content: "hi" }, fields: ["path"] },
+    read_file: { args: { path: "out.txt" }, fields: ["path"] },
+    grep: { args: { pattern: "x", path: "sub" }, fields: ["path"] },
+    glob: { args: { pattern: "*.md", path: "sub" }, fields: ["path"] },
+    bash: { args: { command: "echo hi", cwd: "sub" }, fields: ["command", "cwd"] },
+    run_privileged: { args: { command: "sudo true", purpose: "test" }, fields: ["command"] },
+  };
+  const EQUIVALENT: Record<string, { args: Record<string, unknown>; fields: string[] }> = {
+    web_fetch: { args: { url: "https://example.com/page" }, fields: ["url"] },
+    link_save: { args: { url: "https://example.com/page" }, fields: ["url"] },
+    mail_send: { args: { to: ["a@example.com"], subject: "s", body: "b" }, fields: ["to"] },
+    calendar_create: { args: { title: "t", start: "2026-11-18T09:00:00Z", attendees: ["a@example.com"] }, fields: ["attendees"] },
+    calendar_update: { args: { eventID: "e1", attendees: ["a@example.com"] }, fields: ["attendees"] },
+    share_thread: { args: {}, fields: [] },
+    job_schedule: { args: { prompt: "p" }, fields: [] },
+    routine_create: { args: { name: "n" }, fields: [] },
+    routine_pause: { args: { routineID: "r", enabled: true }, fields: [] },
+  };
+  const padded = (value: unknown, pad: (v: string) => string): unknown =>
+    Array.isArray(value) ? value.map((item) => pad(String(item))) : pad(String(value));
+
+  test("every tool with assess or resources is in exactly one list, and every listed tool is registered", () => {
+    const tools = everyTool();
+    const judged = tools.filter((tool) => { const row = metaOf(tool) as { assess?: unknown; resources?: unknown } | null; return Boolean(row?.assess || row?.resources); }).map((tool) => tool.name);
+    const unlisted = judged.filter((name) => !(name in JUDGED) && !(name in EQUIVALENT));
+    expect(unlisted, "a tool the gate judges by its arguments is in neither list").toEqual([]);
+    const names = new Set(tools.map((tool) => tool.name));
+    expect([...Object.keys(JUDGED), ...Object.keys(EQUIVALENT)].filter((name) => !names.has(name))).toEqual([]);
+    expect(Object.keys(JUDGED).filter((name) => name in EQUIVALENT)).toEqual([]);
+  });
+
+  test("a JUDGED tool's handler refuses a padded argument", async () => {
+    const byName = new Map(everyTool().map((tool) => [tool.name, tool]));
+    const ctx = { threadID: "t", turnID: "u", signal: new AbortController().signal };
+    for (const [name, { args, fields }] of Object.entries(JUDGED)) {
+      const handler = byName.get(name)!.handler as (args: unknown, ctx: unknown) => Promise<unknown>;
+      for (const field of fields) {
+        for (const pad of PADS) {
+          await expect(handler({ ...args, [field]: padded(args[field], pad) }, ctx), `${name}.${field}`).rejects.toThrow(/must not start or end with spaces or line breaks/);
+        }
+      }
+    }
+  });
+
+  test("an EQUIVALENT tool is judged the same with and without padding", () => {
+    const byName = new Map(everyTool().map((tool) => [tool.name, tool]));
+    for (const [name, { args, fields }] of Object.entries(EQUIVALENT)) {
+      const policy = policyFor(name, byName.get(name)!.meta);
+      const plain = assessCall(policy, args);
+      for (const field of fields) {
+        for (const pad of PADS) {
+          expect(assessCall(policy, { ...args, [field]: padded(args[field], pad) }), `${name}.${field}`).toEqual(plain);
+        }
+      }
+    }
   });
 });
