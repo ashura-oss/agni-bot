@@ -2,8 +2,10 @@
  * Sprint 2, fix round L (E, H): what migration 65 does to the data and the indexes already there.
  *
  *  - E: a job the owner made with `agni job add` before the owner bit existed carries no marker, and now reads as a bot's. The migration
- *    stamps `ownerOnly` on the queued turn jobs that are exactly what a run treats as the owner's (`principalOf`): no `inputRole`, `peer`,
- *    `wakeKey`, `delegationTaskID` and no `scheduledBy`. Nothing a bot made is touched.
+ *    stamps `ownerOnly` on the queued turn jobs that provably have the shape `agni job add` wrote then, and only those. Before upstream #36
+ *    (`cfd778b`) a bot's `job_schedule` wrote neither `inputRole` nor `scheduledBy`, so those fields prove nothing; what separates the two
+ *    is that the tool always wrote an `agentID` and never a `threadID`, and the CLI wrote neither `lane` nor `dailyAt` nor `days`. A job with
+ *    an agent and no thread cannot be told from a bot's, and is left alone (it asks once). Nothing a bot made is touched.
  *  - H: the day cap counts calls whose cost is unknown. A covering index on (created_at, call_kind, cost_usd) lets that count read the index
  *    alone instead of every row of the day.
  */
@@ -36,12 +38,13 @@ const payloadOf = (database: Database, id: string): Record<string, unknown> => J
 describe("migration 65 stamps the owner's own jobs", () => {
   test("a queued turn job with nothing a bot would have put on it is the owner's: its payload says so", () => {
     db = beforeM65();
-    job(db, "job_plain", { text: "Check the inbox", agentID: "ea", notify: true });
+    job(db, "job_plain", { text: "Check the inbox", notify: true });
     job(db, "job_recurring", { text: "Weekly review", notify: false, everyMs: 604_800_000, threadID: "thr_x" });
+    job(db, "job_agent_thread", { text: "Check the inbox", agentID: "ea", threadID: "thr_x", notify: true, everyMs: 3_600_000 });
     db.exec(m65());
-    for (const id of ["job_plain", "job_recurring"]) expect({ id, ownerOnly: payloadOf(db, id).ownerOnly }).toEqual({ id, ownerOnly: true });
+    for (const id of ["job_plain", "job_recurring", "job_agent_thread"]) expect({ id, ownerOnly: payloadOf(db, id).ownerOnly }).toEqual({ id, ownerOnly: true });
     // The rest of the payload is untouched.
-    expect(payloadOf(db, "job_plain")).toEqual({ text: "Check the inbox", agentID: "ea", notify: true, ownerOnly: true });
+    expect(payloadOf(db, "job_plain")).toEqual({ text: "Check the inbox", notify: true, ownerOnly: true });
   });
 
   test("a job that was running when the server stopped is stamped too: it will be queued again", () => {
@@ -65,6 +68,33 @@ describe("migration 65 stamps the owner's own jobs", () => {
     for (const [id, payload] of Object.entries(botMade)) job(db, id, payload);
     db.exec(m65());
     for (const [id, payload] of Object.entries(botMade)) expect({ id, payload: payloadOf(db, id) }).toEqual({ id, payload });
+  });
+
+  test("a bot's job from before upstream #36 is not stamped, in either shape the tool wrote", () => {
+    db = beforeM65();
+    // `job_schedule` before #34 wrote a `lane`; between #34 and #36 it wrote only what the CLI could. Neither wrote an `inputRole` or `scheduledBy`.
+    // It always wrote an `agentID` (its own) and never a `threadID`.
+    const legacyBot: Record<string, Record<string, unknown>> = {
+      bot_lane_daily: { text: "Morning digest", agentID: "ea", lane: "task", notify: true, dailyAt: "09:00", days: [1, 2, 3, 4, 5] },
+      bot_lane_every: { text: "Check the inbox", agentID: "ea", lane: "task", notify: false, everyMs: 3_600_000 },
+      bot_lane_once: { text: "Remind me", agentID: "ea", lane: "task", notify: true },
+      bot_daily: { text: "Morning digest", agentID: "ea", notify: true, dailyAt: "09:00" },
+      bot_every: { text: "Check the inbox", agentID: "ea", notify: false, everyMs: 3_600_000 },
+      bot_once: { text: "Remind me", agentID: "ea", notify: true },
+    };
+    for (const [id, payload] of Object.entries(legacyBot)) job(db, id, payload);
+    db.exec(m65());
+    for (const [id, payload] of Object.entries(legacyBot)) expect({ id, payload: payloadOf(db, id) }).toEqual({ id, payload });
+    for (const id of Object.keys(legacyBot)) expect({ id, ownerOnly: readCarried(payloadOf(db, id)).ownerOnly }).toEqual({ id, ownerOnly: false });
+  });
+
+  test("a job with a field the CLI never wrote is not stamped, whatever else it looks like", () => {
+    db = beforeM65();
+    for (const [id, extra] of Object.entries({ lane: { lane: "task" }, dailyAt: { dailyAt: "09:00" }, days: { days: [1] }, facts: { facts: false }, chainID: { chainID: "c1" }, depth: { depth: 2 }, channelID: { channelID: "main" } })) {
+      job(db, `job_${id}`, { text: "x", threadID: "thr_x", notify: true, ...extra });
+    }
+    db.exec(m65());
+    for (const id of ["lane", "dailyAt", "days", "facts", "chainID", "depth", "channelID"]) expect({ id, ownerOnly: payloadOf(db, `job_${id}`).ownerOnly }).toEqual({ id, ownerOnly: undefined });
   });
 
   test("a job that already says whether it is the owner's keeps what it says", () => {
@@ -92,7 +122,7 @@ describe("migration 65 stamps the owner's own jobs", () => {
 
   test("a stamped job reads as the owner's, with nothing read outside; an unstamped bot job does not", () => {
     db = beforeM65();
-    job(db, "job_owner", { text: "Check the inbox", agentID: "ea" });
+    job(db, "job_owner", { text: "Check the inbox", agentID: "ea", threadID: "thr_x" });
     job(db, "job_bot", { text: "Check the inbox", agentID: "ea", scheduledBy: "bot", inputRole: "system" });
     db.exec(m65());
     expect(readCarried(payloadOf(db, "job_owner"))).toMatchObject({ ownerOnly: true, taint: [] });

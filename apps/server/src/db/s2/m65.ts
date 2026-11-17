@@ -27,9 +27,12 @@ import type { Migration } from "../migrations";
  *
  * Two more things belong to the same round, one to the data and one to an index (fix round L):
  *  - A job the owner made with `agni job add` before the owner bit existed (`ownerOnly`, `policy/carry.ts`) has no marker, and now reads as a
- *    bot's: its follow-ups ask. The queued turn jobs that are exactly what a
- *    run treats as the owner's (`principalOf` in `agent/task-loop.ts`: no `inputRole`, `peer`, `wakeKey` or `delegationTaskID`, and no
- *    `scheduledBy`) are stamped. A job that already says whether it is the owner's keeps what it says; nothing a bot made is touched.
+ *    bot's: its follow-ups ask. Only the queued turn jobs that provably have the shape `job add` wrote are stamped. "No `inputRole`" is not
+ *    proof: before upstream #36 (`cfd778b`) a bot's `job_schedule` wrote no `inputRole` or `scheduledBy` either. The two writers differ in
+ *    three ways. `job add` wrote only `text`, `threadID`, `agentID`, `notify` and `everyMs` (a bot's job may also have `lane`, `dailyAt` and
+ *    `days`, so any other field means it is not stamped). The tool always wrote an `agentID` (its own) and never a `threadID`, so a job with
+ *    an agent and no thread cannot be told from a bot's and is not stamped: it asks once, as an unmarked job does. A job that already says
+ *    whether it is the owner's keeps what it says; nothing a bot made is touched.
  *  - The day cap counts the calls whose cost is unknown (`unknownCostCallsSince`). A covering index on (created_at, call_kind, cost_usd)
  *    lets that count read the index alone, not every row of the day.
  */
@@ -59,7 +62,9 @@ export const migration: Migration | null = {
         AND json_type(payload, '$.ownerOnly') IS NULL
         AND json_type(payload, '$.inputRole') IS NULL AND json_type(payload, '$.peer') IS NULL
         AND json_type(payload, '$.wakeKey') IS NULL AND json_type(payload, '$.delegationTaskID') IS NULL
-        AND json_type(payload, '$.scheduledBy') IS NULL;
+        AND json_type(payload, '$.scheduledBy') IS NULL
+        AND (json_type(payload, '$.agentID') IS NULL OR json_type(payload, '$.threadID') IS NOT NULL)
+        AND NOT EXISTS (SELECT 1 FROM json_each(payload) WHERE key NOT IN ('text', 'threadID', 'agentID', 'notify', 'everyMs'));
     CREATE INDEX idx_usage_created_kind_cost ON usage_ledger(created_at, call_kind, cost_usd);   -- the day cap's count of calls with no known cost
   `,
 };
