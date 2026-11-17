@@ -24,3 +24,13 @@ test("loadHomeEnv ignores AGNI_TEST_RUN in config.env and still loads the other 
   expect(env.AGNI_TEST_RUN).toBeUndefined();
   expect(env.AGNI_PORT).toBe("4321");
 });
+
+test("loadHomeEnv ignores the marker whatever its letter case (Windows environment names ignore case)", () => {
+  const home = mkdtempSync(join(tmpdir(), "agni-testrun-"));
+  roots.push(home);
+  writeFileSync(join(home, "config.env"), "agni_test_run=1\nAgni_Test_Run=1\nAGNI_PORT=4321\n");
+  const env: Record<string, string | undefined> = { AGNI_HOME: home };
+  loadHomeEnv(env);
+  expect(Object.keys(env).filter((name) => name.toUpperCase() === "AGNI_TEST_RUN")).toEqual([]);
+  expect(env.AGNI_PORT).toBe("4321");
+});
