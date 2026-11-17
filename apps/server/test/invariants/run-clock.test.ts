@@ -205,3 +205,68 @@ describe("INV-14 a stop for time is its own thing", () => {
     expect(toolUsage(s.db, "2000-01-01T00:00:00.000Z").timeouts, "a plain timeout stopped being counted").toBe(1);
   });
 });
+
+describe("INV-14 each scheduled run of a job has its own clock", () => {
+  /** The parent runs once (slot one), and a child that is part of that run is queued to start later, on the parent's clock. */
+  async function parentRunWithLateChild(s: Scenario, childDueInMinutes: number): Promise<{ parentID: string; childID: string }> {
+    const parentID = enqueueJob(s.db, { kind: "turn", payload: { text: "check the warehouse", agentID: "ea", notify: false, everyMs: minutes(5) } }).id;
+    s.model.queue(say("All quiet."));
+    await s.runner().tick();
+    expect(s.get<{ state: string }>("SELECT state FROM jobs WHERE id = ?", parentID)?.state, "the parent's first run did not finish; the script is out of step").toBe("queued");
+    const clocks = s.all<{ clock_key: string }>("SELECT clock_key FROM run_clocks");
+    expect(clocks.length, "the parent's first run did not start exactly one clock").toBe(1);
+    const childID = enqueueJob(s.db, {
+      kind: "turn",
+      payload: { text: "count the pallets", agentID: "ea", notify: false, clockKey: clocks[0]!.clock_key },
+      runAt: new Date(Date.now() + minutes(childDueInMinutes)).toISOString(),
+    }).id;
+    return { parentID, childID };
+  }
+
+  scenarioTest("a child still running across the parent's next 5-minute slot is stopped 30 counted minutes after its own run began", async () => {
+    const s = await scenarios.start();
+    const { childID } = await parentRunWithLateChild(s, 20);
+    later(minutes(5));
+    s.model.queue(say("All quiet again."));
+    await s.runner().tick(); // the parent's second slot: the child is not due yet
+    later(minutes(26)); // 31 minutes after the first run began
+    s.model.queue(say("All quiet a third time."), say("Counted 42."));
+    await s.runner().tick();
+    expect(s.get<{ state: string }>("SELECT state FROM jobs WHERE id = ?", childID)?.state, "the parent's next slot gave the child a fresh 30 minutes").toBe("failed");
+  });
+
+  scenarioTest("a child inside its own run's 30 minutes is not stopped by the parent's next slot", async () => {
+    const s = await scenarios.start();
+    const { childID } = await parentRunWithLateChild(s, 20);
+    later(minutes(5));
+    s.model.queue(say("All quiet again."));
+    await s.runner().tick();
+    later(minutes(15)); // 20 minutes after the first run began
+    s.model.queue(say("All quiet a third time."), say("Counted 42."));
+    await s.runner().tick();
+    expect(s.get<{ state: string }>("SELECT state FROM jobs WHERE id = ?", childID)?.state, "a child inside its own 30 minutes was stopped").toBe("done");
+  });
+
+  scenarioTest("a retry of the same slot keeps that slot's clock, and the next slot starts another", async () => {
+    const s = await scenarios.start({ turnTimeoutMs: 150 });
+    s.model.queue({ text: "Looking.", calls: [{ name: "memory_search", args: { query: "first" }, id: "call_first" }], hold: gate() });
+    const id = enqueueJob(s.db, { kind: "turn", payload: { text: "look into two things", agentID: "ea", notify: false, everyMs: minutes(60) } }).id;
+    const ticking = s.runner().tick();
+    await s.model.requested(1);
+    later(minutes(20));
+    await ticking;
+    later(minutes(15)); // the retry: 35 minutes after the slot began
+    s.model.queue(say("Done."));
+    const before = s.model.requests.length;
+    await s.runner().tick();
+    expect(s.model.requests.length - before, "the retry ran a step on a fresh clock").toBe(0);
+    const keys = s.all<{ clock_key: string }>("SELECT clock_key FROM run_clocks");
+    expect(keys.length, "the retry started a second clock for the same slot").toBe(1);
+    expect(s.get<{ state: string }>("SELECT state FROM jobs WHERE id = ?", id)?.state, "a stop for time is not a skip to the next slot").toBe("queued");
+
+    later(minutes(61)); // the next slot
+    s.model.queue(say("All quiet."));
+    await s.runner().tick();
+    expect(s.all("SELECT clock_key FROM run_clocks").length, "the next slot did not get a clock of its own").toBe(2);
+  });
+});

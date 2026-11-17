@@ -76,7 +76,7 @@ export function fullCapabilities(db: Database): string[] {
  * clock, and a run whose clock cannot be found is stopped, so a hand-made root must have both, like a real one.
  */
 export function seedRootTurn(db: Database, turnID: string): void {
-  startClock(db, turnID, { restart: false });
+  startClock(db, turnID);
   if (db.query("SELECT 1 FROM turns WHERE id = ?").get(turnID)) return;
   const thread = createThread(db, "ea");
   db.run("INSERT INTO turns (id, thread_id, agent_id, state, started_at) VALUES (?, ?, 'ea', 'running', ?)", [turnID, thread.id, new Date().toISOString()]);

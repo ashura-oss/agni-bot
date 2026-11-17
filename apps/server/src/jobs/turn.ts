@@ -211,7 +211,7 @@ export function registerTurnJob(runner: JobRunner, deps: TurnJobDeps): void {
     // The task has a record of what it read from the moment it starts, and keeps it whatever happens next.
     if (delegationTaskID) saveTaskTaint(deps.db, delegationTaskID, startTaint(payload));
     try {
-      result = await runTurn(deps, payload, persona, threadID, conversation, text, job.attempts > 1, job.id);
+      result = await runTurn(deps, payload, persona, threadID, conversation, text, job.attempts > 1, job.id, job.run_at);
     } catch (error) {
       // S1-12: a cancelled task ends here, whatever the aborted turn threw.
       if (delegationTaskID && isDelegationCancelled(deps.db, delegationTaskID)) return { result: "cancelled" };
@@ -628,6 +628,7 @@ async function runTurn(
   text: string,
   retry = false,
   jobID?: string,
+  jobSlot?: string,
 ): Promise<{ turnID: string; text: string; stopReason: string; taint: TaintSource[]; endedBy?: "wall_time" }> {
   const controller = new AbortController();
   const delegationTaskID = payload.delegationTaskID?.trim() || null;
@@ -657,6 +658,7 @@ async function runTurn(
         // A delegated child is on its parent's clock; a wake, a resumed task and any other job start their own, and a retry keeps its first.
         ...(payload.clockKey ? { clockKey: payload.clockKey } : {}),
         ...(retry ? { keepClock: true } : {}),
+        ...(jobSlot ? { jobSlot } : {}),
         jobID: jobID ?? null,
         capabilities: readCapabilities(payload.capabilities),
       },

@@ -4,8 +4,8 @@
  * A clock belongs to a *run*: a chat turn, or a job, and everything the run delegated (a delegated
  * child carries its parent's clock key). It is not the same thing as the root the owner's refusals
  * belong to: a wake, a task resumed after the owner answered, and a job's next scheduled run keep the
- * refusals of the request they came from but each start a clock of their own. A retry of a job keeps
- * the clock its first attempt started.
+ * refusals of the request they came from but each start a clock of their own. Each scheduled run of a job has
+ * its own clock (`startJobClock`); a retry of that run keeps the clock its first attempt started.
  *
  * The time the owner spends deciding (an approval card, a question, a password prompt) is not the run's
  * time, as it is not the turn timer's (`TurnTimer`): those waits are written down here, per clock, so the
@@ -24,20 +24,15 @@ export const OPEN_WAIT_CAP_MS = BACKGROUND_OWNER_WAIT_MS;
 const KEEP_CLOCKS_MS = 7 * 86_400_000;
 
 /**
- * Start the clock named `key`. A key that is already started keeps its first start, unless the caller says
- * this is a new run under the same key (`restart`: the next scheduled run of a job, whose id is the key).
- * Never throws: a clock that could not be written is read as unknown, which stops the run.
+ * Start the clock named `key`. A key that is already started keeps its first start. Never throws: a clock that could
+ * not be written is read as unknown, which stops the run.
  */
-export function startClock(db: Database, key: string, options: { restart: boolean }, nowMs: number = Date.now()): void {
+export function startClock(db: Database, key: string, nowMs: number = Date.now()): void {
   try {
     const at = new Date(nowMs).toISOString();
     db.transaction(() => {
-      if (options.restart) {
-        db.run("DELETE FROM run_clock_waits WHERE clock_key = ?", [key]);
-        db.run("INSERT OR REPLACE INTO run_clocks (clock_key, started_at) VALUES (?, ?)", [key, at]);
-      } else {
-        db.run("INSERT OR IGNORE INTO run_clocks (clock_key, started_at) VALUES (?, ?)", [key, at]);
-      }
+      db.run("INSERT OR IGNORE INTO run_clocks (clock_key, started_at) VALUES (?, ?)", [key, at]);
+      // The index on started_at keeps this cheap on every start.
       const cutoff = new Date(nowMs - KEEP_CLOCKS_MS).toISOString();
       db.run("DELETE FROM run_clock_waits WHERE clock_key IN (SELECT clock_key FROM run_clocks WHERE started_at < ?)", [cutoff]);
       db.run("DELETE FROM run_clocks WHERE started_at < ?", [cutoff]);
@@ -45,6 +40,30 @@ export function startClock(db: Database, key: string, options: { restart: boolea
   } catch (error) {
     log.warn(`run clock ${key} could not be started: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+/**
+ * Start the clock of one scheduled run of a job, and return its key. Every run has a clock of its own, named for the job
+ * and the slot it was scheduled for (`slot`: the job's `run_at` when the run was first tried), so a delegated child that is
+ * still running when the job's next slot starts stays on the clock of the run it belongs to. A retry of the same run
+ * (`retry`) finds the clock its first try started and keeps it; if there is none to find (it was dropped as too old), it
+ * starts one for this slot.
+ */
+export function startJobClock(db: Database, jobID: string, slot: string, retry: boolean, nowMs: number = Date.now()): string {
+  const prefix = `${jobID}@`;
+  if (retry) {
+    try {
+      const first = db
+        .query<{ clock_key: string }, [number, string]>("SELECT clock_key FROM run_clocks WHERE substr(clock_key, 1, ?) = ? ORDER BY started_at DESC LIMIT 1")
+        .get(prefix.length, prefix);
+      if (first) return first.clock_key;
+    } catch (error) {
+      log.warn(`run clock of job ${jobID} could not be looked up: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  const key = `${prefix}${slot}`;
+  startClock(db, key, nowMs);
+  return key;
 }
 
 /**

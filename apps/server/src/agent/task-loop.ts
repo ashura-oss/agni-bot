@@ -51,7 +51,7 @@ import { mcpApprovalNote } from "../plugins/mcp";
 import { domainAllowed } from "../routines/egress";
 import { log } from "../log";
 import { TurnTimer } from "./turn-timer";
-import { holdForOwner, startClock } from "./run-clock";
+import { holdForOwner, startClock, startJobClock } from "./run-clock";
 import { expireApprovalForCall, expirePendingForTurn, ownerWaitMsFor } from "./pending-cards";
 
 export interface TaskTurnSettings {
@@ -166,6 +166,8 @@ export interface TaskTurnRun {
     clockKey?: string;
     /** This job is a retry of one that already started its clock: the clock keeps its first start. */
     keepClock?: boolean;
+    /** The slot this scheduled run of the job was first tried for (the job's `run_at`): it names the run's clock. */
+    jobSlot?: string;
     jobID?: string | null;
     capabilities?: string[];
   };
@@ -505,10 +507,17 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   });
   const controller = new AbortController();
   let timedOut = false;
-  // The time limit's clock: a delegated child is measured on its parent's; any other run starts one of its own (a job's, else
-  // this turn's). A job's first try starts it afresh, its retry keeps the first start, so a retry does not get a new 30 minutes.
-  const clockKey = run.policy?.clockKey ?? run.policy?.jobID ?? turnID;
-  if (run.policy?.clockKey === undefined) startClock(db, clockKey, { restart: Boolean(run.policy?.jobID) && !run.policy?.keepClock });
+  // The time limit's clock: a delegated child is measured on its parent's; any other run starts one of its own: one for each
+  // scheduled run of a job (its retry keeps the first try's start, so it does not get a new 30 minutes), else this turn's.
+  let clockKey = run.policy?.clockKey;
+  if (clockKey === undefined) {
+    if (run.policy?.jobID) {
+      clockKey = startJobClock(db, run.policy.jobID, run.policy.jobSlot ?? new Date().toISOString(), Boolean(run.policy.keepClock));
+    } else {
+      clockKey = turnID;
+      startClock(db, clockKey);
+    }
+  }
   // The turn's clock stops while a call waits on the owner (an approval card
   // or a question), and so does the run's time limit (the wait is written down
   // against its clock). It is created here so the form broker can hold it, and
