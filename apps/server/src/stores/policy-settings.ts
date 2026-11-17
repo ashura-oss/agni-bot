@@ -19,6 +19,12 @@ export const RUN_CAP_DEFAULTS = {
   maxSelfScheduledJobsPerBot: 10,
 } as const;
 
+/**
+ * The longest time limit the owner may set: 7 days. Clocks are kept as long as this (`agent/run-clock.ts` drops the older
+ * ones), so a limit beyond it could outlive the clock that measures it, and that run would be stopped as unreadable.
+ */
+export const MAX_ROOT_JOB_WALL_MS = 7 * 86_400_000;
+
 export interface SpendCaps {
   /** Everything, per local day. */
   dayUsd: number | null;
@@ -110,6 +116,9 @@ export function setRunCaps(db: Database, caps: Partial<RunCaps>): RunCaps {
     if (!(typeof value === "number" && Number.isInteger(value) && value > 0)) {
       throw new Error(`run cap ${name} must be a positive whole number`);
     }
+  }
+  if (caps.rootJobWallMs !== undefined && caps.rootJobWallMs > MAX_ROOT_JOB_WALL_MS) {
+    throw new Error("run cap rootJobWallMs must be at most 7 days");
   }
   db.transaction(() => {
     for (const name of ["rootJobWallMs", "maxConcurrentDelegations", "maxSelfScheduledJobsPerBot"] as const) {

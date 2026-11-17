@@ -22,6 +22,10 @@ describe("parsing `policy caps set`", () => {
     expect(parseCapsSet(["--wall-minutes=90"])).toEqual({ caps: { rootJobWallMs: 90 * 60_000 } });
   });
 
+  test("the longest time limit is 7 days, the time clocks are kept", () => {
+    expect(parseCapsSet(["--wall-minutes", "10080"])).toEqual({ caps: { rootJobWallMs: 7 * 86_400_000 } });
+  });
+
   test.each([
     ["no flag at all", []],
     ["a flag with no value", ["--delegations"]],
@@ -36,6 +40,7 @@ describe("parsing `policy caps set`", () => {
     ["hex", ["--wall-minutes", "0x10"]],
     ["a number too big to be exact", ["--delegations", "99999999999999999999"]],
     ["minutes that overflow as milliseconds", ["--wall-minutes", "9007199254740991"]],
+    ["a time limit longer than the week clocks are kept", ["--wall-minutes", "10081"]],
     ["an unknown flag", ["--hours", "2"]],
     ["a flag twice", ["--delegations", "2", "--delegations", "3"]],
     ["a stray word", ["--delegations", "2", "three"]],
@@ -82,6 +87,27 @@ describe("the report", () => {
     expect(getRunCaps(db)).toEqual({ rootJobWallMs: RUN_CAP_DEFAULTS.rootJobWallMs, maxConcurrentDelegations: RUN_CAP_DEFAULTS.maxConcurrentDelegations, maxSelfScheduledJobsPerBot: RUN_CAP_DEFAULTS.maxSelfScheduledJobsPerBot });
     expect(db.query("SELECT 1 FROM audit_events WHERE kind = 'run.caps.set'").get()).toBeNull();
     expect(report.lines.join("\n")).toContain("--delegations");
+  });
+});
+
+describe("the change and its audit record are one step", () => {
+  let db: Database;
+  beforeEach(() => { db = openDatabase(":memory:"); });
+  afterEach(() => db.close());
+
+  test("a change that cannot be written leaves no audit record that says it was made", () => {
+    db.run("CREATE TRIGGER refuse_settings BEFORE INSERT ON policy_settings BEGIN SELECT RAISE(ABORT, 'settings are read-only'); END");
+    const report = setCapsReport(db, ["--delegations", "2"]);
+    expect(report.code).toBe(1);
+    expect(report.lines.join("\n")).toContain("settings are read-only");
+    expect(db.query("SELECT 1 FROM audit_events WHERE kind = 'run.caps.set'").get(), "the log says a change was made that was not").toBeNull();
+  });
+
+  test("a time limit longer than the clocks are kept is refused by the store as well", () => {
+    expect(() => setRunCaps(db, { rootJobWallMs: 7 * 86_400_000 + 1 })).toThrow(/at most 7 days/);
+    expect(getRunCaps(db).rootJobWallMs).toBe(RUN_CAP_DEFAULTS.rootJobWallMs);
+    setRunCaps(db, { rootJobWallMs: 7 * 86_400_000 });
+    expect(getRunCaps(db).rootJobWallMs).toBe(7 * 86_400_000);
   });
 });
 

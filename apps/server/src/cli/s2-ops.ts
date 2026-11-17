@@ -3,7 +3,7 @@ import { loadConfig } from "../config";
 import { openDatabaseForCLI } from "../db";
 import { setAllPaused } from "../policy/pause";
 import { SqliteAuditSink, installAuditSink, verifyAuditChain } from "../stores/audit";
-import { getRunCaps, setRunCaps, type RunCaps } from "../stores/policy-settings";
+import { MAX_ROOT_JOB_WALL_MS, getRunCaps, setRunCaps, type RunCaps } from "../stores/policy-settings";
 import type { CommandTable } from "./command-table";
 
 /** What `agni audit verify` prints, and the exit code it ends with (0 intact, 1 altered). */
@@ -67,6 +67,7 @@ export function parseCapsSet(args: string[]): { caps: Partial<RunCaps> } | { err
     const value = equals > 0 ? word.slice(equals + 1) : args[(at += 1)];
     const count = value !== undefined && /^[1-9]\d*$/.test(value) ? Number(value) : Number.NaN;
     if (!Number.isSafeInteger(count * spec.scale)) return { error: `${flag} must be a positive whole number (got ${value === undefined ? "nothing" : JSON.stringify(value)})` };
+    if (spec.name === "rootJobWallMs" && count * spec.scale > MAX_ROOT_JOB_WALL_MS) return { error: `${flag} must be at most ${MAX_ROOT_JOB_WALL_MS / 60_000} (7 days)` };
     caps[spec.name] = count * spec.scale;
   }
   return Object.keys(caps).length > 0 ? { caps } : { error: "give at least one of --wall-minutes, --delegations, --self-scheduled" };
@@ -78,8 +79,11 @@ export function setCapsReport(db: Database, args: string[]): { code: 0 | 1; line
   if ("error" in parsed) return { code: 1, lines: [`Not changed: ${parsed.error}.`, CAPS_USAGE] };
   const before = getRunCaps(db);
   try {
-    new SqliteAuditSink(db).record({ kind: "run.caps.set", actor: "cli", detail: { before, after: { ...before, ...parsed.caps } } });
-    setRunCaps(db, parsed.caps);
+    // One step: a change that cannot be written leaves no record that says it was made.
+    db.transaction(() => {
+      new SqliteAuditSink(db).record({ kind: "run.caps.set", actor: "cli", detail: { before, after: { ...before, ...parsed.caps } } });
+      setRunCaps(db, parsed.caps);
+    }).immediate();
   } catch (error) {
     return { code: 1, lines: [`Not changed: ${error instanceof Error ? error.message : String(error)}`] };
   }

@@ -16,12 +16,13 @@
 import type { Database } from "bun:sqlite";
 import { log } from "../log";
 import { newID } from "../util/ids";
+import { MAX_ROOT_JOB_WALL_MS } from "../stores/policy-settings";
 import { BACKGROUND_OWNER_WAIT_MS } from "./pending-cards";
 
 /** The longest one wait on the owner can last (a background card's); an open wait counts for no more, so a dead process cannot make a run free. */
 export const OPEN_WAIT_CAP_MS = BACKGROUND_OWNER_WAIT_MS;
-/** Clocks older than this are dropped when a new one starts: no run lives that long. */
-const KEEP_CLOCKS_MS = 7 * 86_400_000;
+/** Clocks older than this are dropped when a new one starts. It is the longest time limit the owner can set, so no run outlives its clock. */
+const KEEP_CLOCKS_MS = MAX_ROOT_JOB_WALL_MS;
 
 /**
  * Start the clock named `key`. A key that is already started keeps its first start. Never throws: a clock that could
