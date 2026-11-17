@@ -1512,12 +1512,15 @@ export function compact(messages: ChatMessage[], previousSummary: string | null)
 /**
  * A tool result that fits the prompt and is still valid JSON: long strings
  * and arrays are cut step by step, and the result is marked truncated.
+ * Every string in it is masked first, and only then cut: a secret that straddles a cut is no longer whole
+ * when it is masked, so its first half would be stored and sent (see `cutMasked`).
  */
 export function fitToolResult(value: unknown, max = MAX_TOOL_RESULT_CHARS, keepChars = 1_000): string {
-  const full = JSON.stringify(value) ?? "null";
+  const full = JSON.stringify(value, (_key, item: unknown) => (typeof item === "string" ? redact(item) : item)) ?? "null";
   if (full.length <= max) return full;
+  const masked = JSON.parse(full) as unknown;
   for (const [items, chars] of [[20, keepChars], [10, 400], [5, 200], [3, 80]] as const) {
-    const text = JSON.stringify({ truncated: true, result: shrinkValue(value, items, chars) });
+    const text = JSON.stringify({ truncated: true, result: shrinkValue(masked, items, chars) });
     if (text.length <= max) return text;
   }
   // shortcut: very wide or deep objects can still overflow; they fall back to a plain cut.
