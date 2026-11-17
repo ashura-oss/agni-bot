@@ -5,7 +5,7 @@
  * probe, nothing is signalled or stopped.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { daemonRunningRefusal } from "../src/cli/s3-vault";
@@ -92,9 +92,26 @@ describe("daemonRunningRefusal: the serve lock", () => {
   test("a lock that cannot be read refuses (fail closed), and says how to clear it", async () => {
     const home = fresh();
     writeFileSync(join(home, "serve.lock"), "{garbage");
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(join(home, "serve.lock"), old, old); // it has sat there: not a server in the middle of writing it
     const message = await daemonRunningRefusal({ pidPath: join(home, "run", "agni.pid"), home, config: quiet });
     expect(message).toContain("cannot be read");
     expect(message).toContain("delete that file");
+  });
+
+  test("a lock written a moment ago and not finished is a server starting: refuses, and says so", async () => {
+    const home = fresh();
+    writeFileSync(join(home, "serve.lock"), "");
+    const message = await daemonRunningRefusal({ pidPath: join(home, "run", "agni.pid"), home, config: quiet });
+    expect(message).toContain("is starting");
+    expect(message).toContain("stop the daemon first");
+  });
+
+  test("a live pid's lock says which file to delete when no server is running (a pid reused after a hard kill)", async () => {
+    const home = fresh();
+    writeFileSync(join(home, "serve.lock"), JSON.stringify({ pid: process.pid, startedAt: new Date(Date.now() - 400 * 24 * 3600 * 1000).toISOString() }));
+    const message = await daemonRunningRefusal({ pidPath: join(home, "run", "agni.pid"), home, config: quiet });
+    expect(message).toContain(`delete ${join(home, "serve.lock")}`);
   });
 
   test("a stale lock does not refuse", async () => {
@@ -195,6 +212,8 @@ describe("agni vault migrate / export while a server runs that no pid file names
     const port = await freePort();
     await startServe(home, parent, port);
     expect(existsSync(join(home, "run", "agni.pid"))).toBe(false);
+    // What stops them is the lock the running serve holds: it is there for as long as the server runs.
+    expect(existsSync(join(home, "serve.lock"))).toBe(true);
     const migrate = await vaultCommand(home, parent, port, ["migrate"]);
     expect(migrate.code).not.toBe(0);
     expect(migrate.printed).toContain("stop the daemon first");

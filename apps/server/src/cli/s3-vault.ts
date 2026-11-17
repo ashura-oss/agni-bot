@@ -4,7 +4,7 @@ import { agniHome } from "../home";
 import { DatabaseBehindError, openDatabaseForCLI } from "../db";
 import { loadConfig, type Config } from "../config";
 import { fetchHealth, isProcessAlive, pidFilePath, readPidFile } from "../daemon";
-import { serveLockPath, serveLockState } from "../startup/s3-serve-lock";
+import { ServeLockError, acquireServeLock, serveLockPath, serveLockState, type ServeLock } from "../startup/s3-serve-lock";
 import { setEnvFileValues } from "../secrets/env";
 import { runVaultExport, runVaultMigrations } from "../secrets/migrate";
 import { VaultError, lockVault, unlockVault, vaultExists, vaultStatus } from "../secrets";
@@ -75,6 +75,20 @@ export function optionalDatabase(path: string = loadConfig().dbPath) {
 }
 
 /**
+ * The serve lock, taken once `daemonRunningRefusal` found nothing running and held until the command is done: a `serve`
+ * started meanwhile finds it and refuses to start, instead of opening files that are being rewritten. Undefined (with the
+ * reason printed) when it cannot be taken: another server got there first, or the lock cannot be read.
+ */
+function holdServeLock(command: string): ServeLock | undefined {
+  try {
+    return acquireServeLock();
+  } catch (error) {
+    fail(`${command} not started: ${error instanceof ServeLockError ? error.message : String(error)}`);
+    return undefined;
+  }
+}
+
+/**
  * `migrate` and `export` rewrite the database file and the credential files, and a
  * running server holds both open (and would keep serving the old values from memory).
  * A refusal, or undefined when nothing says a server is running. Three signs, any one
@@ -90,7 +104,12 @@ export async function daemonRunningRefusal(options: { pidPath?: string; home?: s
   const info = readPidFile(options.pidPath ?? pidFilePath(config));
   if (info && isProcessAlive(info.pid)) return `the Agni daemon is running (pid ${info.pid}), ${stop}`;
   const lock = serveLockState({ home: options.home });
-  if (lock.state === "held") return `an Agni server is running on this home (pid ${lock.pid}), ${stop}`;
+  if (lock.state === "held") {
+    return `an Agni server is running on this home (pid ${lock.pid}), ${stop} If no Agni server is running (the lock is left over from one that was killed), delete ${serveLockPath(options.home)} and run this command again.`;
+  }
+  if (lock.state === "starting") {
+    return `an Agni server is starting on this home (${serveLockPath(options.home)} was written a moment ago), ${stop} If no Agni server is running, delete that file and run this command again.`;
+  }
   if (lock.state === "unreadable") {
     return `the server lock ${serveLockPath(options.home)} cannot be read (${lock.reason}), so it cannot be told whether a server is running. Make sure none is (\`agni daemon status\`), delete that file, and run this command again.`;
   }
@@ -101,6 +120,16 @@ export async function daemonRunningRefusal(options: { pidPath?: string; home?: s
 async function migrate(): Promise<void> {
   const running = await daemonRunningRefusal();
   if (running) return fail(`migration not started: ${running}`);
+  const held = holdServeLock("migration");
+  if (!held) return;
+  try {
+    await migrateHoldingLock();
+  } finally {
+    held.release();
+  }
+}
+
+async function migrateHoldingLock(): Promise<void> {
   // The database first: a refusal there must not leave a new, empty vault behind.
   let db: ReturnType<typeof optionalDatabase>;
   try {
@@ -162,6 +191,16 @@ async function exportSecrets(args: string[]): Promise<void> {
   }
   const running = await daemonRunningRefusal();
   if (running) return fail(`export not started: ${running}`);
+  const held = holdServeLock("export");
+  if (!held) return;
+  try {
+    await exportHoldingLock();
+  } finally {
+    held.release();
+  }
+}
+
+async function exportHoldingLock(): Promise<void> {
   if (!vaultExists()) {
     fail("there is no vault to export.");
     return;
