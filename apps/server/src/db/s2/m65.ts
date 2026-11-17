@@ -24,6 +24,12 @@ import type { Migration } from "../migrations";
  *
  * `turns.ended_by` marks a turn the run's time limit ended. Its `stop_reason` stays `timeout` (that is the
  * protocol's word for it), but the nightly harness review must not read it as a model that is too slow.
+ *
+ * One more thing belongs to the same round, to the data already there (fix round L):
+ *  - A job the owner made with `agni job add` before the owner bit existed (`ownerOnly`, `policy/carry.ts`) has no marker, and now reads as a
+ *    bot's: its follow-ups ask. The queued turn jobs that are exactly what a
+ *    run treats as the owner's (`principalOf` in `agent/task-loop.ts`: no `inputRole`, `peer`, `wakeKey` or `delegationTaskID`, and no
+ *    `scheduledBy`) are stamped. A job that already says whether it is the owner's keeps what it says; nothing a bot made is touched.
  */
 export const migration: Migration | null = {
   id: 65,
@@ -45,5 +51,12 @@ export const migration: Migration | null = {
     ALTER TABLE jobs ADD COLUMN wake_scope TEXT;      -- the request a counted wake belongs to (jobs/wake-limit.ts)
     ALTER TABLE jobs ADD COLUMN run_clock_key TEXT;   -- the clock of the job's current scheduled run (agent/run-clock.ts)
     CREATE INDEX idx_jobs_wake_scope ON jobs(wake_scope) WHERE wake_scope IS NOT NULL;
+    UPDATE jobs SET payload = json_set(payload, '$.ownerOnly', json('true'))
+      WHERE kind = 'turn' AND state IN ('queued', 'running') AND json_valid(payload)
+        AND json_type(payload) = 'object'
+        AND json_type(payload, '$.ownerOnly') IS NULL
+        AND json_type(payload, '$.inputRole') IS NULL AND json_type(payload, '$.peer') IS NULL
+        AND json_type(payload, '$.wakeKey') IS NULL AND json_type(payload, '$.delegationTaskID') IS NULL
+        AND json_type(payload, '$.scheduledBy') IS NULL;
   `,
 };
