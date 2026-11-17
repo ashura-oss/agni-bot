@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Database } from "bun:sqlite";
@@ -13,6 +13,8 @@ import type { Config } from "../src/config";
 import { McpHub } from "../src/plugins/mcp";
 import { listPins } from "../src/plugins/mcp-pins";
 import { registerSecret } from "../src/util/redact";
+import { publishShare } from "../src/share/document";
+import type { ShareDocument } from "../src/share/render";
 
 /**
  * Sprint 3 fix round 6: text that comes from outside (an upstream server's answer, a provider's error, an
@@ -155,5 +157,37 @@ describe("MCP tool results", () => {
     const out = await callSearch(() => "unused", `connection reset while sending Authorization: Bearer ${BEARER}`);
     expect(out).toContain("connection reset");
     expect(out).not.toContain(BEARER);
+  });
+});
+
+describe("share pages", () => {
+  test("a tool result that echoes a secret is masked in the page written to disk, including a secret HTML would escape", () => {
+    const awkward = "pw&<fix6>-secret-1a2b3c4d5e6f";
+    registerSecret(BEARER);
+    registerSecret(awkward);
+    const dir = mkdtempSync(join(tmpdir(), "agni-s3-storage-share-"));
+    dirs.push(dir);
+    const saved = process.env.AGNI_SHARE_DIR;
+    process.env.AGNI_SHARE_DIR = dir;
+    try {
+      const doc: ShareDocument = {
+        title: "Export",
+        agentName: "Agent",
+        agentID: "agt_1",
+        conversationID: "cnv_1",
+        createdAt: "2026-11-17T00:00:00.000Z",
+        records: [{ id: "tc_1", kind: "tool", at: "2026-11-17T00:00:01.000Z", toolName: "mcp_notion_search", args: "{}", result: `{"headers":{"authorization":"Bearer ${BEARER}"},"password":"${awkward}"}`, ok: false }],
+      };
+      const { path } = publishShare(doc, { baseURL: "http://127.0.0.1:8787" });
+      const page = readFileSync(path, "utf8");
+      expect(page).toContain("mcp_notion_search");
+      expect(page).not.toContain(BEARER);
+      expect(page).not.toContain(awkward);
+      expect(page).not.toContain("pw&amp;&lt;fix6&gt;-secret");
+      expect(readdirSync(dir)).toHaveLength(1);
+    } finally {
+      if (saved === undefined) delete process.env.AGNI_SHARE_DIR;
+      else process.env.AGNI_SHARE_DIR = saved;
+    }
   });
 });

@@ -15,6 +15,7 @@ import { dirname, join, resolve } from "node:path";
 import { canonicalAgentID } from "../agent/personas";
 import { getConversation } from "../stores/conversations";
 import { getThread } from "../stores/threads";
+import { redactForStorage } from "../util/redact-storage";
 import { renderShareHTML, type ShareDocument, type ShareRecord } from "./render";
 
 /**
@@ -113,6 +114,16 @@ export function purgeExpiredShares(now = Date.now()): number {
   return removed;
 }
 
+/**
+ * The document with every registered secret masked. A tool's result or an error row is text the server
+ * did not write (a server that echoed the bearer it was sent, say), and the page is a file on disk that
+ * is also handed to whoever holds the link. Masked as data, before the markup escapes it: a secret with
+ * `&` or `<` in it no longer matches once it is rendered as `&amp;`.
+ */
+function maskedDocument(doc: ShareDocument): ShareDocument {
+  return JSON.parse(redactForStorage(JSON.stringify(doc))) as ShareDocument;
+}
+
 /** Render and write the document; returns the token and the URL to hand out. */
 export function publishShare(
   doc: ShareDocument,
@@ -122,7 +133,7 @@ export function publishShare(
   const dir = shareDir();
   mkdirSync(dir, { recursive: true });
   const path = join(dir, `${token}.html`);
-  writeFileSync(path, renderShareHTML(doc), { flag: "w" });
+  writeFileSync(path, renderShareHTML(maskedDocument(doc)), { flag: "w" });
   return { token, path, url: `${options.baseURL.replace(/\/+$/, "")}/share/${token}` };
 }
 
