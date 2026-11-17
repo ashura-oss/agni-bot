@@ -28,8 +28,10 @@ export interface DelegationBrief {
   goal: string;
   chainID?: string;
   /**
-   * The run this delegation belongs to: the root turn and, for a job, the root job. Whatever the owner refused
-   * under that root still holds in the child and in the wake that reports back, and one time limit covers them.
+   * The request this delegation belongs to (its refusal scope): the root turn and, for a job, the root job. Whatever
+   * the owner refused under that root still holds in the child, in a run resumed after the owner's answer and in the
+   * wake that reports back. The time limit's clock is not kept here: the child is on its parent's (the job payload),
+   * and a resumed run and a wake each start their own.
    */
   rootTurnID?: string;
   rootJob?: string | null;

@@ -13,6 +13,7 @@ import { registerTurnTools } from "../src/tools/turn-tools";
 import type { ToolRegistry } from "../src/tools/registry";
 import { defaultResolvedPersona } from "../src/agent/personas";
 import { rootGuardrail } from "../src/agent/guardrails";
+import { startClock } from "../src/agent/run-clock";
 import { createRunContext, type RunContextInput } from "../src/policy/context";
 import type { RunContext } from "../src/policy/types";
 import { TOOL_POLICY } from "../src/policy/metadata";
@@ -71,10 +72,11 @@ export function fullCapabilities(db: Database): string[] {
 }
 
 /**
- * A turn row for a run a test builds by hand. A run's time limit counts from the start of its root turn, and a
- * run whose root cannot be found is stopped, so a hand-made root must exist in the database like a real one.
+ * A turn row and a started clock for a run a test builds by hand. A run's time limit counts from the start of its
+ * clock, and a run whose clock cannot be found is stopped, so a hand-made root must have both, like a real one.
  */
 export function seedRootTurn(db: Database, turnID: string): void {
+  startClock(db, turnID, { restart: false });
   if (db.query("SELECT 1 FROM turns WHERE id = ?").get(turnID)) return;
   const thread = createThread(db, "ea");
   db.run("INSERT INTO turns (id, thread_id, agent_id, state, started_at) VALUES (?, ?, 'ea', 'running', ?)", [turnID, thread.id, new Date().toISOString()]);
@@ -82,7 +84,7 @@ export function seedRootTurn(db: Database, turnID: string): void {
 
 /** A parent run that can call every tool: what the owner's own assistant turn holds. Pass it as the `run` of a handoff. */
 export function fullCapabilityRun(db: Database, input: Partial<RunContextInput> = {}): RunContext {
-  seedRootTurn(db, input.rootTurnID ?? input.turnID ?? "trn_parent");
+  seedRootTurn(db, input.clockKey ?? input.rootTurnID ?? input.turnID ?? "trn_parent");
   return createRunContext({
     db, bot: "ea", threadID: "thr_parent", turnID: "trn_parent", principal: { kind: "owner" },
     capabilities: fullCapabilities(db), registry: buildTaskToolRegistry(db), ...input,

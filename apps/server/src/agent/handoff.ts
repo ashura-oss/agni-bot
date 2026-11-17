@@ -148,7 +148,7 @@ export async function handoff(deps: HandoffDeps, request: HandoffRequest): Promi
     handoffSummary: child.handoffSummary,
     ...(deps.run ? {
       policy: {
-        taint: packTaint(deps.run), rootTurnID: deps.run.rootTurnID, rootJob: deps.run.rootJob, jobID: deps.run.jobID,
+        taint: packTaint(deps.run), rootTurnID: deps.run.rootTurnID, rootJob: deps.run.rootJob, clockKey: deps.run.clockKey, jobID: deps.run.jobID,
         // The child may call only what this run could (S2-06).
         capabilities: [...deps.run.effectiveCapabilities],
       },

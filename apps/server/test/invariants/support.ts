@@ -10,7 +10,7 @@
  * answers they get are named in `packages/protocol/src/frames.ts`; each has one helper below, so
  * a protocol change is one edit here, not forty.
  */
-import { afterEach, beforeEach, expect } from "bun:test";
+import { afterEach, beforeEach, expect, setSystemTime } from "bun:test";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { ServerFrame } from "@agni/protocol";
@@ -484,3 +484,14 @@ export async function makeBot(
   await playTurn(s, client, `make me a bot called ${id}`);
   expect(s.get("SELECT id FROM agents WHERE id = ?", id), `could not set up the ${id} bot`).not.toBeNull();
 }
+
+// ---------------------------------------------------------------------------
+// the clock
+// ---------------------------------------------------------------------------
+
+export const minutes = (count: number): number => count * 60_000;
+/**
+ * Moves JavaScript's clock forward (timers keep real time). The test file puts it back with
+ * `afterEach(() => setSystemTime())`.
+ */
+export const later = (ms: number): void => { setSystemTime(new Date(Date.now() + ms)); };

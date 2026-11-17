@@ -51,6 +51,7 @@ import { mcpApprovalNote } from "../plugins/mcp";
 import { domainAllowed } from "../routines/egress";
 import { log } from "../log";
 import { TurnTimer } from "./turn-timer";
+import { holdForOwner, startClock } from "./run-clock";
 import { expireApprovalForCall, expirePendingForTurn, ownerWaitMsFor } from "./pending-cards";
 
 export interface TaskTurnSettings {
@@ -153,7 +154,21 @@ export interface TaskTurnRun {
    * parent carried down, or what the finished tasks it is told about read), and the
    * root it belongs to, so an owner's "no" earlier in the chain still holds.
    */
-  policy?: { taint?: TaintSource[]; rootTurnID?: string; rootJob?: string | null; jobID?: string | null; capabilities?: string[] };
+  policy?: {
+    taint?: TaintSource[];
+    /** The refusal scope (`RunContext.rootTurnID`, `rootJob`): which request's "no" still holds. Not the clock. */
+    rootTurnID?: string;
+    rootJob?: string | null;
+    /**
+     * The clock of a run this one is part of (a delegated child or a handoff): it is measured on its parent's.
+     * Without it the run has a clock of its own, started now: the job's, or the turn's.
+     */
+    clockKey?: string;
+    /** This job is a retry of one that already started its clock: the clock keeps its first start. */
+    keepClock?: boolean;
+    jobID?: string | null;
+    capabilities?: string[];
+  };
   /** Restrict task tools to this list, intersected with the persona's tools. */
   toolAllowlist?: string[];
   /** Optional output-token budget for bounded background work such as routines. */
@@ -490,14 +505,20 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   });
   const controller = new AbortController();
   let timedOut = false;
+  // The time limit's clock: a delegated child is measured on its parent's; any other run starts one of its own (a job's, else
+  // this turn's). A job's first try starts it afresh, its retry keeps the first start, so a retry does not get a new 30 minutes.
+  const clockKey = run.policy?.clockKey ?? run.policy?.jobID ?? turnID;
+  if (run.policy?.clockKey === undefined) startClock(db, clockKey, { restart: Boolean(run.policy?.jobID) && !run.policy?.keepClock });
   // The turn's clock stops while a call waits on the owner (an approval card
-  // or a question). It is created here so the form broker can hold it, and
+  // or a question), and so does the run's time limit (the wait is written down
+  // against its clock). It is created here so the form broker can hold it, and
   // started below once the prompt is built.
   const timer = new TurnTimer(settings.turnTimeoutMs, () => { timedOut = true; controller.abort(); });
+  const holdForOwnerWait = (): (() => void) => holdForOwner(db, clockKey, timer);
   const formBroker = new FormBroker({
     db,
     emit: (body) => run.emit(body),
-    hold: () => timer.hold(),
+    hold: holdForOwnerWait,
     ownerWaitMs: settings.ownerWaitMs,
   });
   db.run(
@@ -533,6 +554,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
     // A delegated child shares its parent's root (which may be a chat turn, not a job); any other job is its own root.
     rootJob: run.policy?.rootTurnID ? (run.policy.rootJob ?? null) : (run.policy?.jobID ?? null),
     rootTurnID: run.policy?.rootTurnID ?? turnID,
+    clockKey,
     principal,
     capabilities: callableTools,
     registry,
@@ -752,7 +774,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
       persistSession(db, threadID, turnID, "running", messages, summary, stepCount, tokenCount);
       let stepProgressed = false;
       const toolHooks: ToolHooks = {
-        hold: () => timer.hold(),
+        hold: holdForOwnerWait,
         // A chat turn waits 10 minutes for the owner; a job or routine nobody is watching waits 30.
         ownerWaitMs: settings.ownerWaitMs ?? ownerWaitMsFor(Boolean(run.policy?.jobID) || runCtx.unattended),
         unattended: Boolean(run.untrustedInput) && !peerSourced,
@@ -944,7 +966,8 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   // Cards this turn raised and nobody answered are dead now: expire them so a
   // late click does nothing and a reconnect does not draw them again.
   expirePendingForTurn(db, turnID, stopReason === "cancelled" ? "cancelled" : "expired", run.emit);
-  finishTurn(db, { id: turnID, stopReason, ...usage });
+  // The turn's stop reason is the protocol's word ("timeout"); `endedBy` says it was the run's time limit and not a slow model.
+  finishTurn(db, { id: turnID, stopReason, ...usage, ...(runStop?.cause === "wall_time" ? { endedBy: "wall_time" } : {}) });
   // A request the owner stopped is closed for the model too; one their next message took over from is not.
   if (stopReason === "cancelled" && cancelReason !== SUPERSEDED) {
     // Only an explicit Stop is the owner's; an abort nobody labelled is "interrupted", never "Stop".
@@ -1346,8 +1369,8 @@ function haltedBeforeStep(run: RunContext): RunStop | null {
   if (paused) return { cause: "pause", message: paused.message };
   const budget = policyHooks.checkBudget(run);
   if (!budget.ok) return { cause: "budget", message: budget.message, ...(budget.detail ? { budget: budget.detail } : {}) };
-  // One clock for the root and everything it delegated, started with the root's turn (S2-09).
-  const wall = checkWallTime(run.services.db, run.rootTurnID);
+  // One clock for the run and everything it delegated, without the time the owner spent deciding (S2-09).
+  const wall = checkWallTime(run.services.db, run.clockKey);
   if (!wall.ok) return { cause: "wall_time", message: wallTimeStopMessage(run.services.botName, { wallMs: wall.wallMs, unknown: wall.reason === "unknown" }) };
   return null;
 }

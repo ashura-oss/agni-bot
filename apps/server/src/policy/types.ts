@@ -86,10 +86,18 @@ export interface RunContext {
   turnID: string;
   /** The daemon job this run belongs to, or null for an owner chat turn. */
   jobID: string | null;
-  /** The job at the root of a delegation chain, or null when the chain has no job. */
+  /**
+   * The refusal scope: the job at the root of a delegation chain, or null when the chain has no job. What the owner
+   * refused under a root holds for everything that belongs to it: the children, a resumed task, the wake that reports back.
+   */
   rootJob: string | null;
   /** The turn at the root of the chain: the "run" a denial belongs to when no job does. */
   rootTurnID: string;
+  /**
+   * The time limit's clock (`agent/run-clock.ts`), which is not the same thing as the root: a wake, a resumed task and a
+   * job's next run keep the refusals of their root but start a clock of their own. A delegated child shares its parent's.
+   */
+  clockKey: string;
   principal: Principal;
   /** The tools this run may call at all (the persona's allowlist narrowed by the chain). Deferred tools are in it. */
   effectiveCapabilities: ReadonlySet<string>;

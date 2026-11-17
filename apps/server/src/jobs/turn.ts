@@ -21,6 +21,7 @@ import { asksWhenClean } from "../policy/metadata";
 import { readCapabilities } from "../policy/narrowing";
 import { readTaint, unknownTaint } from "../policy/context";
 import { saveTaskTaint, taskTaint } from "../policy/carry";
+import { denialScope } from "../policy/denials";
 import type { TaintSource } from "../policy/types";
 import type { Router } from "../models/router";
 import { getThread } from "../stores/threads";
@@ -106,9 +107,11 @@ export interface TurnJobPayload {
   taint?: unknown;
   /** What the run that queued this job could call; a delegated child may call only these (S2-06). Missing or unreadable: the inert tools only. */
   capabilities?: unknown;
-  /** The run this job belongs to: set on a delegated child so a refusal earlier in the chain still holds. */
+  /** The request this job belongs to: set on a delegated child, a wake and a resumed task so a refusal earlier in the chain still holds. */
   rootTurnID?: string;
   rootJob?: string | null;
+  /** The clock a delegated child is measured on: its parent's. A job without one starts a clock of its own. */
+  clockKey?: string;
   /** The run a delegation counts against (see `delegate_task`'s cap on running delegations). */
   rootKey?: string;
   /** The channel the turn's result belongs to. */
@@ -245,10 +248,11 @@ export function registerTurnJob(runner: JobRunner, deps: TurnJobDeps): void {
     }
 
     if (result.endedBy === "wall_time") {
-      // The root job's time limit is the owner's number: a retry would be a new turn with a fresh clock.
+      // The time limit is the owner's number, and a retry keeps the clock of the first try, so it would be stopped again.
+      // The stop message already told the owner why, so the runner does not add a notice of its own.
       const message = "stopped: the time limit for this task ran out";
       if (delegationTaskID) setDelegationState(deps.db, delegationTaskID, "failed", message);
-      throw new JobGiveUp(`not done: ${message}`);
+      throw new JobGiveUp(`not done: ${message}`, true);
     }
     if (result.stopReason !== "end") {
       // runTaskTurn already reported the failure as frames; a non-end stop
@@ -563,7 +567,10 @@ function wakeParent(deps: TurnJobDeps, taskID: string, summary: string, parentDe
   const owner = task.owner_agent_id ?? "";
   const visibility = owner ? resolvePersona(deps.db, owner)?.visibility ?? MISSING_AGENT_VISIBILITY : DEFAULT_VISIBILITY;
   const visible = redactResultForCaller(summary, owner, parentAgentID, visibility);
-  const wakeKey = `wake:${parentThreadID}`;
+  // One wake per parent thread and per request: results of different requests never share a wake, so a wake belongs
+  // to one root (what was refused there holds in it) and has the one clock of its own.
+  const root = briefRoot(task.brief);
+  const wakeKey = `wake:${parentThreadID}:${root ? denialScope(root) : "unrooted"}`;
   const item = {
     taskID: task.id,
     agentID: owner,
@@ -647,6 +654,9 @@ async function runTurn(
         // undefined says the sender did not say what it had read (a bot that starts from it is tainted); a list, even empty, says it did.
         ...(payload.taint !== undefined || payload.wakeKey ? { taint: [...(payload.taint !== undefined ? readTaint(payload.taint) : []), ...wakeTaint(deps.db, payload.results)] } : {}),
         ...(payload.rootTurnID ? { rootTurnID: payload.rootTurnID, rootJob: payload.rootJob ?? null } : {}),
+        // A delegated child is on its parent's clock; a wake, a resumed task and any other job start their own, and a retry keeps its first.
+        ...(payload.clockKey ? { clockKey: payload.clockKey } : {}),
+        ...(retry ? { keepClock: true } : {}),
         jobID: jobID ?? null,
         capabilities: readCapabilities(payload.capabilities),
       },

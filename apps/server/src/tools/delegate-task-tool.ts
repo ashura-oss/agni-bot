@@ -220,7 +220,7 @@ export function registerDelegateTaskTool(registry: ToolRegistry, deps: DelegateT
           // What this run has read goes with the brief, and the child shares this run's root (S2-06).
           // The list is always there when the sender is known: an empty one says "read nothing outside"; none says "unknown".
           ...(ctx.run ? { taint: packTaint(ctx.run) } : {}),
-          ...(ctx.run ? { rootTurnID: ctx.run.rootTurnID, rootJob: ctx.run.rootJob } : {}),
+          ...(ctx.run ? { rootTurnID: ctx.run.rootTurnID, rootJob: ctx.run.rootJob, clockKey: ctx.run.clockKey } : {}),
           // What this run could call: the child's tools are cut down to it (S2-06). None says the sender is unknown, and the child gets only the inert tools.
           ...(ctx.run ? { capabilities: [...ctx.run.effectiveCapabilities] } : {}),
           rootKey,

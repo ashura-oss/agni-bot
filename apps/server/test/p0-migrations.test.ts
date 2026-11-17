@@ -25,7 +25,7 @@ function tempDB(): string {
 
 describe("P0 migration aggregation", () => {
   test("the sprint placeholder lists hold one slot per reserved id", () => {
-    expect(S2_MIGRATIONS).toHaveLength(6); // 54..59
+    expect(S2_MIGRATIONS).toHaveLength(7); // 54..59, and 65 (the run clock: 60..64 are Sprint 3's)
     expect(S3_MIGRATIONS).toHaveLength(5); // 60..64
   });
 

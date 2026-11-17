@@ -15,6 +15,7 @@
 import type { Database } from "bun:sqlite";
 import { RUN_CAP_DEFAULTS, getRunCaps } from "../stores/policy-settings";
 import { newID } from "../util/ids";
+import { readClock } from "./run-clock";
 
 /**
  * How deep a chain of delegated turns may run. Root turn is depth 1, so two
@@ -57,38 +58,23 @@ export function canSelfSchedule(active: number, max: number): boolean {
   return active < max;
 }
 
-/**
- * When a root run began, in epoch ms: the start of its root turn, the chat turn or the job's turn
- * that everything under it hangs from. Null when that cannot be told (no such turn, an unreadable
- * time, a database error): the caller treats it as a reason to stop, not a free pass.
- */
-export function rootStartedAtMs(db: Database, rootTurnID: string): number | null {
-  try {
-    const row = db.query<{ started_at: string | null }, [string]>("SELECT started_at FROM turns WHERE id = ?").get(rootTurnID);
-    const startedAt = row?.started_at ? Date.parse(row.started_at) : Number.NaN;
-    return Number.isFinite(startedAt) ? startedAt : null;
-  } catch {
-    return null;
-  }
-}
-
-/** `unknown`: the root's start or the cap could not be read, so the run may not go on. */
+/** `unknown`: the clock or the cap could not be read, so the run may not go on. */
 export type WallTimeVerdict = { ok: true } | { ok: false; reason: "expired" | "unknown"; wallMs: number | null };
 
 /**
- * May the run under `rootTurnID` take another step? A chat turn, a job and everything delegated
- * under them share one clock, started with the root's turn. Fails closed.
+ * May the run on clock `clockKey` take another step? A chat turn or a job, and everything delegated under it,
+ * share one clock (`run-clock.ts`). The time the owner spent deciding is not counted. Fails closed.
  */
-export function checkWallTime(db: Database, rootTurnID: string, nowMs: number = Date.now()): WallTimeVerdict {
+export function checkWallTime(db: Database, clockKey: string, nowMs: number = Date.now()): WallTimeVerdict {
   let wallMs: number;
   try {
     wallMs = rootJobWallMs(db);
   } catch {
     return { ok: false, reason: "unknown", wallMs: null };
   }
-  const startedAt = rootStartedAtMs(db, rootTurnID);
-  if (startedAt === null) return { ok: false, reason: "unknown", wallMs };
-  return wallTimeExceeded(startedAt, nowMs, wallMs) ? { ok: false, reason: "expired", wallMs } : { ok: true };
+  const clock = readClock(db, clockKey, nowMs);
+  if (clock === null) return { ok: false, reason: "unknown", wallMs };
+  return wallTimeExceeded(clock.startedAtMs, nowMs - clock.waitedMs, wallMs) ? { ok: false, reason: "expired", wallMs } : { ok: true };
 }
 
 /** Maximum characters of handoff summary text carried between agents. */

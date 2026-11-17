@@ -215,15 +215,36 @@ describe("INV-14 root-job wall time", () => {
     expect(s.get<{ delegate_state: string }>("SELECT delegate_state FROM tasks WHERE owner_agent_id = 'researcher'")?.delegate_state, "the task was not marked failed").toBe("failed");
   });
 
-  scenarioTest("a run whose root's start cannot be found is stopped, not let through", async () => {
+  /** What a job that was stopped for time leaves behind: the stop is the run's time limit, whatever the protocol calls it. */
+  function expectStoppedForTime(s: Awaited<ReturnType<typeof scenarios.start>>, id: string): void {
+    expect(s.model.requests.length, "a run whose clock could not be read called the model").toBe(0);
+    const job = s.get<{ state: string; result: string | null }>("SELECT state, result FROM jobs WHERE id = ?", id);
+    expect(job?.state, "the job was not failed").toBe("failed");
+    expect(job?.result ?? "", "the job does not say the time limit stopped it").toMatch(/time limit/);
+    const turn = s.get<{ stop_reason: string; ended_by: string | null }>("SELECT stop_reason, ended_by FROM turns ORDER BY started_at DESC, rowid DESC LIMIT 1");
+    expect(turn, "the stopped run left no turn").not.toBeNull();
+    expect(turn?.ended_by, "the turn does not record that the time limit ended it").toBe("wall_time");
+    expect(turn?.stop_reason).toBe("timeout");
+  }
+
+  scenarioTest("a delegated run whose parent's clock cannot be found is stopped, not let through", async () => {
     const s = await scenarios.start();
     s.model.queue(say("Done."));
     const id = enqueueJob(s.db, {
       kind: "turn",
-      payload: { text: "Do the thing.", agentID: "researcher", notify: false, rootTurnID: "trn_never_existed", rootJob: null },
+      payload: { text: "Do the thing.", agentID: "researcher", notify: false, rootTurnID: "trn_never_existed", rootJob: null, clockKey: "trn_never_existed" },
     }).id;
     await s.runner().tick();
-    expect(s.model.requests.length, "a run with an unknown start time called the model").toBe(0);
-    expect(s.get<{ state: string }>("SELECT state FROM jobs WHERE id = ?", id)?.state).not.toBe("done");
+    expectStoppedForTime(s, id);
+    expect(s.get("SELECT clock_key FROM run_clocks WHERE clock_key = 'trn_never_existed'"), "a child made up a clock for its parent").toBeNull();
+  });
+
+  scenarioTest("a clock whose record of the owner's waits cannot be read stops the run, not lets it through", async () => {
+    const s = await scenarios.start();
+    s.db.run("DROP TABLE run_clock_waits");
+    s.model.queue(say("Done."));
+    const id = enqueueJob(s.db, { kind: "turn", payload: { text: "Do the thing.", agentID: "researcher", notify: false } }).id;
+    await s.runner().tick();
+    expectStoppedForTime(s, id);
   });
 });
