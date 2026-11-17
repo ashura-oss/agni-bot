@@ -89,6 +89,42 @@ function embeddedBase64(bytes: Buffer, lead: 0 | 1 | 2): string[] {
 /** `text` as it appears between the quotes of a JSON string. */
 const jsonEscaped = (text: string): string => JSON.stringify(text).slice(1, -1);
 
+/**
+ * The escapes other common serializers write on top of JSON's own, by kind: `/` as `\/` (PHP); `<`, `>` and `&` as
+ * `<`, `>`, `&` (Go, .NET, PHP with flags); non-ASCII text as `\uXXXX` per UTF-16 unit (Python, PHP,
+ * .NET). Hex digits come in lower and upper case, and one serializer applies several kinds at once.
+ */
+const SERIALIZER_ESCAPES: readonly { present: RegExp; apply: (text: string, upper: boolean) => string }[] = [
+  { present: /\//, apply: (text) => text.replaceAll("/", "\\/") },
+  { present: /[<>&]/, apply: (text, upper) => text.replace(/[<>&]/g, (ch) => unicodeEscape(ch, upper)) },
+  { present: /[^\x00-\x7f]/, apply: (text, upper) => text.replace(/[^\x00-\x7f]/g, (ch) => unicodeEscape(ch, upper)) },
+];
+
+const unicodeEscape = (unit: string, upper: boolean): string => {
+  const digits = unit.charCodeAt(0).toString(16).padStart(4, "0");
+  return `\\u${upper ? digits.toUpperCase() : digits}`;
+};
+
+/**
+ * `jsonText` (a value already escaped the JSON way) as each serializer above writes it: every non-empty combination
+ * of the kinds it holds, in lower and upper hex. One level only, and none for a value without these characters, so
+ * the cost is at most 14 more forms for a value that holds all three kinds, and none for the usual key.
+ */
+function serializerForms(jsonText: string): string[] {
+  const kinds = SERIALIZER_ESCAPES.filter((kind) => kind.present.test(jsonText));
+  const forms: string[] = [];
+  for (let subset = 1; subset < 1 << kinds.length; subset++) {
+    for (const upper of [false, true]) {
+      let form = jsonText;
+      kinds.forEach((kind, index) => {
+        if (subset & (1 << index)) form = kind.apply(form, upper);
+      });
+      forms.push(form);
+    }
+  }
+  return forms;
+}
+
 function variantsOf(value: string): string[] {
   const forms = new Set<string>();
   const add = (form: string): void => {
@@ -112,6 +148,7 @@ function variantsOf(value: string): string[] {
     const once = jsonEscaped(base);
     add(once);
     add(jsonEscaped(once));
+    for (const form of serializerForms(once)) add(form);
     for (const lead of [0, 1, 2] as const) for (const form of embeddedBase64(bytes, lead)) add(form);
   }
   return [...forms];
