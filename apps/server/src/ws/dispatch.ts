@@ -484,12 +484,23 @@ interface QueuedMessage {
   rowIDs: string[];
 }
 
+/**
+ * The frame as JSON for `queued_messages`. Only the owner's words are masked, one value at a time and before the frame is
+ * serialized: masking the finished JSON would also rewrite key names and quotes, and boot replay reads this text back.
+ * (`files` holds upload IDs, not words.)
+ */
+function frameForStorage(frame: Extract<ClientFrame, { type: "msg.send" }>): string {
+  const stored: Extract<ClientFrame, { type: "msg.send" }> = { ...frame, text: redactForStorage(frame.text) };
+  if (frame.texts) stored.texts = frame.texts.map((part) => redactForStorage(part));
+  return JSON.stringify(stored);
+}
+
 /** H22: write the owner's message before anything acknowledges it. A key the owner pasted is masked in what is written (words and frame). */
 function persistOwnerMessage(deps: DispatchDeps, session: Session, frame: Extract<ClientFrame, { type: "msg.send" }>, text: string): string {
   const id = newID("qmsg");
   deps.db.run(
     "INSERT INTO queued_messages (id, frame, text, device_id, device_name, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-    [id, redactForStorage(JSON.stringify(frame)), redactForStorage(text), session.device?.id ?? "", session.device?.name ?? "You", nowISO()],
+    [id, frameForStorage(frame), redactForStorage(text), session.device?.id ?? "", session.device?.name ?? "You", nowISO()],
   );
   return id;
 }
@@ -507,16 +518,26 @@ export function resumeQueuedMessages(deps: DispatchDeps): number {
   const rows = deps.db.query<{ id: string; frame: string; text: string; device_id: string; device_name: string }, []>(
     "SELECT id, frame, text, device_id, device_name FROM queued_messages ORDER BY created_at, rowid",
   ).all();
+  let resumed = 0;
   for (const row of rows) {
     if (isDeviceRevoked(deps.db, row.device_id)) {
       forgetOwnerMessages(deps.db, [row.id]);
       continue;
     }
     const session: Session = { ...newSession(), authed: true, device: { id: row.device_id, name: row.device_name } };
-    const frame = JSON.parse(row.frame) as Extract<ClientFrame, { type: "msg.send" }>;
+    let frame: Extract<ClientFrame, { type: "msg.send" }>;
+    try {
+      frame = JSON.parse(row.frame) as Extract<ClientFrame, { type: "msg.send" }>;
+    } catch {
+      // One bad row must not stop the server from starting. Its content is not logged: it may hold what the owner typed.
+      log.error(`dropped queued owner message ${row.id}: its saved frame is not valid JSON`);
+      forgetOwnerMessages(deps.db, [row.id]);
+      continue;
+    }
     dispatchUserMessage(deps, session, frame, row.text, [row.id]);
+    resumed += 1;
   }
-  return rows.length;
+  return resumed;
 }
 
 /**
