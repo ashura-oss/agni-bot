@@ -15,6 +15,7 @@ import { dirname, join, resolve } from "node:path";
 import { canonicalAgentID } from "../agent/personas";
 import { getConversation } from "../stores/conversations";
 import { getThread } from "../stores/threads";
+import { redactJSONText } from "../util/redact-json";
 import { redactForStorage } from "../util/redact-storage";
 import { renderShareHTML, type ShareDocument, type ShareRecord } from "./render";
 
@@ -114,14 +115,33 @@ export function purgeExpiredShares(now = Date.now()): number {
   return removed;
 }
 
+/** The fields of a record that hold JSON as a string: a tool's arguments and its result. */
+const JSON_FIELDS = new Set(["args", "result"]);
+
 /**
  * The document with every registered secret masked. A tool's result or an error row is text the server
  * did not write (a server that echoed the bearer it was sent, say), and the page is a file on disk that
  * is also handed to whoever holds the link. Masked as data, before the markup escapes it: a secret with
  * `&` or `<` in it no longer matches once it is rendered as `&amp;`.
+ *
+ * Field by field, never as one serialized blob: JSON escaping changes a secret that holds a quote or a
+ * backslash, a tool's args hold JSON inside a string (escaped twice), and a short registered value can equal
+ * JSON syntax and would corrupt the document. Text fields are masked as text, the JSON fields are parsed and
+ * walked (`redactJSONText`), and `kind` is left alone: it is a name this code chose, not text from outside.
  */
-function maskedDocument(doc: ShareDocument): ShareDocument {
-  return JSON.parse(redactForStorage(JSON.stringify(doc))) as ShareDocument;
+export function maskedDocument(doc: ShareDocument): ShareDocument {
+  const text = (value: unknown): unknown => (typeof value === "string" ? redactForStorage(value) : value);
+  const record = (entry: ShareRecord): ShareRecord =>
+    Object.fromEntries(
+      Object.entries(entry).map(([key, value]) => {
+        if (key === "kind" || typeof value !== "string") return [key, value];
+        return [key, JSON_FIELDS.has(key) ? redactJSONText(value) : redactForStorage(value)];
+      }),
+    ) as unknown as ShareRecord;
+  return {
+    ...(Object.fromEntries(Object.entries(doc).map(([key, value]) => [key, text(value)])) as unknown as ShareDocument),
+    records: doc.records.map(record),
+  };
 }
 
 /** Render and write the document; returns the token and the URL to hand out. */
