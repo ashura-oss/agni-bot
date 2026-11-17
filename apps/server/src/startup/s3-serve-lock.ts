@@ -23,10 +23,11 @@
  *     in the middle of writing (empty or cut short, written a moment ago): that is `starting`, and
  *     refuses like a held lock instead of being taken over while it is being written.
  *   Two `serve` processes that both find the same stale lock in the same instant are still stopped by
- *   the port (EADDRINUSE); a takeover removes the stale file only if it is still the file that was read.
+ *   the port (EADDRINUSE); a takeover removes the stale file only if it is still the file that was read, by renaming it
+ *   to a name of its own first (see `removeServeLockIfUnchanged`), so two takeovers cannot both delete it.
  */
 import { randomUUID } from "node:crypto";
-import { closeSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, linkSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { agniHome } from "../home";
 import { isProcessAlive } from "../util/process-alive";
@@ -141,16 +142,54 @@ function ownedBy(path: string, pid: number, token: string | undefined): boolean 
   }
 }
 
-/** Remove the lock file only if it still says `raw` (nobody replaced it since it was read). */
+/**
+ * Remove the lock file only if it is still the one that was read (it says `raw`). Reading and then deleting is not safe:
+ * between the two a faster process can delete the file and create its own lock, and the delete would then take that one.
+ * So the file is first renamed to a name of its own (one process's rename takes it, any other finds nothing), the renamed
+ * file is checked against `raw`, and only then deleted. A file that is not the one that was judged is put back, unless
+ * a newer lock already has the name: then that one stays and the renamed file is dropped. True when the lock was removed.
+ */
 export function removeServeLockIfUnchanged(path: string, raw: string): boolean {
+  const aside = `${path}.${randomUUID()}.removing`;
   try {
-    if (readFileSync(path, "utf8") !== raw) return false;
-    unlinkSync(path);
-    return true;
+    renameSync(path, aside);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw error;
   }
+  let text: string | undefined;
+  try {
+    text = readFileSync(aside, "utf8");
+  } catch {
+    // Unreadable: not provably the lock that was judged, so it is put back below.
+  }
+  if (text === raw) {
+    try {
+      unlinkSync(aside);
+    } catch {
+      // The lock's own name is already free, which is the outcome wanted; a leftover side file is harmless.
+    }
+    return true;
+  }
+  try {
+    // A hard link refuses to replace a lock that was created in the meantime; a rename would overwrite it.
+    linkSync(aside, path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+      try {
+        renameSync(aside, path);
+      } catch {
+        throw new Error(`the server lock ${path} was set aside as ${aside} and could not be put back; rename it back if no other Agni server is running`);
+      }
+      return false;
+    }
+  }
+  try {
+    unlinkSync(aside);
+  } catch {
+    // Put back already; only the side copy is left.
+  }
+  return false;
 }
 
 /**
