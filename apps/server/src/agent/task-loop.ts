@@ -577,8 +577,10 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
       ...(run.policy?.taint ?? []),
       // A run another bot started is tainted unless the sender said it had read nothing outside (an empty list).
       ...(principal.kind === "peer" && run.policy?.taint === undefined ? [unknownTaint(`a brief from ${run.peer?.from ?? "another bot"}, which did not say what it had read`)] : []),
-      // A session that comes back from a restart has read what it had read, or something unknown if nothing was saved.
-      ...(recovering ? restoredTaint(existing?.taint ?? null) : []),
+      // A session that comes back from a restart has read what it had read, or something unknown if nothing was saved. The owner's own
+      // answer to the bot's question is the owner's turn like any other: the history the session carried is dropped from the run (the
+      // record keeps it, below), and what the session itself had read stays.
+      ...(recovering ? restoredTaint(existing?.taint ?? null).filter((source) => !(ownersChatTurn && source.kind === "history")) : []),
       // A new run in a thread reads what the runs before it wrote there. If the last of them had read outside text (or left no readable
       // record of it), the history holds words written under that text's influence. The owner's own chat turn is exempt: the owner is
       // there to see what is said, and what they ask for is their own. Every other run (a job's fire, a wake, a bot's brief) is not, and
@@ -592,7 +594,8 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   // What this run reads is saved with its session (and its task) the moment it is read: a restart or a crash cannot lose it.
   // The owner's own chat turn is not marked by the history, but the record it leaves is: the words that made it tainted are still in the
   // thread, and the next run that is not the owner's own turn (a job's fire) reads this record. A clean turn must not wash it off.
-  const carriedHistory = ownersChatTurn && !recovering ? historyTaint(existing) : [];
+  // The same holds for the owner's answer to a bot's question (a resumed session): the history it carried is dropped from the run, not from the record.
+  const carriedHistory = !ownersChatTurn ? [] : recovering ? restoredTaint(existing?.taint ?? null).filter((source) => source.kind === "history") : historyTaint(existing);
   const saveTaint = (sources: readonly TaintSource[]): void => {
     try {
       const record = carriedHistory.length > 0 && !sources.some((source) => source.kind === "history") ? [...sources, ...carriedHistory] : sources;

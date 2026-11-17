@@ -26,7 +26,7 @@ import type { RunContext, TaintSource } from "../src/policy/types";
 import { resetS2Startup } from "../src/startup/s2";
 import { addApprovalRule, approvalTarget } from "../src/stores/approval-rules";
 import { enqueueJob, listJobs, parseJobPayload } from "../src/stores/jobs";
-import { createThread } from "../src/stores/threads";
+import { createThread, createTurn } from "../src/stores/threads";
 import { registerDelegateTaskTool } from "../src/tools/delegate-task-tool";
 import { ToolRegistry } from "../src/tools/registry";
 import { buildTaskToolRegistry } from "../src/tools/task-registry";
@@ -218,6 +218,67 @@ describe("an owner's chat turn between two fires", () => {
     const second = watch();
     await fire(db, callThenAnswer);
     expect(kinds(second[0])).toEqual([]);
+  });
+});
+
+describe("an owner's answer to a bot's question", () => {
+  const HISTORY: TaintSource = { kind: "history", label: "earlier messages in this conversation", at: "2026-11-16T10:00:00Z" };
+  /** A thread whose session is parked on a question the bot asked, with this record of what the run had read. */
+  function waitingThread(database: Database, taint: TaintSource[]): string {
+    const thread = createThread(database, "ea");
+    createTurn(database, { id: "trn_asked", threadID: thread.id, agentID: "ea" });
+    const log = [{ role: "user", content: "Check the inbox" }, { role: "assistant", content: "Which account?" }];
+    database.run(
+      "INSERT INTO agent_sessions (thread_id, turn_id, state, message_log, step_count, token_count, max_steps, max_tokens, created_at, updated_at, taint) VALUES (?, 'trn_asked', 'waiting', ?, 0, 0, 0, 0, datetime('now'), datetime('now'), ?)",
+      [thread.id, JSON.stringify(log), JSON.stringify(taint)],
+    );
+    return thread.id;
+  }
+  async function answers(database: Database, threadID: string, read?: (run: RunContext) => void): Promise<Seen[]> {
+    const seen = watch(read);
+    await runTaskTurn(database, routerOf(callThenAnswer), settings, { threadID, text: "The work one", persona: resolvePersona(database, "ea")!, emit: () => undefined, signal: new AbortController().signal });
+    return seen;
+  }
+  const savedKinds = (database: Database, threadID: string): string[] =>
+    JSON.parse(database.query<{ taint: string }, [string]>("SELECT taint FROM agent_sessions WHERE thread_id = ?").get(threadID)!.taint).map((source: { kind: string }) => source.kind).sort();
+
+  test("runs clean when what the session carried was only the history, and the record keeps it", async () => {
+    db = openDatabase(":memory:");
+    const threadID = waitingThread(db, [HISTORY]);
+    const seen = await answers(db, threadID);
+    expect(seen[0]?.principal, "the answer did not run as the owner; the test is out of step").toBe("owner");
+    expect(kinds(seen[0]), "the owner's own answer started marked by the thread's history").toEqual([]);
+    expect(savedKinds(db, threadID), "the record lost the history mark: the next fire would start clean").toEqual(["history"]);
+  });
+
+  test("keeps what the session itself had read, drops only the history, and the record holds both", async () => {
+    db = openDatabase(":memory:");
+    const threadID = waitingThread(db, [HISTORY, WEB]);
+    const seen = await answers(db, threadID);
+    expect(kinds(seen[0])).toEqual(["web"]);
+    expect(savedKinds(db, threadID)).toEqual(["history", "web"]);
+  });
+
+  test("a session with no record of what it read still resumes marked: only a history source is dropped", async () => {
+    db = openDatabase(":memory:");
+    const thread = createThread(db, "ea");
+    createTurn(db, { id: "trn_asked", threadID: thread.id, agentID: "ea" });
+    db.run(
+      "INSERT INTO agent_sessions (thread_id, turn_id, state, message_log, step_count, token_count, max_steps, max_tokens, created_at, updated_at, taint) VALUES (?, 'trn_asked', 'waiting', ?, 0, 0, 0, 0, datetime('now'), datetime('now'), NULL)",
+      [thread.id, JSON.stringify([{ role: "user", content: "Check the inbox" }, { role: "assistant", content: "Which account?" }])],
+    );
+    const seen = await answers(db, thread.id);
+    expect(kinds(seen[0]), "a session with no record came back clean").toEqual(["unknown"]);
+  });
+
+  test("a resumed job's run is not the owner's answer, and keeps the history", async () => {
+    db = openDatabase(":memory:");
+    const threadID = waitingThread(db, [HISTORY]);
+    const seen = watch();
+    const jobRun = { threadID, text: "Check the inbox", inputRole: "system" as const, persona: resolvePersona(db, "ea")!, emit: () => undefined, signal: new AbortController().signal };
+    await runTaskTurn(db, routerOf(callThenAnswer), settings, jobRun);
+    expect(seen[0]?.principal).toBe("job");
+    expect(kinds(seen[0])).toContain("history");
   });
 });
 
