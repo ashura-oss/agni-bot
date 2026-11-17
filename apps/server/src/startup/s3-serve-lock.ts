@@ -266,6 +266,7 @@ function handle(path: string, pid: number, token: string | undefined): ServeLock
   const release = (): void => {
     if (released) return;
     released = true;
+    process.removeListener("exit", release);
     if (!ownedBy(path, pid, token)) return;
     try {
       unlinkSync(path);

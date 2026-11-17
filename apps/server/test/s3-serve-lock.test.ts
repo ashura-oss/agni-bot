@@ -227,3 +227,18 @@ describe("acquireServeLock", () => {
     expect(() => acquireServeLock({ home })).toThrow(ServeLockError);
   });
 });
+
+describe("release", () => {
+  test("a released handle no longer listens for the process exit (acquiring and releasing repeatedly leaks no listener)", () => {
+    const before = process.listenerCount("exit");
+    for (let i = 0; i < 5; i++) acquireServeLock({ home: fresh() }).release();
+    expect(process.listenerCount("exit")).toBe(before);
+  });
+
+  test("an unreleased handle still releases when the process exits", () => {
+    const before = process.listenerCount("exit");
+    const held = acquireServeLock({ home: fresh() });
+    expect(process.listenerCount("exit")).toBe(before + 1);
+    held.release();
+  });
+});
