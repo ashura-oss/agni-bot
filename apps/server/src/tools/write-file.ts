@@ -57,12 +57,23 @@ function hasDanglingLink(target: string): boolean {
 }
 
 /**
+ * Does `path` name an NTFS alternate data stream (`notes.txt:hidden`)? A stream does not show in a listing and `writeTargetExists`
+ * does not see it, so a write to one would put text in a file the owner is never shown, with no card for "overwrite". On Windows a
+ * colon belongs only right after the drive letter (`C:`) or in the `\\?\` and `\\.\` prefixes; on another system it is an ordinary character.
+ */
+export function namesStream(path: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (platform !== "win32") return false;
+  return path.replace(/^\\\\[?.]\\/, "").replace(/^[a-zA-Z]:/, "").includes(":");
+}
+
+/**
  * The real path `path` names, in the spelling on disk: the one walk a refusal's key uses (policy/path-key.ts `realPathOf`:
  * symlinks, junctions, 8.3 short names and the on-disk case all end at one spelling, the missing tail appended). Null for a
  * dangling symlink. A relative path resolves against `base`.
  */
 function realTarget(path: string, base: string): string | null {
   const target = resolve(base, path);
+  if (namesStream(target)) return null;
   return hasDanglingLink(target) ? null : realPathOf(target);
 }
 
@@ -132,6 +143,7 @@ export function createExclusive(target: string, content: string, append: boolean
 
 export function writeFile(args: WriteFileArgs): WriteFileResult {
   if (args.content.length > MAX_BYTES) throw new Error("content exceeds 1 MB");
+  if (namesStream(resolve(scratchDir(), args.path))) throw new Error(`${args.path} names a hidden stream of a file (a colon after the drive); write_file writes files only`);
   const target = resolveWritePath(args.path);
   if (!target) throw new Error(`${args.path} is a dangling link and cannot be written`);
   const created = !writeTargetExists(args.path);

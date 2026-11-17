@@ -4,12 +4,12 @@
  * those same keys. The file is still written under the on-disk spelling, never a folded one.
  */
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { canonicalPathKey } from "../src/policy/path-key";
-import { isOutsideScratch, resolveWritePath } from "../src/tools/write-file";
+import { isOutsideScratch, namesStream, resolveWritePath, writeFile } from "../src/tools/write-file";
 
 const WINDOWS = process.platform === "win32";
 let root = "";
@@ -38,6 +38,19 @@ function shortNameOf(folder: string): string | null {
   }
 }
 
+/** Does the volume the tests write on make 8.3 names? Asked once, with a throwaway folder, so a test that needs them can say it was skipped for want of them. */
+const SHORT_NAMES = (() => {
+  if (!WINDOWS) return false;
+  const probe = mkdtempSync(join(tmpdir(), "agni-wf-short-probe-"));
+  try {
+    const long = join(probe, "a-folder-with-a-long-name");
+    mkdirSync(long);
+    return shortNameOf(long) !== null;
+  } finally {
+    rmSync(probe, { recursive: true, force: true });
+  }
+})();
+
 describe("write_file's path is the refusal's key, kept in the on-disk spelling", () => {
   test.skipIf(!WINDOWS)("a different case names the on-disk spelling, not the spelling the model typed", () => {
     mkdirSync(join(scratch, "MixedDir"));
@@ -54,14 +67,15 @@ describe("write_file's path is the refusal's key, kept in the on-disk spelling",
     }
   });
 
-  test.skipIf(!WINDOWS)("a short-name spelling of a folder inside scratch is inside scratch, and is the same file", () => {
+  // Skipped, and said so in its name, on a system that is not Windows or whose volume makes no 8.3 names.
+  test.skipIf(!SHORT_NAMES)("a short-name spelling of a folder inside scratch is inside scratch, and is the same file (needs a Windows volume with 8.3 names)", () => {
     const long = join(scratch, "a-folder-with-a-long-name");
     mkdirSync(long);
     writeFileSync(join(long, "f.txt"), "x");
     const short = shortNameOf(long);
-    if (!short) return; // this volume makes no 8.3 names
-    expect(resolveWritePath(join(short, "f.txt"))).toBe(join(long, "f.txt"));
-    expect(isOutsideScratch(join(short, "f.txt"), scratch)).toBe(false);
+    expect(short, "the probe found 8.3 names on this volume, but this folder has none").not.toBeNull();
+    expect(resolveWritePath(join(short!, "f.txt"))).toBe(join(long, "f.txt"));
+    expect(isOutsideScratch(join(short!, "f.txt"), scratch)).toBe(false);
   });
 
   test("a path outside scratch is outside, however it is spelled", () => {
@@ -70,5 +84,35 @@ describe("write_file's path is the refusal's key, kept in the on-disk spelling",
     expect(isOutsideScratch(outside, scratch)).toBe(true);
     expect(isOutsideScratch(join(scratch, "..", "outside", "x"), scratch)).toBe(true);
     expect(isOutsideScratch(join(scratch, "sub", "x"), scratch)).toBe(false);
+  });
+});
+
+describe("a colon after the drive names a hidden stream, not a file", () => {
+  test("the words for it: a colon after the drive on Windows, never on another system", () => {
+    const streams = [String.raw`C:\scratch\notes.txt:hidden`, "notes.txt:hidden", String.raw`C:\scratch\a\b.txt::$DATA`, String.raw`\\?\C:\scratch\notes.txt:hidden`, String.raw`\\host\share\notes.txt:hidden`];
+    for (const path of streams) {
+      expect({ path, stream: namesStream(path, "win32") }).toEqual({ path, stream: true });
+    }
+    const files = [String.raw`C:\scratch\notes.txt`, "notes.txt", String.raw`\\?\C:\scratch\notes.txt`, String.raw`\\host\share\notes.txt`, "C:notes.txt", String.raw`sub\a b.txt`];
+    for (const path of files) {
+      expect({ path, stream: namesStream(path, "win32") }).toEqual({ path, stream: false });
+    }
+    // A colon is an ordinary character in a file name there.
+    expect(namesStream("/home/me/scratch/a:b.txt", "linux")).toBe(false);
+  });
+
+  test.skipIf(!WINDOWS)("a path with a stream is not a path write_file resolves, and is outside scratch (so it asks)", () => {
+    expect(resolveWritePath("notes.txt:hidden")).toBeNull();
+    expect(resolveWritePath(join(scratch, "notes.txt:hidden"))).toBeNull();
+    expect(isOutsideScratch("notes.txt:hidden", scratch)).toBe(true);
+    expect(resolveWritePath(join(scratch, "notes.txt"))).not.toBeNull();
+  });
+
+  test.skipIf(!WINDOWS)("write_file refuses it, says why, and writes nothing", () => {
+    expect(() => writeFile({ path: "notes.txt:hidden", content: "secret" })).toThrow(/stream|colon/i);
+    expect(existsSync(join(scratch, "notes.txt"))).toBe(false);
+    writeFileSync(join(scratch, "notes.txt"), "visible");
+    expect(() => writeFile({ path: "notes.txt:hidden", content: "secret", append: true })).toThrow(/stream|colon/i);
+    expect(readFileSync(join(scratch, "notes.txt"), "utf8")).toBe("visible");
   });
 });
