@@ -12,7 +12,7 @@ import { log } from "../log";
 import { audit } from "../policy/audit-sink";
 import { grantContinueOnce } from "../policy/budget";
 import { listBotStates, readPauseState, setAgentEnabled, setAllPaused } from "../policy/pause";
-import { fullApprovalText } from "./approval-full";
+import { fullApprovalText, markFullOpened } from "./approval-full";
 import { cancelTurnsForPause, runningTurnCountForAgent, type PauseAbortReason } from "./turn-registry";
 
 export interface PolicyFrameDeps {
@@ -211,5 +211,7 @@ export function handleSpendContinue(deps: PolicyFrameDeps, frame: Extract<Client
 export function handleApprovalFull(deps: PolicyFrameDeps, frame: Extract<ClientFrame, { type: "approval.full" }>): void {
   const full = fullApprovalText(deps.db, frame.requestID);
   if (!full) return deps.error("not_found", `no waiting card ${frame.requestID} with a full text to show`);
+  // The owner's client has the whole text now; the card may be allowed (`approve.reply`, `ws/dispatch.ts`).
+  markFullOpened(frame.requestID);
   deps.reply({ type: "approval.full.ok", requestID: frame.requestID, text: full.text, ...(full.cut ? { cut: true } : {}) });
 }

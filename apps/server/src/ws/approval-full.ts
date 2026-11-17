@@ -14,11 +14,49 @@
  * Only a card that is still waiting has a full text to show. A card that is
  * answered, expired, or has no stored call gives nothing; the client then keeps
  * Allow locked, and Deny still works.
+ *
+ * The server holds the same line: it records which cards had their full text
+ * answered (`markFullOpened`), and `approve.reply` refuses an allow to a
+ * truncated card that was not (`mustOpenFirst`, `wasFullOpened`), so a client
+ * that skips the lock cannot allow a call nobody read.
  */
 import type { Database } from "bun:sqlite";
 import { escapeUnsafe } from "../agent/card-text";
 import { previewIsCut, previewNeedsFullView } from "../agent/approval-broker";
+import { loadCardMeta } from "../agent/pending-cards";
 import { redact } from "../util/redact";
+
+/** The cards whose full text was answered, oldest first. Bounded: a card that is never answered would otherwise stay here for good. */
+const OPENED_MAX = 2_000;
+const opened = new Set<string>();
+
+/** Note that the full text of this card was answered to a client. */
+export function markFullOpened(requestID: string): void {
+  opened.delete(requestID);
+  opened.add(requestID);
+  while (opened.size > OPENED_MAX) opened.delete(opened.values().next().value as string);
+}
+
+/** Was this card's full text answered? */
+export function wasFullOpened(requestID: string): boolean {
+  return opened.has(requestID);
+}
+
+/** The card is decided or gone: nothing more to remember about it. */
+export function forgetOpened(requestID: string): void {
+  opened.delete(requestID);
+}
+
+/**
+ * Must the owner open this card's full text before it can be allowed? The flag it was raised with, saved with it. A card whose saved flag
+ * is missing or cannot be read is judged from its own preview the way it was when raised, and one with no preview to judge is locked.
+ */
+export function mustOpenFirst(db: Database, requestID: string): boolean {
+  const meta = loadCardMeta(db, requestID);
+  if (typeof meta?.truncated === "boolean") return meta.truncated;
+  const row = db.query<{ preview: string | null }, [string]>("SELECT preview FROM approvals WHERE id = ?").get(requestID);
+  return !row?.preview || previewIsCut(row.preview) || previewNeedsFullView(row.preview);
+}
 
 /** The most characters one answer carries; a bigger call is cut and `cut` says so. */
 export const FULL_TEXT_MAX_CHARS = 1_000_000;

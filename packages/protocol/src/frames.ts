@@ -487,6 +487,7 @@ export const ClientFrameSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("approve.reply"),
     requestID: z.string().min(1),
+    /** An allow to a card marked `truncated` is refused (`error` `approval_not_opened`) until `approval.full` was answered for it; `reject` always works. */
     decision: DecisionSchema,
   }),
   /**

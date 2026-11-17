@@ -99,6 +99,7 @@ import { listApprovalRules, revokeApprovalRule } from "../stores/approval-rules"
 import { loadCardMeta } from "../agent/pending-cards";
 import { audit } from "../policy/audit-sink";
 import { packCarried, storedCarried, taskTaint } from "../policy/carry";
+import { forgetOpened, mustOpenFirst, wasFullOpened } from "./approval-full";
 import { isRunPaused } from "../policy/pause";
 import { redact } from "../util/redact";
 import {
@@ -1516,6 +1517,12 @@ function handleApproveReply(
     sendError(deps, session, "unknown_request", CARD_EXPIRED);
     return;
   }
+  // A card marked truncated hides part of the call, or is too long to take in at a glance: it is not allowed until its full text was opened
+  // (the web app is to lock Allow the same way, S2-6; this is the server's own line, for any client). Deny is always possible. Fail closed.
+  if (frame.decision !== "reject" && mustOpenFirst(deps.db, frame.requestID) && !wasFullOpened(frame.requestID)) {
+    sendError(deps, session, "approval_not_opened", "This card is marked as too long to read at a glance. Open its full text (approval.full) before you allow it. The card is still waiting.");
+    return;
+  }
   // The answer goes on the audit record before it takes effect: a log that is down leaves the card waiting.
   try {
     audit({
@@ -1532,6 +1539,7 @@ function handleApproveReply(
     "UPDATE approvals SET status = 'decided', decision = ?, decided_at = ? WHERE id = ? AND status = 'pending'",
     [frame.decision, nowISO(), frame.requestID],
   );
+  forgetOpened(frame.requestID);
   resolveApprovalWaiter(frame.requestID, frame.decision);
   // Every device drops the card, not only the one that answered.
   deps.emit({ type: "approval.closed", requestID: frame.requestID, kind: "approval", reason: "decided" });
