@@ -113,12 +113,11 @@ export interface RunContext {
    */
   narrowed?: boolean;
   /**
-   * Where this run's chain came from (`policy/provenance.ts`). `ownerStarted` is a positive marker set by the front door that knows
-   * (the owner's own chat turn, a job the owner made); `botChained` is set by any link a bot made, and never cleared. A run is the
-   * owner's own work only when the first is true and the second false: a missing or unreadable record is a bot's.
+   * The chain this run belongs to is the owner's own work: it began with the owner (their chat turn, or a CLI job they made) and no link
+   * a bot made came since (`policy/carry.ts`). One sticky bit: set by the front door that knows, cleared by any bot link, false when
+   * the run cannot say.
    */
-  ownerStarted: boolean;
-  botChained: boolean;
+  ownerOnly: boolean;
   /** Outsider text this run has read. Empty means untainted. Grows during the run; never shrinks. */
   taint: { sources: TaintSource[] };
   budget: RunBudget;

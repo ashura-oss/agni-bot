@@ -7,12 +7,10 @@ import { peerEnvelope, stripPeerTags } from "./peer-message";
 import { ApprovalBroker, waitForApprovalDecision } from "./approval-broker";
 import { gateToolCall } from "./tool-gate";
 import { abortReasonOf } from "./abort-reason";
-import { markRun } from "../policy/carry";
+import { markRun, saveTaskTaint, type Carried } from "../policy/carry";
 import { createRunContext, isTainted, packTaint, readTaint, unknownTaint } from "../policy/context";
-import type { Provenance } from "../policy/provenance";
 import { narrowCapabilities } from "../policy/narrowing";
 import { ownerWordsOf, recordOwnerWords } from "../policy/owner-words";
-import { saveTaskTaint } from "../policy/carry";
 import { decide } from "../policy/engine";
 import { budgetRunKey } from "../policy/budget";
 import { budgetStopFromRefusal, budgetStopMessage, pauseStopMessage, wallTimeStopMessage } from "../policy/budget-messages";
@@ -151,37 +149,14 @@ export interface TaskTurnRun {
   /** This turn tells a parent bot that work it delegated has finished (a wake). */
   wake?: boolean;
   /**
-   * Where the run sits in the policy's picture: the outside text it starts with (what a
-   * parent carried down, or what the finished tasks it is told about read), and the
-   * root it belongs to, so an owner's "no" earlier in the chain still holds.
+   * Where the run sits in the policy's picture: what the work that started it handed it (`Carried`, `policy/carry.ts`): the outside
+   * text it starts with, the root it belongs to (so an owner's "no" earlier in the chain still holds), the tools it is cut down to,
+   * and whether it is the owner's own work. Server-set.
    */
-  policy?: {
-    taint?: TaintSource[];
-    /** The refusal scope (`RunContext.rootTurnID`, `rootJob`): which request's "no" still holds. Not the clock. */
-    rootTurnID?: string;
-    rootJob?: string | null;
-    /** The refusal scope of the run that scheduled this job, which the job keeps (`RunContext.denialRoot`). Server-set, from the job's payload. */
-    denialRoot?: string;
-    /**
-     * The clock of a run this one is part of (a delegated child or a handoff): it is measured on its parent's.
-     * Without it the run has a clock of its own, started now: the job's, or the turn's.
-     */
-    clockKey?: string;
+  policy?: Partial<Carried> & {
     /** The job's `run_at` when this try started: it names the run's clock when the run has none yet (a retry keeps the one its job records). */
     jobSlot?: string;
     jobID?: string | null;
-    capabilities?: string[];
-    /**
-     * The job this run belongs to carries a tool list of the run that scheduled it (`jobs-tool.ts`), so every fire is narrowed to it
-     * like a delegated child: a list that cannot be read leaves only the inert tools. Set from the job's payload, never a tool argument.
-     */
-    narrowed?: boolean;
-    /**
-     * Where the chain this run belongs to came from (`policy/provenance.ts`), already read back: what the job, brief or result that started
-     * it carried, or what the handing run's link made of it. Server-set. Absent: the owner's own chat turn starts a chain; any other run
-     * has no record of one.
-     */
-    provenance?: Provenance;
   };
   /** Restrict task tools to this list, intersected with the persona's tools. */
   toolAllowlist?: string[];
@@ -469,7 +444,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   const startedByBot = Boolean(run.peer || run.delegation);
   // A job a narrowed run scheduled fires with the tools of the run that asked: it is cut down by the same rule, each time it fires.
   const narrowedRun = startedByBot || run.policy?.narrowed === true;
-  const parentCapabilities = run.policy?.capabilities;
+  const parentCapabilities = run.policy?.capabilities ?? undefined;
   const narrowedTools = narrowedRun ? [...narrowCapabilities(ownTools, parentCapabilities)] : ownTools;
   const effectiveTools = run.toolAllowlist
     ? narrowedTools
@@ -582,7 +557,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
     principal,
     capabilities: callableTools,
     ...(narrowedRun ? { narrowed: true } : {}),
-    ...(run.policy?.provenance ? { provenance: run.policy.provenance } : {}),
+    ...(run.policy?.ownerOnly !== undefined ? { ownerOnly: run.policy.ownerOnly } : {}),
     registry,
     isUnloaded: (name) => deferred.includes(name) && !loadedTools.has(name),
     // The owner's own words, for "send only where the owner said": what the owner typed in this thread (kept in its

@@ -22,7 +22,6 @@ import { createRoutineTools } from "../src/tools/routines-tool";
 import { resolvePersona } from "../src/agent/personas";
 import { decide } from "../src/policy/engine";
 import { addTaint } from "../src/policy/context";
-import { OWNER_STARTED } from "../src/policy/provenance";
 import { ownerJobPayload } from "../src/jobs/owner-job";
 import { assessCall, policyFor } from "../src/policy/metadata";
 import { recordDenial } from "../src/policy/denials";
@@ -244,7 +243,7 @@ describe("an origin that cannot be read is asked about", () => {
     // A one-shot job from a clean run that a bot made no link of is not a standing rule (a wake in a bot's chain is: test/s2-chain-decision.test.ts); a tainted run may not make one.
     const once = { text: "do it", at: new Date(Date.now() + 3_600_000).toISOString() };
     expect(decide(rig.run, { tool: "job_schedule", args: once, callID: "call_1" }).action).toBe("run");
-    expect(decide(rig.another({ principal: { kind: "wake" }, provenance: OWNER_STARTED }), { tool: "job_schedule", args: once, callID: "call_1" }).action).toBe("run");
+    expect(decide(rig.another({ principal: { kind: "wake" }, ownerOnly: true }), { tool: "job_schedule", args: once, callID: "call_1" }).action).toBe("run");
     expect(decide(tainted, { tool: "job_schedule", args: once, callID: "call_1" })).toMatchObject({ action: "refuse", code: "protected_write" });
   });
 
@@ -527,7 +526,7 @@ describe("every job_schedule call names the standing-job resource", () => {
       expect(asked.card.standingRule).toBeDefined();
     }
     // A job the owner made carries the owner's marker (`agni job add`); one with none is not shown to be theirs (test/s2-chain-decision.test.ts).
-    expect(decide(rig.another({ principal: { kind: "owner" }, jobID: "job_owner", provenance: OWNER_STARTED }), { tool: "job_schedule", args: once(), callID: "call_1" }).action).toBe("run");
+    expect(decide(rig.another({ principal: { kind: "owner" }, jobID: "job_owner", ownerOnly: true }), { tool: "job_schedule", args: once(), callID: "call_1" }).action).toBe("run");
     const tainted = rig.another({ principal: { kind: "job" }, jobID: "job_bot" });
     addTaint(tainted, { kind: "web", label: "evil.example/page", tool: "web_fetch", at: "2026-11-16T10:00:00Z" });
     expect(decide(tainted, { tool: "job_schedule", args: once(), callID: "call_1" })).toMatchObject({ action: "refuse", code: "protected_write" });

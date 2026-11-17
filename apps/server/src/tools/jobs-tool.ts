@@ -19,9 +19,8 @@ import {
 import { canonicalAgentID } from "../agent/personas";
 import { describeSchedule, nextDailyRun, parseDay, parseWallClock } from "../jobs/schedule";
 import { MAX_EVERY_MINUTES, MIN_EVERY_MINUTES, checkSchedule } from "../jobs/schedule-check";
-import { isPeerPrincipal, isTainted, packTaint, unknownTaint } from "../policy/context";
-import { UNKNOWN_PROVENANCE, readProvenance, scheduledProvenance, type Provenance } from "../policy/provenance";
-import type { RunContext, TaintSource } from "../policy/types";
+import { isPeerPrincipal, isTainted } from "../policy/context";
+import { packCarried, storedCarried, type Carried } from "../policy/carry";
 import { denialScope } from "../policy/denials";
 import { audit } from "../policy/audit-sink";
 import { describeRecurring, isRecurringSchedule, standingRuleOrigin, standingScheduleKind } from "../policy/standing-rules";
@@ -102,21 +101,14 @@ function schedulingRefusal(ctx: ToolContext): string | null {
   return null;
 }
 
-/** The request a one-shot job a bot schedules stays in: its wakes are counted with the request's. */
-export interface RequestRoot {
-  rootTurnID: string;
-  rootJob: string | null;
-}
-
 /** What a job a bot schedules keeps of the run that scheduled it. */
 export interface ScheduledFrom {
-  /** The scheduling run's refusal scope: what the owner refused there holds in every run of the job. Always set for a run. */
-  denialRoot?: string;
   /**
-   * The scheduling run's request, for the wake count of a one-shot job: it is part of that request. A recurring job never
-   * takes it: each of its runs is a request of its own, counted by its own wakes (`jobID@turnID`).
+   * What the scheduling run hands the job (`packCarried(run, "schedule-once" | "schedule-recurring")`, `policy/carry.ts`): what it had read, the tools
+   * it was cut down to, the refusal scope and request it belongs to, and that a bot made the link. Every fire starts with it. Absent: a link made by
+   * something with no record of itself, which is the worst on every count.
    */
-  root?: RequestRoot;
+  carried?: Carried;
   /**
    * The request that made a repeating job, for the audit log: the scheduling run's refusal scope (the chat turn, or the job a chain
    * began in). Set by the server from the run, never by a tool argument.
@@ -124,55 +116,10 @@ export interface ScheduledFrom {
   createdByRequest?: string;
   /** For the audit row of a repeating job: the bot's turn, and how the job came to be allowed. */
   created?: { turnID?: string; jobID?: string | null; approval: "own_turn" | "owner_card" };
-  /**
-   * What the scheduling run had read, when it had read outside text (or could not say): every run of the job starts with it, so a job
-   * the owner approved from such a run does not shed its restrictions. Absent for a run that read nothing outside.
-   */
-  taint?: TaintSource[];
-  /**
-   * The tools the scheduling run could call, when its tools were narrowed by whoever started it (a bot's brief, a delegated task,
-   * a job that was itself narrowed): every fire of the job is cut down to them, as a delegated child's run is (`policy/narrowing.ts`).
-   * `null` says the run's set could not be read, which fires with the inert tools only. Absent for a run that was not narrowed.
-   */
-  capabilities?: string[] | null;
-  /**
-   * Where the scheduling run's chain came from (`policy/provenance.ts`): a job a run schedules is made by a bot, so the chain is marked
-   * `botChained` whoever started the run, and every fire of the job, and everything it delegates, wakes and schedules, carries the mark.
-   * Absent: the unknown chain, which reads as a bot's.
-   */
-  provenance?: Provenance;
-}
-
-/** What a job made by this run must start with, or undefined when the run read nothing outside. A record that cannot be read is one unknown source. */
-function carriedTaint(run: RunContext | undefined): TaintSource[] | undefined {
-  if (!run || !isTainted(run)) return undefined;
-  return Array.isArray(run.taint?.sources) && run.taint.sources.length > 0 ? packTaint(run) : [unknownTaint("a run with no record of what it had read")];
-}
-
-/** What a job made by this run must be cut down to, or undefined when the run's tools were not narrowed. A set that cannot be read is null. */
-function carriedCapabilities(run: RunContext | undefined): string[] | null | undefined {
-  if (!run?.narrowed) return undefined;
-  try {
-    return [...run.effectiveCapabilities];
-  } catch {
-    return null;
-  }
-}
-
-/**
- * The request a one-shot job scheduled by this call stays in, or undefined when it starts one of its own. Only the owner's own
- * chat turn starts a request: the owner as principal with no job behind it. Any other run (a wake, a delegated child, a resumed task,
- * a job, a fire of a job the owner made, a job scheduled from one) hands its request on, so a chain of jobs, each scheduling the
- * next, is counted as one: its wakes, its spend.
- */
-function inheritedRoot(ctx: ToolContext): RequestRoot | undefined {
-  const run = ctx.run;
-  if (!run || (run.principal?.kind === "owner" && run.jobID == null)) return undefined;
-  return { rootTurnID: run.rootTurnID, rootJob: run.rootJob };
 }
 
 export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: string, from: ScheduledFrom = {}): JobScheduleResult {
-  const { root, denialRoot, createdByRequest, created, taint, capabilities, provenance } = from;
+  const { createdByRequest, created } = from;
   // The rules the engine and the card use before they ask the owner (jobs/schedule-check.ts): the same ones, so none can drift.
   const problem = checkSchedule({ ...args, agent_id: args.agentID }, callerAgentID);
   if (problem) throw new Error(problem);
@@ -187,15 +134,10 @@ export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: 
     inputRole: "system",
     // Counted against the bot's own allowance (S2-09).
     scheduledBy: "bot",
-    // Where the chain came from, carried on to every fire (the one flag pair, never looked up from a root job later).
-    provenance: readProvenance({ ...(provenance ?? UNKNOWN_PROVENANCE), botChained: true }),
     notify: args.notify !== false,
-    // The owner's refusals in the run that scheduled it hold in every run of this job, for good (what the run delegates, wakes and schedules too).
-    ...(denialRoot ? { denialRoot } : {}),
-    // What the scheduling run read stays with the job: each fire starts as tainted as that run was.
-    ...(taint && taint.length > 0 ? { taint } : {}),
-    // What the scheduling run could call stays with the job: each fire is cut down to it, as a delegated child's run is.
-    ...(capabilities !== undefined ? { capabilities } : {}),
+    // What the scheduling run hands every fire: what it read (each fire starts as tainted as that run was), the tools it was cut down to,
+    // the owner's refusals in it (they hold in every run of the job, for good), and that a bot made the link. Never looked up from a root job later.
+    ...storedCarried(from.carried ?? packCarried(undefined, args.at ? "schedule-once" : "schedule-recurring")),
   };
 
   let runAt: string;
@@ -203,8 +145,6 @@ export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: 
   if (args.at) {
     runAt = new Date(args.at).toISOString();
     recurrence = "once";
-    // Still the request it was scheduled in, for its wake count (it has a clock of its own, which `clockKey` would take away).
-    if (root) { payload.rootTurnID = root.rootTurnID; payload.rootJob = root.rootJob; }
   } else if (args.dailyAt) {
     const clock = parseWallClock(args.dailyAt);
     const days = args.days?.map((day) => parseDay(day));
@@ -403,11 +343,8 @@ export function createJobTools(db: Database): ToolDefinition<unknown, unknown>[]
           ...(input.agent_id === undefined ? {} : { agentID: String(input.agent_id) }),
           ...(input.notify === undefined ? {} : { notify: Boolean(input.notify) }),
         }, callerOf(ctx), {
-          ...(ctx.run ? { denialRoot: denialScope(ctx.run), ...(recurring ? { createdByRequest: denialScope(ctx.run) } : {}) } : {}),
-          root: inheritedRoot(ctx),
-          taint: carriedTaint(ctx.run),
-          capabilities: carriedCapabilities(ctx.run),
-          provenance: scheduledProvenance(ctx.run),
+          carried: packCarried(ctx.run, recurring ? "schedule-recurring" : "schedule-once"),
+          ...(ctx.run && recurring ? { createdByRequest: denialScope(ctx.run) } : {}),
           created: { turnID: ctx.turnID, jobID: ctx.run?.jobID ?? null, approval: ctx.ownerApproved === true ? "owner_card" : "own_turn" },
         });
       },

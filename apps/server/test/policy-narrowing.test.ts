@@ -24,7 +24,6 @@ import { saveArtifact } from "../src/stores/artifacts";
 import { appendChannelMessage } from "../src/stores/channels";
 import { groupTaint } from "../src/agent/group";
 import { createRunContext, unpackTaint } from "../src/policy/context";
-import { OWNER_STARTED } from "../src/policy/provenance";
 import { carryTaint, saveTaskTaint, taskTaint } from "../src/policy/carry";
 import type { RunContext, TaintSource } from "../src/policy/types";
 import { buildTaskToolRegistry } from "../src/tools/task-registry";
@@ -193,8 +192,8 @@ describe("a wake turn", () => {
     enqueueJob(database, {
       kind: "turn",
       payload: {
-        agentID: "ea", threadID: parent.id, notify: false, inputRole: "system", wakeKey: `wake:${parent.id}`, depth: 1, provenance: OWNER_STARTED,
-        results: [{ taskID: "tsk_done", agentID: "researcher", summary: "found it", redacted: false, taint, provenance: OWNER_STARTED }],
+        agentID: "ea", threadID: parent.id, notify: false, inputRole: "system", wakeKey: `wake:${parent.id}`, depth: 1, ownerOnly: true,
+        results: [{ taskID: "tsk_done", agentID: "researcher", summary: "found it", redacted: false, taint, ownerOnly: true }],
       },
     });
     await runner.tick();

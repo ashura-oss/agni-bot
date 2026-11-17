@@ -22,8 +22,7 @@ import type { TaskTurnSettings, TaskTurnRun, TaskTurnResult } from "./task-loop"
 import { runTaskTurn } from "./task-loop";
 import { recentMessages } from "../stores/threads";
 import { activeSession, delegationSession, ensureConversation, type ConversationRow } from "../stores/conversations";
-import { packTaint } from "../policy/context";
-import { handedProvenance } from "../policy/provenance";
+import { packCarried } from "../policy/carry";
 import type { RunContext, TaintSource } from "../policy/types";
 
 export interface HandoffRequest {
@@ -147,15 +146,8 @@ export async function handoff(deps: HandoffDeps, request: HandoffRequest): Promi
     guardrail: child,
     // Preserve guardrail bookkeeping; peer context itself is carried in text.
     handoffSummary: child.handoffSummary,
-    ...(deps.run ? {
-      policy: {
-        taint: packTaint(deps.run), rootTurnID: deps.run.rootTurnID, rootJob: deps.run.rootJob, ...(deps.run.denialRoot ? { denialRoot: deps.run.denialRoot } : {}), clockKey: deps.run.clockKey, jobID: deps.run.jobID,
-        // The child may call only what this run could (S2-06).
-        capabilities: [...deps.run.effectiveCapabilities],
-        // The child belongs to the chain the parent does; it is a link a bot made unless the owner's own turn made it.
-        provenance: handedProvenance(deps.run),
-      },
-    } : {}),
+    // What this run hands the child (S2-06): what it had read, its root and clock, the tools the child is cut down to, and whose chain it is.
+    ...(deps.run ? { policy: { ...packCarried(deps.run, "handoff"), jobID: deps.run.jobID } } : {}),
   };
 
   const result = await runTaskTurn(deps.db, deps.router, deps.settings, run);

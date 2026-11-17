@@ -37,7 +37,6 @@ import type { Router } from "../models/router";
 import { addProviderCredential, setProviderModel } from "../models/provider-settings";
 import { ChatGPTAuthError, type ChatGPTAuth } from "../models/chatgpt-auth";
 import {
-  getJob,
   getJobByPrefix,
   listFinishedJobs,
   listJobs,
@@ -79,7 +78,7 @@ import { appendChannelMessage, channelAgentIDs, createGroupChannel, ensureDMChan
 import { groupContextBlock, groupHistory, groupResponder } from "../agent/group";
 import { canonicalURL, saveLink, searchLinks } from "../stores/links";
 import { buildShareDocument, publishShare, shareBaseURL } from "../share/document";
-import { createTask, createTaskList, editTask, getTask, listTaskActivity, listTaskLists, listTasks, setTaskStatus, snoozeTask, cancelDelegation, clearPendingQuestion, setDelegationJob, setDelegationState, taskInfo, briefChainID, briefProvenance, briefRoot } from "../stores/tasks";
+import { createTask, createTaskList, editTask, getTask, listTaskActivity, listTaskLists, listTasks, setTaskStatus, snoozeTask, cancelDelegation, clearPendingQuestion, setDelegationJob, setDelegationState, taskInfo, briefCarried } from "../stores/tasks";
 import { fetchPage } from "../tools/fetch-url";
 import { scheduleTaskReminder } from "../jobs/task-reminders";
 import type { PluginService } from "../plugins/service";
@@ -99,6 +98,7 @@ import { getProactivity, setProactivity } from "../stores/proactivity";
 import { listApprovalRules, revokeApprovalRule } from "../stores/approval-rules";
 import { loadCardMeta } from "../agent/pending-cards";
 import { audit } from "../policy/audit-sink";
+import { packCarried, storedCarried, taskTaint } from "../policy/carry";
 import { isRunPaused } from "../policy/pause";
 import { redact } from "../util/redact";
 import {
@@ -1326,9 +1326,11 @@ function handleTaskAnswer(deps: DispatchDeps, session: Session, frame: Extract<C
   appendMessage(deps.db, { threadID: childThreadID, role: "user", text: answer });
   clearPendingQuestion(deps.db, task.id);
   setDelegationState(deps.db, task.id, "running");
-  // The resumed run may call what the first run was allowed to (S2-06); a first run that left no readable record leaves none here.
-  const first = task.job_id ? getJob(deps.db, task.job_id) : null;
-  const capabilities = first ? parseJobPayload<{ capabilities?: unknown }>(first).capabilities : undefined;
+  // The resumed run goes on as the first run did, from the brief and the task's record (S2-06): the chain it started in (so a stopped chain stays
+  // stopped), the request it was started under (so what the owner refused there is refused here), what it had read so far, the tools it was
+  // cut down to, and whose chain it is: the owner's answer does not make it the owner's own work. It does not carry the request's clock: the
+  // owner's wait is not run time, and the resumed run has its own 30 minutes.
+  const carried = packCarried(briefCarried(task.brief), "resume", { taint: taskTaint(deps.db, task.id) });
   const job = enqueueJob(deps.db, {
     kind: "turn",
     payload: {
@@ -1337,15 +1339,7 @@ function handleTaskAnswer(deps: DispatchDeps, session: Session, frame: Extract<C
       text: answer,
       notify: false,
       delegationTaskID: task.id,
-      // The answer resumes the task inside the chain it started in, so a
-      // stopped chain stays stopped.
-      chainID: briefChainID(task.brief),
-      // Still part of the request it was started under, so what the owner refused there is refused here. It does not carry the
-      // request's clock (no clockKey): the owner's wait is not run time, and the resumed run has its own 30 minutes.
-      ...briefRoot(task.brief),
-      // The chain it was delegated in goes on: the owner's answer does not make the resumed run the owner's own work.
-      provenance: briefProvenance(task.brief),
-      ...(capabilities !== undefined ? { capabilities } : {}),
+      ...storedCarried(carried),
     },
   });
   setDelegationJob(deps.db, task.id, job.id);

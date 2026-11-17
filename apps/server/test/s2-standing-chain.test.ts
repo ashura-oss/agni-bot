@@ -2,7 +2,7 @@
  * Sprint 2, fix round J: standing work that a bot starts from a chain.
  *
  *  1. A wake in a chain a bot made a link of is a link of that chain: a one-shot job it schedules is put to the owner (round K: decided by
- *     the flag the chain carries, `policy/provenance.ts`, not by the root job's row).
+ *     the bit the chain carries, `policy/carry.ts`, not by the root job's row).
  *  2. A job approved from a run whose tools were narrowed (a bot's brief, a delegated task, a job that was itself narrowed) fires with
  *     the tools of the run that asked, never with its persona's full set; unreadable means the inert tools only.
  *  3. A routine's creation or resumption from a run a routine's own tool would refuse is refused before any card.
@@ -13,7 +13,7 @@ import { createJobTools, scheduleJob } from "../src/tools/jobs-tool";
 import { createRoutineTools } from "../src/tools/routines-tool";
 import { decide } from "../src/policy/engine";
 import { addTaint } from "../src/policy/context";
-import { OWNER_STARTED } from "../src/policy/provenance";
+import { readCarried } from "../src/policy/carry";
 import { standingRuleOrigin, standingScheduleKind } from "../src/policy/standing-rules";
 import { enqueueJob } from "../src/stores/jobs";
 import type { RunContext } from "../src/policy/types";
@@ -27,7 +27,6 @@ afterEach(() => { setSystemTime(); resetS2Startup(); });
 
 const future = (): string => new Date(Date.now() + 3_600_000).toISOString();
 const past = (): string => new Date(Date.now() - 1_000).toISOString();
-const FROM_BOT = { ownerStarted: true, botChained: true };
 
 type Handler = (args: unknown, ctx: unknown) => Promise<{ id?: string; error?: string }>;
 const jobHandler = (rig: PolicyRig): Handler => createJobTools(rig.db)[0]!.handler as unknown as Handler;
@@ -42,7 +41,7 @@ describe("a wake in a chain a bot-made job started may not schedule the next one
     rig = policyRig();
     const botJob = scheduleJob(rig.db, { text: "start", at: future() }, "ea").id;
 
-    const fromBotChain = decide(rig.another({ principal: { kind: "wake" }, rootJob: botJob, provenance: FROM_BOT }), { tool: "job_schedule", args: once(), callID: "call_1" });
+    const fromBotChain = decide(rig.another({ principal: { kind: "wake" }, rootJob: botJob, ownerOnly: false }), { tool: "job_schedule", args: once(), callID: "call_1" });
     expect(fromBotChain.action, "a wake in a bot's chain scheduled the next link with no card").toBe("ask");
     if (fromBotChain.action === "ask") {
       expect(fromBotChain.card.standingKind).toBe("next_job");
@@ -50,10 +49,10 @@ describe("a wake in a chain a bot-made job started may not schedule the next one
     }
     // The root job's row is not what decides (the flag the chain carries is: test/s2-chain-decision.test.ts): the owner's own chat turn that
     // delegated, and a job the owner made, are the owner's work whatever job they name as the root.
-    expect(decide(rig.another({ principal: { kind: "wake" }, provenance: OWNER_STARTED }), { tool: "job_schedule", args: once(), callID: "call_1" }).action).toBe("run");
-    expect(decide(rig.another({ principal: { kind: "wake" }, rootJob: "job_gone", provenance: OWNER_STARTED }), { tool: "job_schedule", args: once(), callID: "call_1" }).action).toBe("run");
+    expect(decide(rig.another({ principal: { kind: "wake" }, ownerOnly: true }), { tool: "job_schedule", args: once(), callID: "call_1" }).action).toBe("run");
+    expect(decide(rig.another({ principal: { kind: "wake" }, rootJob: "job_gone", ownerOnly: true }), { tool: "job_schedule", args: once(), callID: "call_1" }).action).toBe("run");
     // A tainted wake is still refused outright, as any tainted run is.
-    const tainted = rig.another({ principal: { kind: "wake" }, rootJob: botJob, provenance: FROM_BOT });
+    const tainted = rig.another({ principal: { kind: "wake" }, rootJob: botJob, ownerOnly: false });
     addTaint(tainted, { kind: "web", label: "evil.example/page", tool: "web_fetch", at: "2026-11-16T10:00:00Z" });
     expect(decide(tainted, { tool: "job_schedule", args: once(), callID: "call_1" })).toMatchObject({ action: "refuse", code: "protected_write" });
   });
@@ -61,7 +60,7 @@ describe("a wake in a chain a bot-made job started may not schedule the next one
   test("the classification and the tool's own check agree, and the card names the wake", () => {
     rig = policyRig();
     const botJob = scheduleJob(rig.db, { text: "start", at: future() }, "ea").id;
-    const wake = rig.another({ principal: { kind: "wake" }, rootJob: botJob, provenance: FROM_BOT });
+    const wake = rig.another({ principal: { kind: "wake" }, rootJob: botJob, ownerOnly: false });
     expect(standingScheduleKind(once(), wake)).toBe("next_job");
     expect(standingRuleOrigin(wake)).toMatch(/reporting back/);
   });
@@ -69,7 +68,7 @@ describe("a wake in a chain a bot-made job started may not schedule the next one
   test("the tool refuses it too unless the loop carries the owner's yes", async () => {
     rig = policyRig();
     const botJob = scheduleJob(rig.db, { text: "start", at: future() }, "ea").id;
-    const wake = rig.another({ principal: { kind: "wake" }, rootJob: botJob, provenance: FROM_BOT });
+    const wake = rig.another({ principal: { kind: "wake" }, rootJob: botJob, ownerOnly: false });
     const before = rig.db.query("SELECT id FROM jobs WHERE kind = 'turn'").all().length;
     const refused = await jobHandler(rig)(once(), ctxOf(wake));
     expect(refused.id, "a wake in a bot-made job's chain made the next link with no owner's yes").toBeUndefined();
@@ -78,7 +77,7 @@ describe("a wake in a chain a bot-made job started may not schedule the next one
     const approved = await jobHandler(rig)(once(), ctxOf(wake, { ownerApproved: true }));
     expect(approved.id, "the owner's yes did not make the link").toBeDefined();
     // The owner's own chat turn that delegated is not asked.
-    expect((await jobHandler(rig)(once(), ctxOf(rig.another({ principal: { kind: "wake" }, provenance: OWNER_STARTED })))).id).toBeDefined();
+    expect((await jobHandler(rig)(once(), ctxOf(rig.another({ principal: { kind: "wake" }, ownerOnly: true })))).id).toBeDefined();
   });
 
   scenarioTest("through the real loop: the job delegates, the wake schedules the next link, and the owner is asked", async () => {
@@ -113,7 +112,7 @@ describe("a job approved from a run whose tools were narrowed fires with the too
   let rig: PolicyRig | undefined;
   afterEach(() => { rig?.close(); rig = undefined; });
   const recur = { text: "do it", everyMinutes: 60 };
-  const stored = (r: PolicyRig): { capabilities?: unknown } => JSON.parse(r.db.query<{ payload: string }, []>("SELECT payload FROM jobs WHERE kind = 'turn' ORDER BY rowid DESC").get()!.payload) as { capabilities?: unknown };
+  const stored = (r: PolicyRig): { capabilities?: unknown; narrowed?: unknown } => JSON.parse(r.db.query<{ payload: string }, []>("SELECT payload FROM jobs WHERE kind = 'turn' ORDER BY rowid DESC").get()!.payload) as { capabilities?: unknown; narrowed?: unknown };
 
   test("a narrowed run's job stores the run's effective tools; a run that was not narrowed stores none", async () => {
     rig = policyRig();
@@ -137,8 +136,9 @@ describe("a job approved from a run whose tools were narrowed fires with the too
     const broken = { ...rig.another({ principal: { kind: "peer", from: "boss" }, narrowed: true }), effectiveCapabilities: undefined } as unknown as RunContext;
     const made = await jobHandler(rig)(recur, ctxOf(broken, { ownerApproved: true }));
     expect(made.id).toBeDefined();
-    expect(Object.hasOwn(stored(rig), "capabilities"), "the job carries no mark that its tools were narrowed").toBe(true);
-    expect(stored(rig).capabilities).toBeNull();
+    expect(stored(rig).narrowed, "the job carries no mark that its tools were narrowed").toBe(true);
+    expect(Object.hasOwn(stored(rig), "capabilities"), "a set that could not be read was written as if it were one").toBe(false);
+    expect(readCarried(stored(rig)).capabilities, "an unreadable set did not read back as unreadable").toBeNull();
   });
 
   test("the card says the job runs with the tools of the run that asked", () => {

@@ -11,8 +11,7 @@
  */
 import { entry } from "../agent/card-text";
 import { describeSchedule, parseDay, parseWallClock } from "../jobs/schedule";
-import { isTainted } from "./context";
-import { isOwnerMade } from "./provenance";
+import { isOwnerMade, isTainted } from "./context";
 import type { ToolResource } from "./tool-meta";
 import type { RunContext, StandingKind } from "./types";
 
@@ -37,10 +36,10 @@ export const STANDING_KINDS: readonly StandingKind[] = Object.keys(KINDS) as Sta
 /**
  * What kind of standing rule is this `job_schedule` call, or null when it is not one? A repeating job always is. A one-shot job is
  * too when it is made from a chain a bot made a link of: a chain of one-shot jobs, each telling its run to schedule the next, is a
- * repeating job by another route. Whether a run is the owner's own work is the run's own flags (`policy/provenance.ts`): its chain
+ * repeating job by another route. Whether a run is the owner's own work is the run's own bit (`RunContext.ownerOnly`, `policy/carry.ts`): its chain
  * started with the owner (their chat turn, or a job they made) and no link since was a bot's. Nothing else is read, and not the root
- * job's row, which a follow-up a bot scheduled from the owner's job would pass for the owner's. Flags that are missing or cannot be
- * read are a bot's (fail closed).
+ * job's row, which a follow-up a bot scheduled from the owner's job would pass for the owner's. A bit that is missing or cannot be
+ * read is a bot's (fail closed).
  *
  * The fire of a job a bot scheduled is always asked. A run that read outside text is not asked about a one-shot job at all: it is
  * refused (a protected write), as before. A bot's brief and a routine are not asked either: the tool itself refuses them.

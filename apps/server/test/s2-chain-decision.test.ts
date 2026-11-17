@@ -1,16 +1,15 @@
 /**
- * Sprint 2, fix round K: a one-shot job from a chain a bot made is a standing rule, decided by one flag carried forward.
+ * Sprint 2, fix round K: a one-shot job from a chain a bot made is a standing rule, decided by one bit carried forward.
  *
  * The decision used to look at the ROOT job's `scheduledBy`. If the owner's job fired and a bot scheduled a follow-up, the follow-up's
  * wake read as the owner's (its root was the owner's job), and a wake whose root was no job at all (null) got past even when its chain
- * went through a bot's job. Now the run's own flags decide (`policy/provenance.ts`): the owner's work only if the chain started with the
+ * went through a bot's job. Now the run's own bit decides (`ownerOnly`, `policy/carry.ts`): the owner's work only if the chain started with the
  * owner and no bot made a link since; anything missing or unreadable is a bot's.
  */
 import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
 import { addApprovalRule, approvalTarget } from "../src/stores/approval-rules";
 import { decide } from "../src/policy/engine";
 import { ownerJobPayload } from "../src/jobs/owner-job";
-import { OWNER_STARTED } from "../src/policy/provenance";
 import { standingRuleOrigin, standingScheduleKind } from "../src/policy/standing-rules";
 import { resetS2Startup } from "../src/startup/s2";
 import { enqueueJob } from "../src/stores/jobs";
@@ -27,7 +26,6 @@ afterEach(() => { setSystemTime(); resetS2Startup(); });
 const future = (): string => new Date(Date.now() + 3_600_000).toISOString();
 const past = (): string => new Date(Date.now() - 1_000).toISOString();
 const once = (): Record<string, unknown> => ({ text: "do the next round", at: future() });
-const FROM_BOT = { ownerStarted: true, botChained: true };
 
 describe("the engine asks about a one-shot job by the run's own flags, not by a root job's row", () => {
   let rig: PolicyRig | undefined;
@@ -38,7 +36,7 @@ describe("the engine asks about a one-shot job by the run's own flags, not by a 
     rig = policyRig();
     const ownerJob = enqueueJob(rig.db, { kind: "turn", payload: ownerJobPayload({ text: "weekly check", agentID: "ea" }) }).id;
     for (const [what, rootJob] of [["no root job at all", undefined], ["the owner's own job", ownerJob], ["a job that is gone", "job_gone"]] as const) {
-      const decision = asked(rig.another({ principal: { kind: "wake" }, ...(rootJob ? { rootJob } : {}), provenance: FROM_BOT }));
+      const decision = asked(rig.another({ principal: { kind: "wake" }, ...(rootJob ? { rootJob } : {}), ownerOnly: false }));
       expect({ what, action: decision.action }).toEqual({ what, action: "ask" });
       if (decision.action === "ask") {
         expect(decision.card.standingKind).toBe("next_job");
@@ -53,13 +51,13 @@ describe("the engine asks about a one-shot job by the run's own flags, not by a 
     expect(asked(rig.another({ principal: { kind: "wake" }, rootJob: "job_gone" })).action).toBe("ask");
   });
 
-  test("a run whose flags cannot be read is asked, the owner's own turn included", () => {
+  test("a run whose bit cannot be read is asked, the owner's own turn included", () => {
     rig = policyRig();
-    for (const flags of [{ ownerStarted: undefined, botChained: undefined }, { ownerStarted: "yes", botChained: "no" }, { ownerStarted: true, botChained: undefined }, { ownerStarted: null, botChained: false }]) {
-      const broken = { ...rig.another({ principal: { kind: "wake" }, provenance: OWNER_STARTED }), ...flags } as unknown as RunContext;
-      expect({ flags, action: asked(broken).action }).toEqual({ flags, action: "ask" });
+    for (const ownerOnly of [undefined, "yes", 1, null, {}, "true"]) {
+      const broken = { ...rig.another({ principal: { kind: "wake" }, ownerOnly: true }), ownerOnly } as unknown as RunContext;
+      expect({ ownerOnly, action: asked(broken).action }).toEqual({ ownerOnly, action: "ask" });
     }
-    const ownTurn = { ...rig.run, botChained: "no" } as unknown as RunContext;
+    const ownTurn = { ...rig.run, ownerOnly: "yes" } as unknown as RunContext;
     expect(standingScheduleKind(once(), ownTurn)).toBe("next_job");
     expect(standingRuleOrigin(ownTurn), "the card has nothing to say about why the owner is asked").not.toBeNull();
   });
@@ -69,21 +67,21 @@ describe("the engine asks about a one-shot job by the run's own flags, not by a 
     const botJob = scheduleJob(rig.db, { text: "start", at: future() }, "ea").id;
     const junk = enqueueJob(rig.db, { kind: "turn", payload: ["not", "an", "object"] }).id;
     for (const rootJob of [botJob, junk, "job_gone"]) {
-      expect({ rootJob, action: asked(rig.another({ principal: { kind: "wake" }, rootJob, provenance: OWNER_STARTED })).action }).toEqual({ rootJob, action: "run" });
+      expect({ rootJob, action: asked(rig.another({ principal: { kind: "wake" }, rootJob, ownerOnly: true })).action }).toEqual({ rootJob, action: "run" });
     }
   });
 
   test("a pure owner chain is not asked: the owner's own turn, a wake of it, and a job the owner made", async () => {
     rig = policyRig();
     expect(asked(rig.run).action).toBe("run");
-    expect(asked(rig.another({ principal: { kind: "wake" }, provenance: OWNER_STARTED })).action).toBe("run");
-    expect(asked(rig.another({ principal: { kind: "owner" }, jobID: "job_owner", provenance: OWNER_STARTED })).action).toBe("run");
+    expect(asked(rig.another({ principal: { kind: "wake" }, ownerOnly: true })).action).toBe("run");
+    expect(asked(rig.another({ principal: { kind: "owner" }, jobID: "job_owner", ownerOnly: true })).action).toBe("run");
     // The tool's own check agrees: the engine and the handler ask one question.
-    const wake = rig.another({ principal: { kind: "wake" }, provenance: OWNER_STARTED });
+    const wake = rig.another({ principal: { kind: "wake" }, ownerOnly: true });
     const handler = createJobTools(rig.db)[0]!.handler as unknown as (args: unknown, ctx: unknown) => Promise<{ id?: string; error?: string }>;
     const ctx = (run: RunContext) => ({ threadID: "thr", turnID: "trn", signal: new AbortController().signal, run, chain: { depth: 1, rootAgentID: "ea", currentAgentID: "ea", handoffSummary: null } });
     expect((await handler(once(), ctx(wake))).id, "the owner's own chain was refused").toBeDefined();
-    expect((await handler(once(), ctx(rig.another({ principal: { kind: "wake" }, provenance: FROM_BOT })))).error).toMatch(/standing rule|not you/i);
+    expect((await handler(once(), ctx(rig.another({ principal: { kind: "wake" }, ownerOnly: false })))).error).toMatch(/standing rule|not you/i);
     expect((await handler(once(), ctx(rig.another({ principal: { kind: "wake" } })))).error, "a wake with no record of its chain was let through").toMatch(/standing rule|not you/i);
   });
 
@@ -93,9 +91,9 @@ describe("the engine asks about a one-shot job by the run's own flags, not by a 
     const target = approvalTarget("job_schedule", args);
     expect(target).not.toBeNull();
     addApprovalRule(rig.db, { agentID: rig.run.bot, toolName: "job_schedule", target: target! });
-    const fromBot = asked(rig.another({ principal: { kind: "wake" }, provenance: FROM_BOT }));
+    const fromBot = asked(rig.another({ principal: { kind: "wake" }, ownerOnly: false }));
     expect(fromBot.action, "a stored rule approved work a bot's chain started").toBe("ask");
-    expect(asked(rig.another({ principal: { kind: "wake" }, provenance: OWNER_STARTED })).action).toBe("run");
+    expect(asked(rig.another({ principal: { kind: "wake" }, ownerOnly: true })).action).toBe("run");
   });
 });
 
@@ -134,15 +132,15 @@ describe("through the real loop: a bot's follow-up chain is put to the owner at 
     expect(next!.card).not.toBeNull();
 
     // The chain's record, hop by hop: the job the bot scheduled, the task's brief, and the wake that reports back.
-    const hops = s.all<{ payload: string }>("SELECT payload FROM jobs WHERE kind = 'turn'").map((row) => JSON.parse(row.payload) as { text?: string; provenance?: unknown; wakeKey?: string; delegationTaskID?: string });
-    expect(hops.find((hop) => hop.text === "Count the pallets.")?.provenance, "the follow-up job does not say a bot made it").toEqual(FROM_BOT);
-    expect(hops.find((hop) => hop.delegationTaskID)?.provenance, "the delegation dropped the flag").toEqual(FROM_BOT);
-    expect(JSON.parse(s.get<{ brief: string }>("SELECT brief FROM tasks WHERE owner_agent_id = 'researcher'")!.brief).provenance, "the task's brief dropped the flag").toEqual(FROM_BOT);
-    expect(hops.find((hop) => hop.wakeKey)?.provenance, "the wake dropped the flag").toEqual(FROM_BOT);
-    // The job the owner said yes to is a bot's link too, and carries the flag into its own fire.
+    const hops = s.all<{ payload: string }>("SELECT payload FROM jobs WHERE kind = 'turn'").map((row) => JSON.parse(row.payload) as { text?: string; ownerOnly?: unknown; wakeKey?: string; delegationTaskID?: string });
+    expect(hops.find((hop) => hop.text === "Count the pallets.")?.ownerOnly, "the follow-up job does not say a bot made it").toBe(false);
+    expect(hops.find((hop) => hop.delegationTaskID)?.ownerOnly, "the delegation dropped the bit").toBe(false);
+    expect(JSON.parse(s.get<{ brief: string }>("SELECT brief FROM tasks WHERE owner_agent_id = 'researcher'")!.brief).ownerOnly, "the task's brief dropped the bit").toBe(false);
+    expect(hops.find((hop) => hop.wakeKey)?.ownerOnly, "the wake dropped the bit").toBe(false);
+    // The job the owner said yes to is a bot's link too, and carries the bit into its own fire.
     const approved = hops.find((hop) => hop.text === "Count them again.");
     expect(approved, "the owner's yes did not make the job").toBeDefined();
-    expect(approved!.provenance).toEqual(FROM_BOT);
+    expect(approved!.ownerOnly).toBe(false);
   });
 
   scenarioTest("a wake with no root job, whose chain went through a bot's job, is asked", async () => {
@@ -183,7 +181,7 @@ describe("through the real loop: a bot's follow-up chain is put to the owner at 
     const s = await scenarios.start();
     const a = await s.connect({ label: "A" });
     const owner = answerCards(a, "reject");
-    for (const [text, extra] of [["Old job.", {}], ["Odd job.", { provenance: "owner" }], ["List job.", { provenance: [true, false] }], ["Half job.", { provenance: { ownerStarted: true } }]] as const) {
+    for (const [text, extra] of [["Old job.", {}], ["Odd job.", { ownerOnly: "owner" }], ["List job.", { ownerOnly: [true, false] }], ["Half job.", { ownerOnly: "true" }]] as const) {
       enqueueJob(s.db, { kind: "turn", payload: { text, agentID: "ea", notify: false, ...extra } });
     }
     s.model.queue(

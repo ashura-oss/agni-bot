@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { PeerIntentSchema, type PeerIntent, type TaskInfo } from "@agni/protocol";
 import { newID, nowISO } from "../util/ids";
-import { readProvenance, type Provenance } from "../policy/provenance";
+import { readCarried, type Carried } from "../policy/carry";
 
 export type TaskStatus = "open" | "done" | "snoozed";
 export type TaskPriority = "low" | "normal" | "high" | "urgent";
@@ -25,21 +25,14 @@ export interface TaskRow {
 export interface TaskListRow { id: string; name: string; position: number; created_at: string; updated_at: string }
 export interface TaskActivityRow { id: string; task_id: string; actor: string; action: string; detail: string|null; created_at: string }
 
-export interface DelegationBrief {
+/**
+ * What a delegation is, and with it (flat, under the same names) the `Carried` value of the run that made it (`policy/carry.ts`): the
+ * root it belongs to (so a refusal earlier in the chain still holds in the child, a resumed run and the wake), what that run had read,
+ * its tools, and whether the chain is the owner's own. The wake and a resumed run read it back with `briefCarried`; an absent field
+ * reads as the worst. The time limit's clock is stored too, but only the child takes it: a resumed run and a wake start their own.
+ */
+export interface DelegationBrief extends Partial<Carried> {
   goal: string;
-  chainID?: string;
-  /**
-   * The request this delegation belongs to (its refusal scope): the root turn and, for a job, the root job. Whatever
-   * the owner refused under that root still holds in the child, in a run resumed after the owner's answer and in the
-   * wake that reports back. The time limit's clock is not kept here: the child is on its parent's (the job payload),
-   * and a resumed run and a wake each start their own.
-   */
-  rootTurnID?: string;
-  rootJob?: string | null;
-  /** The refusal scope the delegating run was handed (`RunContext.denialRoot`), when it is not its own root; carried on to the child, the wake and a resumed run. */
-  denialRoot?: string;
-  /** Where the delegating run's chain came from (`policy/provenance.ts`); carried on to the child, the wake and a resumed run. Absent reads as unknown. */
-  provenance?: Provenance;
   /**
    * What this delegation is for. Phase 1 stores and reports it; the value is
    * not yet used to route or gate the work.
@@ -393,30 +386,13 @@ function briefIntent(brief: string | null): PeerIntent {
   return "request";
 }
 
-/** The chain a delegation was started in; absent for briefs written before chains. */
-export function briefChainID(raw: string | null): string | undefined {
-  if (!raw) return undefined;
-  try { const value = JSON.parse(raw) as { chainID?: unknown }; return typeof value.chainID === "string" ? value.chainID : undefined; } catch { return undefined; }
-}
-
-/** The root run a delegation was started under; absent for briefs written before roots were kept. */
-export function briefRoot(raw: string | null): { rootTurnID: string; rootJob: string | null; denialRoot?: string } | undefined {
-  if (!raw) return undefined;
-  try {
-    const value = JSON.parse(raw) as { rootTurnID?: unknown; rootJob?: unknown; denialRoot?: unknown };
-    if (typeof value.rootTurnID !== "string" || value.rootTurnID === "") return undefined;
-    return {
-      rootTurnID: value.rootTurnID,
-      rootJob: typeof value.rootJob === "string" && value.rootJob !== "" ? value.rootJob : null,
-      ...(typeof value.denialRoot === "string" && value.denialRoot !== "" ? { denialRoot: value.denialRoot } : {}),
-    };
-  } catch { return undefined; }
-}
-
-/** Where the chain a delegation was made in came from. A brief that does not say, or cannot be read, is the unknown chain (a bot's). */
-export function briefProvenance(raw: string | null): Provenance {
-  if (!raw) return readProvenance(undefined);
-  try { return readProvenance((JSON.parse(raw) as { provenance?: unknown } | null)?.provenance); } catch { return readProvenance(undefined); }
+/**
+ * What the run that made a delegation carried to it: its root, what it had read, its tools, whether the chain is the owner's own. A
+ * brief that is missing, cannot be read, or says nothing reads as the worst (`readCarried`).
+ */
+export function briefCarried(raw: string | null): Carried {
+  if (!raw) return readCarried(undefined);
+  try { return readCarried(JSON.parse(raw)); } catch { return readCarried(undefined); }
 }
 
 function parseAttachmentIDs(value: string): string[] {

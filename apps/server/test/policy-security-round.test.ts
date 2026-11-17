@@ -28,7 +28,6 @@ import { buildTaskToolRegistry } from "../src/tools/task-registry";
 import { putAgentMemory } from "../src/stores/agent-memories";
 import { recordDenial } from "../src/policy/denials";
 import { createRunContext, readTaint } from "../src/policy/context";
-import { OWNER_STARTED } from "../src/policy/provenance";
 import { taskTaint } from "../src/policy/carry";
 import { decide } from "../src/policy/engine";
 import { addApprovalRule, approvalTarget } from "../src/stores/approval-rules";
@@ -220,11 +219,11 @@ describe("1b. what a delegated task read reaches the bot that reads the task, an
       const runner = new JobRunner(db, () => undefined, { maxPerTick: 5 });
       registerTurnJob(runner, { db, router: scripted([{ id: "l", name: "load_tools", args: { names: ["job_schedule"] } }, { id: "s", name: "job_schedule", args: { text: "Check in tomorrow", at: new Date(Date.now() + 86_400_000).toISOString() } }]), settings, emit: () => undefined });
       // A wake of the owner's own chain (what this test is not about): the taint record is the only thing that differs.
-      enqueueJob(db, { kind: "turn", payload: { agentID: "ea", threadID: parent.id, notify: false, inputRole: "system", wakeKey: `wake:${parent.id}`, depth: 1, provenance: OWNER_STARTED, results } });
+      enqueueJob(db, { kind: "turn", payload: { agentID: "ea", threadID: parent.id, notify: false, inputRole: "system", wakeKey: `wake:${parent.id}`, depth: 1, ownerOnly: true, results } });
       await runner.tick();
       return errorOf("job_schedule");
     };
-    const item = { taskID: "tsk_x", agentID: "researcher", summary: "found it", redacted: false, provenance: OWNER_STARTED };
+    const item = { taskID: "tsk_x", agentID: "researcher", summary: "found it", redacted: false, ownerOnly: true };
     expect(await schedule([item])).toBe("protected_write");
     expect(await schedule([{ ...item, taint: [] }])).toBeNull();
   });

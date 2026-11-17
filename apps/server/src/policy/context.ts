@@ -11,7 +11,6 @@
  */
 import type { Database } from "bun:sqlite";
 import { nowISO } from "../util/ids";
-import { OWNER_STARTED, readProvenance, type Provenance } from "./provenance";
 import type { PrincipalKind, RunContext, RunServices, TaintSource } from "./types";
 import type { ToolMeta } from "./tool-meta";
 
@@ -43,10 +42,10 @@ export interface RunContextInput {
   /** Taint the run is born with: the principal's own, an attachment, what a parent carried down. */
   taint?: TaintSource[];
   /**
-   * Where the chain this run belongs to came from, as the job, brief or result that started it carried it (read with `readProvenance`).
+   * The chain this run belongs to is the owner's own work (`RunContext.ownerOnly`), as the job, brief or result that started it carried it.
    * Absent: the owner's own chat turn (the owner, no job behind it) starts a chain; any other run has no record of its chain.
    */
-  provenance?: Provenance;
+  ownerOnly?: boolean;
 }
 
 export function createRunContext(input: RunContextInput): RunContext {
@@ -63,7 +62,7 @@ export function createRunContext(input: RunContextInput): RunContext {
   const sources: TaintSource[] = [];
   const jobID = input.jobID ?? null;
   // The front door that knows: the owner's own chat turn starts a chain. Every other run takes what its starter handed it, or has none.
-  const provenance = readProvenance(input.provenance ?? (input.principal.kind === "owner" && jobID === null ? OWNER_STARTED : undefined));
+  const ownerOnly = (input.ownerOnly ?? (input.principal.kind === "owner" && jobID === null)) === true;
   const run: RunContext = {
     bot: input.bot,
     threadID: input.threadID,
@@ -77,8 +76,7 @@ export function createRunContext(input: RunContextInput): RunContext {
     principal: { ...input.principal },
     effectiveCapabilities: new Set(input.capabilities),
     ...(input.narrowed ? { narrowed: true } : {}),
-    ownerStarted: provenance.ownerStarted,
-    botChained: provenance.botChained,
+    ownerOnly,
     taint: { sources },
     budget: { extraAllowanceUSD: 0 },
     ownerText: input.ownerText ?? [],
@@ -87,6 +85,11 @@ export function createRunContext(input: RunContextInput): RunContext {
   };
   for (const source of input.taint ?? []) addTaint(run, source);
   return run;
+}
+
+/** Is this run the owner's own work (`RunContext.ownerOnly`)? A run that cannot be read is not. */
+export function isOwnerMade(run: Pick<RunContext, "ownerOnly"> | undefined): boolean {
+  return run?.ownerOnly === true;
 }
 
 export function isTainted(run: Pick<RunContext, "taint">): boolean {

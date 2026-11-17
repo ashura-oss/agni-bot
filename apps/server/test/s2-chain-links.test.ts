@@ -1,5 +1,5 @@
 /**
- * Sprint 2, fix round K: every boundary that stores text carries the chain's provenance forward (`policy/provenance.ts`).
+ * Sprint 2, fix round K: every boundary that stores text carries the chain's owner bit forward (`ownerOnly`, `policy/carry.ts`).
  *
  * A job a run schedules, a delegation, a handoff, a wake and a resumed task each start a run from stored text. The flags go with
  * them the way taint does, and a run is shown the engine's own view of them: the engine asks about the pause first on every call, so a
@@ -19,7 +19,6 @@ import { Router } from "../src/models/router";
 import { createRunContext } from "../src/policy/context";
 import { resetPolicyHooks, setPolicyHooks } from "../src/policy/hooks";
 import { resetS2Startup } from "../src/startup/s2";
-import { OWNER_STARTED, UNKNOWN_PROVENANCE, readProvenance, type Provenance } from "../src/policy/provenance";
 import type { RunContext } from "../src/policy/types";
 import { enqueueJob, listJobs, parseJobPayload } from "../src/stores/jobs";
 import { getTask } from "../src/stores/tasks";
@@ -50,11 +49,11 @@ const routerOf = (replies: Array<() => Response>): Router => {
 };
 const settings = { firstTokenTimeoutMs: 1000, turnTimeoutMs: 5000 };
 
-interface SeenRun { principal: string; jobID: string | null; ownerStarted: unknown; botChained: unknown }
+interface SeenRun { principal: string; jobID: string | null; ownerOnly: unknown }
 /** Every run that makes a tool call from now on, as the engine saw it. */
 function watchRuns(): SeenRun[] {
   const seen: SeenRun[] = [];
-  setPolicyHooks({ isRunPaused: (run) => { seen.push({ principal: run.principal.kind, jobID: run.jobID, ownerStarted: run.ownerStarted, botChained: run.botChained }); return null; } });
+  setPolicyHooks({ isRunPaused: (run) => { seen.push({ principal: run.principal.kind, jobID: run.jobID, ownerOnly: run.ownerOnly }); return null; } });
   return seen;
 }
 
@@ -62,16 +61,14 @@ let db: Database | undefined;
 afterEach(() => { db?.close(); db = undefined; resetPolicyHooks(); resetS2Startup(); });
 
 const payloadOf = (database: Database, jobID: string): Record<string, unknown> => parseJobPayload<Record<string, unknown>>(listJobs(database, { includeFinished: true }).find((job) => job.id === jobID)!);
-const OWNER: Provenance = { ownerStarted: true, botChained: false };
-const FROM_BOT: Provenance = { ownerStarted: true, botChained: true };
 
 function ownersRun(database: Database): RunContext {
   seedRootTurn(database, "trn_root");
   return createRunContext({ db: database, bot: "ea", threadID: "thr_parent", turnID: "trn_parent", rootTurnID: "trn_root", principal: { kind: "owner" }, capabilities: fullCapabilities(database), registry: buildTaskToolRegistry(database) });
 }
-function wakeRun(database: Database, provenance: Provenance): RunContext {
+function wakeRun(database: Database, ownerOnly: boolean): RunContext {
   seedRootTurn(database, "trn_root");
-  return createRunContext({ db: database, bot: "ea", threadID: "thr_parent", turnID: "trn_wake", rootTurnID: "trn_root", principal: { kind: "wake" }, capabilities: fullCapabilities(database), registry: buildTaskToolRegistry(database), provenance });
+  return createRunContext({ db: database, bot: "ea", threadID: "thr_parent", turnID: "trn_wake", rootTurnID: "trn_root", principal: { kind: "wake" }, capabilities: fullCapabilities(database), registry: buildTaskToolRegistry(database), ownerOnly });
 }
 
 describe("job_schedule: a job a run schedules is bot-made and keeps the run's marker", () => {
@@ -82,13 +79,13 @@ describe("job_schedule: a job a run schedules is bot-made and keeps the run's ma
 
   test("from the owner's own turn: the owner's marker, and a bot's link", async () => {
     db = openDatabase(":memory:");
-    expect(payloadOf(db, (await callJobSchedule(db, ownersRun(db))).id).provenance).toEqual(FROM_BOT);
+    expect(payloadOf(db, (await callJobSchedule(db, ownersRun(db))).id).ownerOnly).toBe(false);
   });
 
   test("from a run that cannot say where it came from, or with no run at all: the unknown chain", async () => {
     db = openDatabase(":memory:");
-    expect(payloadOf(db, (await callJobSchedule(db, wakeRun(db, UNKNOWN_PROVENANCE))).id).provenance).toEqual(UNKNOWN_PROVENANCE);
-    expect(payloadOf(db, (await callJobSchedule(db, undefined)).id).provenance).toEqual(UNKNOWN_PROVENANCE);
+    expect(payloadOf(db, (await callJobSchedule(db, wakeRun(db, false))).id).ownerOnly).toBe(false);
+    expect(payloadOf(db, (await callJobSchedule(db, undefined)).id).ownerOnly).toBe(false);
   });
 });
 
@@ -103,29 +100,29 @@ describe("delegate_task: the brief and the job carry the chain on", () => {
     const tool = delegateTool(database).get("delegate_task") as unknown as { handler: (args: Record<string, unknown>, ctx: unknown) => Promise<{ taskID: string; jobID: string }> };
     return tool.handler({ toAgentID: "researcher", goal }, { threadID: "thr_parent", turnID: "trn_parent", signal: new AbortController().signal, run, chain: { depth: 1, rootAgentID: "ea", currentAgentID: "ea", handoffSummary: null } });
   }
-  const briefProvenance = (database: Database, taskID: string): unknown => (JSON.parse(getTask(database, taskID)!.brief!) as { provenance?: unknown }).provenance;
+  const briefOwnerOnly = (database: Database, taskID: string): unknown => (JSON.parse(getTask(database, taskID)!.brief!) as { ownerOnly?: unknown }).ownerOnly;
 
   test("from the owner's own turn the chain stays the owner's, on the job and on the task's brief", async () => {
     db = openDatabase(":memory:");
     const { taskID, jobID } = await delegate(db, ownersRun(db));
-    expect(payloadOf(db, jobID).provenance).toEqual(OWNER);
-    expect(briefProvenance(db, taskID)).toEqual(OWNER);
+    expect(payloadOf(db, jobID).ownerOnly).toBe(true);
+    expect(briefOwnerOnly(db, taskID)).toBe(true);
   });
 
   test("from a run a bot started, the link is a bot's and the marker is kept", async () => {
     db = openDatabase(":memory:");
-    const { taskID, jobID } = await delegate(db, wakeRun(db, OWNER));
-    expect(payloadOf(db, jobID).provenance).toEqual(FROM_BOT);
-    expect(briefProvenance(db, taskID)).toEqual(FROM_BOT);
+    const { taskID, jobID } = await delegate(db, wakeRun(db, true));
+    expect(payloadOf(db, jobID).ownerOnly).toBe(false);
+    expect(briefOwnerOnly(db, taskID)).toBe(false);
   });
 
   test("from a chain already marked, it stays marked; from no run at all, it reads as unknown", async () => {
     db = openDatabase(":memory:");
-    const marked = await delegate(db, wakeRun(db, FROM_BOT));
-    expect(payloadOf(db, marked.jobID).provenance).toEqual(FROM_BOT);
+    const marked = await delegate(db, wakeRun(db, false));
+    expect(payloadOf(db, marked.jobID).ownerOnly).toBe(false);
     const orphan = await delegate(db, undefined, "Find the other delay");
-    expect(readProvenance(payloadOf(db, orphan.jobID).provenance)).toEqual(UNKNOWN_PROVENANCE);
-    expect(readProvenance(briefProvenance(db, orphan.taskID))).toEqual(UNKNOWN_PROVENANCE);
+    expect(payloadOf(db, orphan.jobID).ownerOnly).toBe(false);
+    expect(briefOwnerOnly(db, orphan.taskID)).toBe(false);
   });
 });
 
@@ -145,21 +142,21 @@ describe("handoff: the child keeps the marker of the chain it was handed", () =>
     await runHandoff(db, ownersRun(db));
     const child = seen.filter((run) => run.principal === "peer");
     expect(child.length, "the child never made a call").toBeGreaterThan(0);
-    expect(child.map((run) => ({ ownerStarted: run.ownerStarted, botChained: run.botChained })), "the handoff dropped the owner's marker").toEqual(child.map(() => OWNER));
+    expect(child.map((run) => run.ownerOnly), "the handoff dropped the owner's bit").toEqual(child.map(() => true));
     seen.length = 0;
-    await runHandoff(db, wakeRun(db, UNKNOWN_PROVENANCE));
+    await runHandoff(db, wakeRun(db, false));
     const orphan = seen.filter((run) => run.principal === "peer");
     expect(orphan.length).toBeGreaterThan(0);
-    expect(orphan.map((run) => ({ ownerStarted: run.ownerStarted, botChained: run.botChained }))).toEqual(orphan.map(() => UNKNOWN_PROVENANCE));
+    expect(orphan.map((run) => run.ownerOnly)).toEqual(orphan.map(() => false));
   });
 
   test("a child of a run a bot started is a bot-chained run, and the marker is kept", async () => {
     db = openDatabase(":memory:");
     const seen = watchRuns();
-    await runHandoff(db, wakeRun(db, OWNER));
+    await runHandoff(db, wakeRun(db, true));
     const child = seen.filter((run) => run.principal === "peer");
     expect(child.length).toBeGreaterThan(0);
-    expect(child.map((run) => ({ ownerStarted: run.ownerStarted, botChained: run.botChained }))).toEqual(child.map(() => FROM_BOT));
+    expect(child.map((run) => run.ownerOnly)).toEqual(child.map(() => false));
   });
 });
 
@@ -175,24 +172,24 @@ describe("a job's fire starts with the chain its payload carries", () => {
 
   test("an owner-made job (its marker on the payload) fires as the owner's work", async () => {
     db = openDatabase(":memory:");
-    const [run] = await fire(db, { provenance: OWNER });
+    const [run] = await fire(db, { ownerOnly: true });
     expect(run, "the fire never made a tool call").toBeDefined();
-    expect({ principal: run!.principal, ownerStarted: run!.ownerStarted, botChained: run!.botChained }).toEqual({ principal: "owner", ownerStarted: true, botChained: false });
+    expect({ principal: run!.principal, ownerOnly: run!.ownerOnly }).toEqual({ principal: "owner", ownerOnly: true });
   });
 
   test("a job with no marker, a marker that cannot be read, or one that says it was bot-chained is not the owner's", async () => {
     for (const [what, payload] of [
       ["no marker", {}],
-      ["a string", { provenance: "owner" }],
-      ["a list", { provenance: [true, false] }],
-      ["null", { provenance: null }],
-      ["half a marker", { provenance: { ownerStarted: true } }],
-      ["a bot's link", { inputRole: "system", provenance: FROM_BOT }],
+      ["a string", { ownerOnly: "owner" }],
+      ["a list", { ownerOnly: [true, false] }],
+      ["null", { ownerOnly: null }],
+      ["a string that says true", { ownerOnly: "true" }],
+      ["a bot's link", { inputRole: "system", ownerOnly: false }],
     ] as const) {
       db = openDatabase(":memory:");
       const [run] = await fire(db, payload);
       expect(run, `${what}: the fire never made a tool call`).toBeDefined();
-      expect({ what, ownersWork: run!.ownerStarted === true && run!.botChained === false }).toEqual({ what, ownersWork: false });
+      expect({ what, ownersWork: run!.ownerOnly === true }).toEqual({ what, ownersWork: false });
       db.close();
       db = undefined;
     }
@@ -227,18 +224,18 @@ describe("a wake: it reports back inside the chain the task came from", () => {
   test("the owner's own turn delegated: the wake is the owner's chain, on its payload and on its run", async () => {
     db = openDatabase(":memory:");
     const { wake, seen } = await throughWake(db, ownersRun(db));
-    expect(wake.provenance, "the wake dropped the chain the task came from").toEqual(OWNER);
-    expect((wake.results as Array<{ provenance?: unknown }>)[0]!.provenance).toEqual(OWNER);
+    expect(wake.ownerOnly, "the wake dropped the chain the task came from").toBe(true);
+    expect((wake.results as Array<{ ownerOnly?: unknown }>)[0]!.ownerOnly).toBe(true);
     expect(seen.length, "the wake never made a call").toBeGreaterThan(0);
-    expect({ ownerStarted: seen[0]!.ownerStarted, botChained: seen[0]!.botChained }).toEqual(OWNER);
+    expect(seen[0]!.ownerOnly).toBe(true);
   });
 
   test("a bot delegated: the wake is a bot-chained run", async () => {
     db = openDatabase(":memory:");
-    const { wake, seen } = await throughWake(db, wakeRun(db, OWNER));
-    expect(wake.provenance).toEqual(FROM_BOT);
+    const { wake, seen } = await throughWake(db, wakeRun(db, true));
+    expect(wake.ownerOnly).toBe(false);
     expect(seen.length).toBeGreaterThan(0);
-    expect({ ownerStarted: seen[0]!.ownerStarted, botChained: seen[0]!.botChained }).toEqual(FROM_BOT);
+    expect(seen[0]!.ownerOnly).toBe(false);
   });
 
   test("a wake told of several tasks is the owner's only if every task's chain is", async () => {
@@ -248,10 +245,10 @@ describe("a wake: it reports back inside the chain the task came from", () => {
     enqueueJob(db, {
       kind: "turn",
       payload: {
-        agentID: "ea", threadID: parent.id, notify: false, inputRole: "system", wakeKey: `wake:${parent.id}`, depth: 1, provenance: OWNER,
+        agentID: "ea", threadID: parent.id, notify: false, inputRole: "system", wakeKey: `wake:${parent.id}`, depth: 1, ownerOnly: true,
         results: [
-          { taskID: "tsk_a", agentID: "researcher", summary: "found it", redacted: false, taint: [], provenance: OWNER },
-          { taskID: "tsk_b", agentID: "researcher", summary: "found more", redacted: false, taint: [], provenance: FROM_BOT },
+          { taskID: "tsk_a", agentID: "researcher", summary: "found it", redacted: false, taint: [], ownerOnly: true },
+          { taskID: "tsk_b", agentID: "researcher", summary: "found more", redacted: false, taint: [], ownerOnly: false },
         ],
       },
     });
@@ -260,7 +257,7 @@ describe("a wake: it reports back inside the chain the task came from", () => {
     await runner.tick();
     const run = seen.find((entry) => entry.principal === "wake");
     expect(run, "the wake never made a call").toBeDefined();
-    expect({ ownerStarted: run!.ownerStarted, botChained: run!.botChained }).toEqual(FROM_BOT);
+    expect(run!.ownerOnly).toBe(false);
   });
 
   test("a result with no record of its chain makes the wake a bot's", async () => {
@@ -269,14 +266,14 @@ describe("a wake: it reports back inside the chain the task came from", () => {
     const seen = watchRuns();
     enqueueJob(db, {
       kind: "turn",
-      payload: { agentID: "ea", threadID: parent.id, notify: false, inputRole: "system", wakeKey: `wake:${parent.id}`, depth: 1, provenance: OWNER, results: [{ taskID: "tsk_a", agentID: "researcher", summary: "found it", redacted: false, taint: [] }] },
+      payload: { agentID: "ea", threadID: parent.id, notify: false, inputRole: "system", wakeKey: `wake:${parent.id}`, depth: 1, ownerOnly: true, results: [{ taskID: "tsk_a", agentID: "researcher", summary: "found it", redacted: false, taint: [] }] },
     });
     const runner = new JobRunner(db, () => undefined, { maxPerTick: 5 });
     registerTurnJob(runner, { db, settings, emit: () => undefined, router: routerOf([() => callResponse("load_tools", { names: ["job_list"] }), () => textResponse("Noted.")]) });
     await runner.tick();
     const run = seen.find((entry) => entry.principal === "wake");
     expect(run).toBeDefined();
-    expect(run!.botChained, "a result with no chain record was taken as the owner's").toBe(true);
+    expect(run!.ownerOnly, "a result with no chain record was taken as the owner's").toBe(false);
   });
 });
 
@@ -294,17 +291,17 @@ describe("a resumed task goes on in the chain it was delegated in", () => {
     for (let tick = 0; tick < 6 && parked() === null; tick += 1) await s.runner().tick();
     const task = parked();
     expect(task, "the coder never parked on its question; the script is out of step").not.toBeNull();
-    const brief = JSON.parse(s.get<{ brief: string }>("SELECT brief FROM tasks WHERE id = ?", task!.id)!.brief) as { provenance?: unknown };
-    expect(brief.provenance, "the owner's own turn delegated, so the brief says the chain is the owner's").toEqual(OWNER);
+    const brief = JSON.parse(s.get<{ brief: string }>("SELECT brief FROM tasks WHERE id = ?", task!.id)!.brief) as { ownerOnly?: unknown };
+    expect(brief.ownerOnly, "the owner's own turn delegated, so the brief says the chain is the owner's").toBe(true);
 
     a.send({ type: "task.answer", taskID: task!.id, questionID: task!.q, text: "Just empty it." });
     await a.waitFor("task.answer.ok", { why: "the answer to be accepted" });
     const resumed = s.get<{ payload: string }>("SELECT j.payload FROM jobs j JOIN tasks t ON t.job_id = j.id WHERE t.id = ?", task!.id)!;
-    expect((JSON.parse(resumed.payload) as { provenance?: unknown }).provenance, "the resumed run did not keep the chain it was delegated in").toEqual(OWNER);
+    expect((JSON.parse(resumed.payload) as { ownerOnly?: unknown }).ownerOnly, "the resumed run did not keep the chain it was delegated in").toBe(true);
   });
 });
 
 test("the owner's own CLI job is stamped as the owner's work", async () => {
   const { ownerJobPayload } = await import("../src/jobs/owner-job");
-  expect(ownerJobPayload({ text: "weekly check" }).provenance).toEqual(OWNER_STARTED);
+  expect(ownerJobPayload({ text: "weekly check" }).ownerOnly).toBe(true);
 });

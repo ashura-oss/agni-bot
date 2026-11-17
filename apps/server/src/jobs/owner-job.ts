@@ -1,10 +1,10 @@
 /**
  * The payload of a turn job the owner makes themselves (`agni job add`), as opposed to one a bot makes with `job_schedule`.
  *
- * It carries the positive marker that starts a chain the owner began (`policy/provenance.ts`). Without it a job's fire is not shown to be
- * the owner's: an owner job made before the marker existed is treated as a bot's, and asks before it schedules a follow-up.
+ * It starts a chain the owner began: `ownerOnly` is the bit only a front door that knows may set (`policy/carry.ts`). Without it a job's fire is
+ * not shown to be the owner's: an owner job made before the bit existed is stamped by migration 65, and any other without it is treated as a bot's
+ * and asks before it schedules a follow-up. It says what it had read as well: nothing, because the owner wrote it.
  */
-import { OWNER_STARTED } from "../policy/provenance";
 import type { TurnJobPayload } from "./turn";
 
 export function ownerJobPayload(fields: { text: string; threadID?: string; agentID?: string; notify?: boolean; everyMs?: number | null }): TurnJobPayload {
@@ -14,6 +14,6 @@ export function ownerJobPayload(fields: { text: string; threadID?: string; agent
     ...(fields.agentID ? { agentID: fields.agentID } : {}),
     notify: fields.notify !== false,
     ...(fields.everyMs ? { everyMs: fields.everyMs } : {}),
-    provenance: { ...OWNER_STARTED },
+    ownerOnly: true,
   };
 }

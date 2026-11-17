@@ -28,9 +28,7 @@ import { appendChannelMessage } from "../stores/channels";
 import { MAX_DEPTH, canStartDelegation, maxConcurrentDelegations } from "../agent/guardrails";
 import { listTaskNotes } from "../stores/task-notes";
 import { getArtifact } from "../stores/artifacts";
-import { packTaint, unknownTaint } from "../policy/context";
-import { handedProvenance } from "../policy/provenance";
-import { carryTaint, saveTaskTaint, taskTaint } from "../policy/carry";
+import { carryTaint, packCarried, saveTaskTaint, storedCarried, taskTaint } from "../policy/carry";
 import { denialScope } from "../policy/denials";
 
 const objectSchema = (properties: Record<string, unknown>, required: string[]): Record<string, unknown> => ({
@@ -186,15 +184,12 @@ export function registerDelegateTaskTool(registry: ToolRegistry, deps: DelegateT
       if (!canStartDelegation(running, mostAtOnce)) {
         throw new Error(`not done: ${running} delegations are already running for this task, and ${mostAtOnce} is the most at once. Wait for one to finish with delegate_wait, or do part of the work yourself.`);
       }
-      brief.chainID = chainID;
-      // The task row remembers its root, so a wake or a resumed run reports back inside the same request.
-      if (ctx.run) { brief.rootTurnID = ctx.run.rootTurnID; brief.rootJob = ctx.run.rootJob; if (ctx.run.denialRoot) brief.denialRoot = ctx.run.denialRoot; }
-      // Where this chain came from goes with the task: the wake and a resumed run read it back from here, never from a root job's row.
-      const provenance = ctx.run ? handedProvenance(ctx.run) : undefined;
-      if (provenance) brief.provenance = provenance;
+      // What this run hands the task: the child's job and the task's brief hold the one value. The brief keeps it for the wake and a resumed run,
+      // which read it back from here and never from a root job's row (so they report back inside the same request, as the same chain, cut to the same tools).
+      const carried = packCarried(ctx.run, "delegate", { chainID });
       const task = createDelegationTask(deps.db, {
         ownerAgentID: toAgentID,
-        brief,
+        brief: { ...brief, ...storedCarried(carried) },
         origin: "ea_delegated",
         parentTurnID: deps.parentTurnID ?? null,
         parentThreadID: deps.parentThreadID ?? null,
@@ -207,7 +202,6 @@ export function registerDelegateTaskTool(registry: ToolRegistry, deps: DelegateT
       const job = enqueueJob(deps.db, {
         kind: "turn",
         payload: {
-          chainID: brief.chainID,
           // A brief is a peer's note, not the owner speaking: logged as system,
           // so it is not replayed to the model as a bare user message later.
           inputRole: "system",
@@ -221,20 +215,14 @@ export function registerDelegateTaskTool(registry: ToolRegistry, deps: DelegateT
           notify: true,
           delegationTaskID: task.id,
           depth: depth + 1,
-          // What this run has read goes with the brief, and the child shares this run's root (S2-06).
-          // The list is always there when the sender is known: an empty one says "read nothing outside"; none says "unknown".
-          ...(ctx.run ? { taint: packTaint(ctx.run) } : {}),
-          ...(ctx.run ? { rootTurnID: ctx.run.rootTurnID, rootJob: ctx.run.rootJob, clockKey: ctx.run.clockKey } : {}),
-          ...(ctx.run?.denialRoot ? { denialRoot: ctx.run.denialRoot } : {}),
-          ...(provenance ? { provenance } : {}),
-          // What this run could call: the child's tools are cut down to it (S2-06). None says the sender is unknown, and the child gets only the inert tools.
-          ...(ctx.run ? { capabilities: [...ctx.run.effectiveCapabilities] } : {}),
+          // What this run has read, the root and clock the child shares, the tools it is cut down to, and whose chain it is (S2-06).
+          ...storedCarried(carried),
           rootKey,
         },
       });
       setDelegationJob(deps.db, task.id, job.id);
       // The task starts with what its sender had read; its own run adds to it as it goes.
-      saveTaskTaint(deps.db, task.id, ctx.run ? packTaint(ctx.run) : [unknownTaint("a task whose sender did not say what it had read")]);
+      saveTaskTaint(deps.db, task.id, carried.taint);
 
       deps.emit({
         type: "status.update",

@@ -18,11 +18,9 @@ import { canonicalAgentID, getPersona, resolvePersona, type ResolvedPersona } fr
 import { DEFAULT_VISIBILITY, MISSING_AGENT_VISIBILITY, RESULT_MAX_CHARS, redactResultForCaller } from "../agent/visibility";
 import { rootGuardrail } from "../agent/guardrails";
 import { asksWhenClean } from "../policy/metadata";
-import { readCapabilities } from "../policy/narrowing";
 import { readTaint, unknownTaint } from "../policy/context";
-import { saveTaskTaint, taskTaint } from "../policy/carry";
+import { carriedRoot, packCarried, readCarried, saveTaskTaint, storedCarried, taskTaint } from "../policy/carry";
 import { denialScope } from "../policy/denials";
-import { mergeProvenance, readProvenance, type Provenance } from "../policy/provenance";
 import type { TaintSource } from "../policy/types";
 import type { Router } from "../models/router";
 import { getThread } from "../stores/threads";
@@ -38,9 +36,7 @@ import {
   setDelegationThread,
   taskInfo,
   trackRunningDelegation,
-  briefChainID,
-  briefProvenance,
-  briefRoot,
+  briefCarried,
 } from "../stores/tasks";
 import { saveArtifact } from "../stores/artifacts";
 import { scheduleTagger } from "./tagger";
@@ -97,36 +93,34 @@ export interface TurnJobPayload {
   deferrals?: number;
   /** H23: delegation depth of this turn; 1 = root, each delegate_task hop adds one. */
   depth?: number;
-  /** The completions a coalesced wake carries. */
+  /**
+   * The completions a coalesced wake carries. Each holds what that task's run read from outside text, and the `Carried` fields of the
+   * chain it was delegated in (`ownerOnly`, `narrowed`, `capabilities`), which `readCarried` folds into the wake. Missing or unreadable: the worst.
+   */
   results?: Array<{
     taskID: string;
     agentID: string;
     summary: string;
     redacted: boolean;
-    /** What that task's run read from outside text (S2-06). Empty for a task that read nothing. */
     taint?: unknown;
-    /** Where the chain that task was delegated in came from (`policy/provenance.ts`). Missing or unreadable: the unknown chain. */
-    provenance?: unknown;
+    ownerOnly?: unknown;
+    narrowed?: unknown;
+    capabilities?: unknown;
   }>;
-  /** What the run that queued this job had read from outside text, for a delegated child (S2-06). */
-  taint?: unknown;
-  /** What the run that queued this job could call; a delegated child may call only these (S2-06). Missing or unreadable: the inert tools only. */
-  capabilities?: unknown;
   /**
-   * Where the chain this job belongs to came from: written by the server (`job_schedule`, `delegate_task`, the CLI's `job add`, a wake), never taken
-   * from a tool's arguments. Missing or unreadable: the unknown chain, which is a bot's (`policy/provenance.ts`).
+   * What the run that made this job hands it: the fields of `Carried` (`policy/carry.ts`), written by the server (`job_schedule`,
+   * `delegate_task`, a wake, a resumed task, the CLI's `job add`), never taken from a tool's arguments, and read back with `readCarried`.
+   * A field that is missing or unreadable says the worst: `taint` what the sender had read, `capabilities` the tools a narrowed or
+   * delegated run may call (the inert ones only), `ownerOnly` the owner's own work (false), `denialRoot` the refusal scope the job keeps,
+   * `rootTurnID`/`rootJob` the request it belongs to, `clockKey` the clock a delegated child shares with its parent.
    */
-  provenance?: unknown;
-  /** The request this job belongs to: set on a delegated child, a wake and a resumed task so a refusal earlier in the chain still holds. */
+  taint?: unknown;
+  narrowed?: unknown;
+  capabilities?: unknown;
+  ownerOnly?: unknown;
   rootTurnID?: string;
   rootJob?: string | null;
-  /**
-   * The refusal scope a job a bot scheduled keeps: the scope of the run that scheduled it, so what the owner refused there holds in
-   * every run of the job and in what it delegates, wakes and schedules. Written by the server (`job_schedule`, `delegate_task`),
-   * never taken from a tool's arguments.
-   */
   denialRoot?: string;
-  /** The clock a delegated child is measured on: its parent's. A job without one starts a clock of its own. */
   clockKey?: string;
   /** The run a delegation counts against (see `delegate_task`'s cap on running delegations). */
   rootKey?: string;
@@ -238,7 +232,7 @@ export function registerTurnJob(runner: JobRunner, deps: TurnJobDeps): void {
     const startedAt = nowISO();
     let result: Awaited<ReturnType<typeof runTurn>>;
     // The task has a record of what it read from the moment it starts, and keeps it whatever happens next.
-    if (delegationTaskID) saveTaskTaint(deps.db, delegationTaskID, startTaint(payload));
+    if (delegationTaskID) saveTaskTaint(deps.db, delegationTaskID, readCarried(payload).taint);
     try {
       result = await runTurn(deps, payload, persona, threadID, conversation, text, job.attempts > 1, job.id, job.run_at);
     } catch (error) {
@@ -551,19 +545,6 @@ export function buildWakeText(results: Array<{ taskID: string; agentID: string; 
   ].join("\n");
 }
 
-/** What a delegated task starts with: what its sender read, or unknown when the job does not say. */
-function startTaint(payload: TurnJobPayload): TaintSource[] {
-  return payload.taint === undefined ? [unknownTaint("a task whose sender did not say what it had read")] : readTaint(payload.taint);
-}
-
-/**
- * Where the chain this run belongs to came from: the job's own record, and for a wake each task it is told about. A chain is the owner's
- * only if every part is, and a part that is missing or unreadable is a bot's.
- */
-function startProvenance(payload: TurnJobPayload): Provenance {
-  return mergeProvenance(readProvenance(payload.provenance), ...(payload.results ?? []).map((item) => readProvenance(item.provenance)));
-}
-
 /** A wake is told about finished tasks; if one of them read outside text, so has the bot that reads it. */
 function wakeTaint(db: Database, results: TurnJobPayload["results"]): TaintSource[] {
   const out: TaintSource[] = [];
@@ -608,7 +589,8 @@ function wakeParent(deps: TurnJobDeps, taskID: string, summary: string, parentDe
   // to one root (what was refused there holds in it) and has the one clock of its own. The refusal scope alone is not the
   // run: every fire of a recurring job holds the same one, and its wakes would coalesce into one counted under the first
   // fire's wake scope. The wake scope (`wake-limit.ts`) names the run, so it is part of the key.
-  const root = briefRoot(task.brief);
+  const carried = packCarried(briefCarried(task.brief), "wake");
+  const root = carriedRoot(carried);
   const wakeKey = `wake:${parentThreadID}:${root ? denialScope(root) : "unrooted"}:${wakeScope({ ...root, threadID: parentThreadID })}`;
   const item = {
     taskID: task.id,
@@ -616,8 +598,8 @@ function wakeParent(deps: TurnJobDeps, taskID: string, summary: string, parentDe
     summary: visible.text ?? "",
     redacted: visible.redacted,
     taint: taskTaint(deps.db, task.id),
-    // The wake is a link of the chain the task was delegated in.
-    provenance: briefProvenance(task.brief),
+    // The wake is a link of the chain the task was delegated in: it is the owner's only if every task it is told about is.
+    ownerOnly: carried.ownerOnly,
   };
   claimResultDelivery(deps.db, task.id, () => {
     const existing = findQueuedJobByPayloadKey(deps.db, "turn", wakeKey);
@@ -635,10 +617,8 @@ function wakeParent(deps: TurnJobDeps, taskID: string, summary: string, parentDe
         inputRole: "system",
         wakeKey,
         depth: parentDepth,
-        chainID: briefChainID(task.brief),
-        // The wake is part of the request the task came from: what the owner refused there is refused here (S2-07).
-        ...briefRoot(task.brief),
-        provenance: item.provenance,
+        // The wake is part of the request and the chain the task came from: what the owner refused there is refused here (S2-07).
+        ...storedCarried(carried),
         results: [item],
       },
     });
@@ -673,6 +653,7 @@ async function runTurn(
   jobSlot?: string,
 ): Promise<{ turnID: string; text: string; stopReason: string; taint: TaintSource[]; endedBy?: "wall_time" }> {
   const controller = new AbortController();
+  const carried = readCarried(payload);
   const delegationTaskID = payload.delegationTaskID?.trim() || null;
   const task = delegationTaskID ? getTask(deps.db, delegationTaskID) : null;
   // S1-12: cancelling the task aborts this turn instead of waiting for it to end.
@@ -693,20 +674,14 @@ async function runTurn(
       guardrail: { ...rootGuardrail(persona.id, payload.chainID), depth: Math.max(1, Math.trunc(payload.depth ?? 1)) },
       ...(payload.wakeKey ? { wake: true } : {}),
       policy: {
-        // The brief's taint rides down; a wake starts with the taint of the results it is told about.
-        // undefined says the sender did not say what it had read (a bot that starts from it is tainted); a list, even empty, says it did.
-        ...(payload.taint !== undefined || payload.wakeKey ? { taint: [...(payload.taint !== undefined ? readTaint(payload.taint) : []), ...wakeTaint(deps.db, payload.results)] } : {}),
-        ...(payload.rootTurnID ? { rootTurnID: payload.rootTurnID, rootJob: payload.rootJob ?? null } : {}),
-        // Where this chain came from: always given, so a job with no record of it is the unknown chain and not "the owner's by default".
-        provenance: startProvenance(payload),
-        ...(typeof payload.denialRoot === "string" && payload.denialRoot !== "" ? { denialRoot: payload.denialRoot } : {}),
-        // A delegated child is on its parent's clock; a wake, a resumed task and any other job start their own, and a retry keeps the one its run started (`jobs.run_clock_key`).
-        ...(payload.clockKey ? { clockKey: payload.clockKey } : {}),
+        // Everything the job carries, read back failing closed (`readCarried`): what its sender had read (a wake adds what the results it is told
+        // about read), the request and refusal scope it belongs to, the tools it is cut down to, and whether it is the owner's own work. A delegated
+        // child is on its parent's clock; a wake, a resumed task and any other job start their own, and a retry keeps the one its run started
+        // (`jobs.run_clock_key`).
+        ...carried,
+        taint: [...carried.taint, ...wakeTaint(deps.db, payload.results)],
         ...(jobSlot ? { jobSlot } : {}),
         jobID: jobID ?? null,
-        capabilities: readCapabilities(payload.capabilities),
-        // A job a narrowed run scheduled stores that run's tools (even a value that cannot be read): every fire is narrowed to them.
-        ...(payload.capabilities !== undefined ? { narrowed: true } : {}),
       },
       facts: payload.facts,
       ...(channelID ? { channelID } : {}),
