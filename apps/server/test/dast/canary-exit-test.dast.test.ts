@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { PROTOCOL_VERSION } from "@agni/protocol";
@@ -54,8 +55,8 @@ function captureLog(): string[] {
   return lines;
 }
 
-/** Enter both secrets over a real socket as the owner's device, and keep every frame the socket received. */
-async function enterSecrets(server: Dast): Promise<string[]> {
+/** Open a socket as the owner's device and keep every frame it receives. */
+async function openOwnerSocket(server: Dast): Promise<{ ws: WebSocket; received: string[]; waitFor: (type: string) => Promise<Record<string, unknown>> }> {
   const received: string[] = [];
   const ws = new WebSocket(server.harness.url);
   await new Promise<void>((resolveOpen, rejectOpen) => {
@@ -74,7 +75,12 @@ async function enterSecrets(server: Dast): Promise<string[]> {
   };
   ws.send(JSON.stringify({ type: "hello", v: PROTOCOL_VERSION, token: server.harness.token, device: "exit-test" }));
   await waitFor("hello.ok");
+  return { ws, received, waitFor };
+}
 
+/** Enter both secrets over a real socket as the owner's device, and keep every frame the socket received. */
+async function enterSecrets(server: Dast): Promise<string[]> {
+  const { ws, received, waitFor } = await openOwnerSocket(server);
   ws.send(JSON.stringify({ type: "provider.add", providerID: "groq", apiKey: PROVIDER_KEY }));
   await waitFor("provider.add.ok");
   ws.send(JSON.stringify({ type: "plugin.configure", pluginID: "gmail", account: "agent", user: "agent@example.test", pass: PLUGIN_PASS }));
@@ -85,9 +91,9 @@ async function enterSecrets(server: Dast): Promise<string[]> {
   return received;
 }
 
-function scan(server: Dast, extra: string[]): { code: number; out: string; err: string } {
+function scan(server: Dast, extra: string[], canaries: string[] = [PROVIDER_KEY, PLUGIN_PASS]): { code: number; out: string; err: string } {
   const env = cleanChildEnv({ AGNI_HOME: server.home }, AGNI_ONLY);
-  const run = Bun.spawnSync([process.execPath, SCRIPT, "--secrets", `--canary=${PROVIDER_KEY},${PLUGIN_PASS}`, ...extra], { env, cwd: server.home });
+  const run = Bun.spawnSync([process.execPath, SCRIPT, "--secrets", `--canary=${canaries.join(",")}`, ...extra], { env, cwd: server.home });
   return { code: run.exitCode ?? -1, out: run.stdout.toString(), err: run.stderr.toString() };
 }
 
@@ -142,6 +148,60 @@ describe("secrets entered through the socket (exit test 1)", () => {
     const { server, frames } = await run();
     const result = scan(server, [`--frames=${frames}`]);
     // The scanner masks values, so this message is safe to show; it names the files that still hold a secret.
+    expect({ code: result.code, leaks: result.err.trim() }).toEqual({ code: 0, leaks: "" });
+  });
+});
+
+/**
+ * Sprint 3 fix round 6. The first exit-test run entered secrets and looked for them; it never asked what the
+ * server does when an upstream echoes one back. A server that answers HTTP 500 and reflects the Authorization
+ * header it was sent used to leave the bearer in `plugin_connections.error` (and so in the database's
+ * write-ahead log) while the `plugin.state` frame showed it masked.
+ */
+describe("a server that echoes the bearer in its error (exit test 1, upstream echo)", () => {
+  const BEARER = "mcp-bearer-exit-test-7a6b5c4d3e2f1089";
+  let mock: ReturnType<typeof Bun.serve> | undefined;
+  afterEach(() => {
+    void mock?.stop(true);
+    mock = undefined;
+  });
+
+  test("the scan of the whole home, the log and the frames finds no bearer and exits 0", async () => {
+    savedEnv.AGNI_SECRETS_MODE = Bun.env.AGNI_SECRETS_MODE;
+    const log = captureLog();
+    dast = await startDast({ files: true });
+    Bun.env.AGNI_SECRETS_MODE = "vault";
+    await unlockVault({ home: dast.home, create: true });
+    // The mock MCP server: every request is a 500 whose body reflects the request headers.
+    mock = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: (request) => new Response(`upstream exploded; request headers: ${JSON.stringify({ authorization: request.headers.get("authorization") })}`, { status: 500 }),
+    });
+    // The owner flags the plugin local, which is what lets it point at a loopback server.
+    writeFileSync(join(dast.home, "plugins.json"), JSON.stringify({ version: 1, plugins: { notion: { account: "owner", enabled: true, auth: { kind: "mcp" }, local: true } } }));
+
+    const { ws, received } = await openOwnerSocket(dast);
+    ws.send(JSON.stringify({ type: "plugin.configure", pluginID: "notion", account: "owner", url: `http://127.0.0.1:${mock.port}/mcp`, key: BEARER }));
+    const deadline = Date.now() + 5000;
+    while (!received.some((raw) => raw.includes("upstream exploded"))) {
+      if (Date.now() > deadline) throw new Error("the failed connection never reached the owner's client");
+      await Bun.sleep(10);
+    }
+    await Bun.sleep(100);
+    ws.close();
+
+    // The failure really was stored, and the frame the owner saw is masked: the scan is not looking at nothing.
+    const stored = new Database(join(dast.home, "data", "agni.sqlite"), { readonly: true });
+    const row = stored.query<{ error: string }, []>("SELECT error FROM plugin_connections WHERE plugin_id = 'notion'").get();
+    stored.close();
+    expect(row?.error).toContain("upstream exploded");
+    expect(received.join("\n")).toContain("[redacted]");
+
+    const framesFile = join(dast.home, "frames.jsonl");
+    writeFileSync(framesFile, `${received.join("\n")}\n`);
+    writeFileSync(join(dast.home, "logs", "agni.log"), `${log.join("\n")}\n`);
+    const result = scan(dast, [`--frames=${framesFile}`], [BEARER]);
     expect({ code: result.code, leaks: result.err.trim() }).toEqual({ code: 0, leaks: "" });
   });
 });
