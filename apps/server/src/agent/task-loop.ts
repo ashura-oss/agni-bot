@@ -548,6 +548,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   const callableTools = deferred.length > 0 ? [...effectiveTools, "load_tools"] : effectiveTools;
   // S2-03: who is running and what outside text it has read. Every tool call is judged against it.
   const principal = principalOf(run);
+  const ownersChatTurn = principal.kind === "owner" && (run.policy?.jobID ?? null) === null;
   const runCtx = createRunContext({
     db, bot: persona.id, botName: persona.name, threadID, turnID,
     jobID: run.policy?.jobID ?? null,
@@ -580,8 +581,9 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
       ...(recovering ? restoredTaint(existing?.taint ?? null) : []),
       // A new run in a thread reads what the runs before it wrote there. If the last of them had read outside text (or left no readable
       // record of it), the history holds words written under that text's influence. The owner's own chat turn is exempt: the owner is
-      // there to see what is said, and what they ask for is their own. Every other run (a job's fire, a wake, a bot's brief) is not.
-      ...(!recovering && principal.kind !== "owner" ? historyTaint(existing) : []),
+      // there to see what is said, and what they ask for is their own. Every other run (a job's fire, a wake, a bot's brief) is not, and
+      // that includes a fire of a job the owner made: it runs as the owner, but the owner is not there when it fires.
+      ...(!recovering && !ownersChatTurn ? historyTaint(existing) : []),
       ...(principal.kind === "routine" ? [{ kind: "routine" as const, label: "saved routine state", at: nowISO() }] : []),
       ...(run.attachmentIDs?.length ? [{ kind: "attachment" as const, label: attachmentLabel(db, inputMessage.id), at: nowISO() }] : []),
       ...(run.groupContext !== undefined && run.channelID ? groupTaint(db, run.channelID, persona.id) : []),
