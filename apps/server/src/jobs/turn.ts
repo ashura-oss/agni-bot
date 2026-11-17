@@ -186,8 +186,9 @@ export function registerTurnJob(runner: JobRunner, deps: TurnJobDeps): void {
 
     const text = payload.text?.trim();
     if (!text) throw new Error("turn job payload has no text");
-    const carried = readCarried(payload);
     const delegationTaskID = payload.delegationTaskID?.trim() || null;
+    // A delegated child's own job is a brief, like its wake and its resume: one with no `narrowed` field (written before it existed) reads as cut.
+    const carried = readCarried(payload, { brief: delegationTaskID !== null });
     if (delegationTaskID) {
       // A cancelled task must not run, even if its job was already claimed.
       if (isDelegationCancelled(deps.db, delegationTaskID)) return { result: "cancelled" };

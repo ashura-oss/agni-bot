@@ -24,6 +24,7 @@ import { saveArtifact } from "../src/stores/artifacts";
 import { appendChannelMessage } from "../src/stores/channels";
 import { groupTaint } from "../src/agent/group";
 import { createRunContext, unpackTaint } from "../src/policy/context";
+import { resetPolicyHooks, setPolicyHooks } from "../src/policy/hooks";
 import { carryTaint, saveTaskTaint, taskTaint } from "../src/policy/carry";
 import type { RunContext, TaintSource } from "../src/policy/types";
 import { buildTaskToolRegistry } from "../src/tools/task-registry";
@@ -46,7 +47,7 @@ const routerOf = (replies: Array<() => Response>): Router => {
 
 const WEB: TaintSource = { kind: "web", label: "evil.example/page", tool: "web_fetch", at: "2026-11-16T10:00:00Z" };
 let db: Database | undefined;
-afterEach(() => { db?.close(); db = undefined; });
+afterEach(() => { db?.close(); db = undefined; resetPolicyHooks(); });
 
 function parentRun(database: Database, taint: TaintSource[] = []): RunContext {
   seedRootTurn(database, "trn_root");
@@ -144,6 +145,43 @@ describe("delegate_task: the brief carries the taint, the task keeps it, the wak
     expect(taskTaint(db, taskID).map((source) => source.label)).toEqual(["evil.example/page"]);
     const wake = listJobs(db, { includeFinished: true }).map((job) => parseJobPayload<{ wakeKey?: string; results?: Array<{ taint?: unknown }> }>(job)).find((payload) => payload.wakeKey);
     expect(unpackTaint(wake!.results![0]!.taint).map((source) => source.label)).toEqual(["evil.example/page"]);
+  });
+
+  describe("a task job written before `narrowed` existed (its payload says neither `narrowed` nor `capabilities`)", () => {
+    /** Delegate a task, strip what the legacy payload never had, run the job, and say what the child's run was cut down to. */
+    async function legacyChildRun(database: Database, strip: (payload: Record<string, unknown>) => void = () => undefined): Promise<{ narrowed: boolean | undefined; capabilities: string[]; principal: string } | undefined> {
+      const { jobID } = await delegate(database, parentRun(database));
+      const payload = payloadOf(database, jobID);
+      delete payload.narrowed;
+      delete payload.capabilities;
+      expect(payload.delegationTaskID, "the job is not a task's own job; the test is out of step").toBeTruthy();
+      strip(payload);
+      database.run("UPDATE jobs SET payload = ? WHERE id = ?", [JSON.stringify(payload), jobID]);
+      let seen: { narrowed: boolean | undefined; capabilities: string[]; principal: string } | undefined;
+      setPolicyHooks({ isRunPaused: (run) => { seen ??= { narrowed: run.narrowed, capabilities: [...run.effectiveCapabilities].sort(), principal: run.principal.kind }; return null; } });
+      const runner = new JobRunner(database, () => undefined, { maxPerTick: 5 });
+      registerTurnJob(runner, { db: database, router: routerOf([() => callResponse("load_tools", { names: ["job_list"] }), () => textResponse("found it")]), settings: { firstTokenTimeoutMs: 1000, turnTimeoutMs: 5000 }, emit: () => undefined });
+      await runner.tick();
+      return seen;
+    }
+
+    test("runs cut down to the inert tools, as its wake and its resume are", async () => {
+      db = openDatabase(":memory:");
+      const seen = await legacyChildRun(db);
+      expect(seen, "the child never made a call").toBeDefined();
+      expect(seen!.narrowed).toBe(true);
+      expect(seen!.capabilities).not.toContain("job_list");
+      expect(seen!.capabilities).not.toContain("bash");
+    });
+
+    test("still runs cut down when nothing but its `delegationTaskID` says it is a delegated child's (no brief sender, and the task's row is gone)", async () => {
+      db = openDatabase(":memory:");
+      const seen = await legacyChildRun(db, (payload) => { delete payload.peer; db!.run("DELETE FROM tasks"); });
+      expect(seen, "the child never made a call").toBeDefined();
+      expect(seen!.narrowed, "a delegated child with no `narrowed` field ran with its bot's whole toolset").toBe(true);
+      expect(seen!.capabilities).not.toContain("job_list");
+      expect(seen!.capabilities).not.toContain("bash");
+    });
   });
 
   test("a task that read nothing outside leaves nothing on the task", async () => {
