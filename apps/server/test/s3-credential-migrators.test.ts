@@ -11,7 +11,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDatabase } from "../src/db";
@@ -57,7 +57,7 @@ const C = {
 };
 const CANARIES = Object.values(C);
 
-const ENV_KEYS = ["AGNI_HOME", "AGNI_BACKUP_DIR", "AGNI_BACKUP_DIR", "AGNI_SECRETS_MODE", "AGNI_PLUGINS_PATH", "AGNI_PROVIDER_CONFIG_PATH", "AGNI_DB_PATH", "GROQ_API_KEY", "AGNI_CUSTOM_KEY_1", "AGNI_CUSTOM_KEY_2"];
+const ENV_KEYS = ["AGNI_HOME", "AGNI_BACKUP_DIR", "AGNI_SECRETS_MODE", "AGNI_PLUGINS_PATH", "AGNI_PROVIDER_CONFIG_PATH", "AGNI_DB_PATH", "GROQ_API_KEY", "AGNI_CUSTOM_KEY_1", "AGNI_CUSTOM_KEY_2"];
 const saved: Record<string, string | undefined> = {};
 let parent = "";
 let home = "";
@@ -332,16 +332,34 @@ describe("the database's own backups", () => {
     expect(text).toContain("agni-20260102.db");
   });
 
-  test("old backups are erased zero-then-delete: a second link to the file sees zeros, not the old tokens", async () => {
+  test("old backups are erased zero-then-delete: a handle opened before sees zeros, not the old tokens", async () => {
+    buildHome();
+    const older = plantBackup("agni-20260101.db");
+    const handle = openSync(older, "r"); // same bytes, still readable after the delete: an unlink alone would leave the tokens in them
+    try {
+      const before = Buffer.alloc(statSync(older).size);
+      readSync(handle, before, 0, before.length, 0);
+      expect(before.includes(C.dbAccess)).toBe(true);
+      await migrateTokens();
+      expect(existsSync(older)).toBe(false);
+      const after = Buffer.alloc(before.length);
+      readSync(handle, after, 0, after.length, 0);
+      expect(after.includes(C.dbAccess)).toBe(false);
+      expect(after.every((byte) => byte === 0)).toBe(true);
+    } finally {
+      closeSync(handle);
+    }
+  });
+
+  test("an old backup with another hard link is not overwritten (that would change the other name too): it is left, and the output names it", async () => {
     buildHome();
     const older = plantBackup("agni-20260101.db");
     const link = join(parent, "link-to-old-backup");
-    linkSync(older, link); // same bytes under another name: an unlink alone would leave them readable
-    expect(readFileSync(link).includes(C.dbAccess)).toBe(true);
-    await migrateTokens();
-    expect(existsSync(older)).toBe(false);
-    expect(readFileSync(link).includes(C.dbAccess)).toBe(false);
-    expect(readFileSync(link).every((byte) => byte === 0)).toBe(true);
+    linkSync(older, link);
+    const { notes } = await migrateTokens();
+    expect(existsSync(older)).toBe(true);
+    expect(readFileSync(link).includes(C.dbAccess)).toBe(true); // untouched
+    expect(notes.join(" ")).toMatch(/could not be erased[^\n]*agni-20260101\.db/);
   });
 
   test("a backup made today (the name the fresh backup needs) is replaced, not kept as the fresh one", async () => {

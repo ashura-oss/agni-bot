@@ -14,7 +14,7 @@
  * plugin code can use it without loading the vault's crypto, and without a
  * cycle (`secrets/classify.ts` imports `models/providers.ts`).
  */
-import { statSync, unlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, unlinkSync, writeFileSync } from "node:fs";
 import { registerSecretFor } from "../util/redact";
 import { secretsMode } from "../secrets/mode";
 import { tryGetVault } from "../secrets/state";
@@ -75,17 +75,24 @@ function segment(value: string): string {
  * Remove a plaintext file that held secrets: overwrite its bytes with zeros, then delete it, so the
  * content is not left in the file's old blocks. The overwrite is best effort (a journalled or
  * copy-on-write filesystem may keep the old blocks); the delete is not. True when a file was removed.
+ *
+ * Only a regular file with a single name is touched. A symlink would have its target zeroed, a hard link would
+ * have the other names' bytes zeroed with it, and a directory has nothing to zero: each is left exactly as it is
+ * and refused with an error that says why (the callers report a refusal as "could not erase", so the owner sees
+ * the name and deletes it by hand).
  */
 export function eraseFile(path: string): boolean {
-  let size: number;
+  let info: ReturnType<typeof lstatSync>;
   try {
-    size = statSync(path).size;
+    info = lstatSync(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw error;
   }
+  if (!info.isFile()) throw new Error(`${path} is not a regular file (a link or a folder), so it was left alone`);
+  if (info.nlink !== 1) throw new Error(`${path} has ${info.nlink - 1} other hard link(s), so it was left alone (overwriting it would change those names too)`);
   try {
-    writeFileSync(path, Buffer.alloc(size));
+    writeFileSync(path, Buffer.alloc(info.size));
   } catch {
     // Read-only or locked: still try to delete it below.
   }
