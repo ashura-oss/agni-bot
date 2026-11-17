@@ -57,6 +57,8 @@ const forbiddenKeyStore = (): KeyStore => {
 };
 
 const configOf = (home: string): string => readFileSync(join(home, "config.env"), "utf8");
+/** True when `text` has `line` as a whole line. */
+const hasLine = (text: string, line: string): boolean => text.split(/\r?\n/).includes(line);
 
 describe("homeIsFresh and recordedSecretsMode", () => {
   test("an empty folder, and one with only the template config.env, are fresh", () => {
@@ -98,7 +100,7 @@ describe("chooseSecretsMode: a fresh home", () => {
     expect(result.mode).toBe("vault");
     expect(result.reason).toBe("fresh");
     expect(vaultExists({ home })).toBe(true);
-    expect(configOf(home)).toMatch(/^AGNI_SECRETS_MODE=vault$/m);
+    expect(hasLine(configOf(home), "AGNI_SECRETS_MODE=vault")).toBe(true);
     expect(result.message).toContain("secrets mode: vault");
     expect(result.message).toContain(join(home, "vault.bin"));
   });
@@ -117,7 +119,7 @@ describe("chooseSecretsMode: a fresh home", () => {
     expect(result.message.split(/(?<=\.)\s+/).length).toBe(2);
     // recorded: the mode, and the reason with the date
     const config = configOf(home);
-    expect(config).toMatch(/^AGNI_SECRETS_MODE=file$/m);
+    expect(hasLine(config, "AGNI_SECRETS_MODE=file")).toBe(true);
     expect(config).toContain("2026-11-17");
     expect(config).toContain("no Secret Service is running");
     // private
@@ -217,7 +219,7 @@ describe("prepareHome (what `agni setup` does before it starts anything)", () =>
     expect(result.secrets.mode).toBe("vault");
     const config = configOf(home);
     expect(config).toContain("AGNI_PORT=8787");
-    expect(config).toMatch(/^AGNI_SECRETS_MODE=vault$/m);
+    expect(hasLine(config, "AGNI_SECRETS_MODE=vault")).toBe(true);
     expect(isOwnerOnlyFile(join(home, "config.env"))).toBe(true);
   });
 
@@ -225,7 +227,7 @@ describe("prepareHome (what `agni setup` does before it starts anything)", () =>
     const home = fresh();
     const result = await prepareHome({ home, env: {}, envExample: ENV_EXAMPLE, keystore: unavailableKeyStore() });
     expect(result.secrets.mode).toBe("file");
-    expect(configOf(home)).toMatch(/^AGNI_SECRETS_MODE=file$/m);
+    expect(hasLine(configOf(home), "AGNI_SECRETS_MODE=file")).toBe(true);
     expect(isOwnerOnlyFile(join(home, "config.env"))).toBe(true);
   });
 
@@ -244,7 +246,7 @@ describe("a server in vault mode whose keystore goes away (unchanged: it fails c
   test("start refuses with the keystore's reason and does not read plaintext keys instead", async () => {
     const home = fresh();
     await chooseSecretsMode({ home, env: {} });
-    expect(configOf(home)).toMatch(/^AGNI_SECRETS_MODE=vault$/m);
+    expect(hasLine(configOf(home), "AGNI_SECRETS_MODE=vault")).toBe(true);
     // The machine loses its credential store, and someone leaves a plaintext key in config.env.
     setKeyStoreOverride({ ...unavailableKeyStore(), kind: "memory" });
     writeFileSync(join(home, "config.env"), `${configOf(home)}GROQ_API_KEY=gsk_something_long_enough_123
@@ -385,7 +387,7 @@ describe("the agni command line, with the passphrase keystore (no credential sto
     expect(out).toContain("secrets mode: vault");
     expect(code).toBe(0);
     expect(existsSync(join(home, "vault.bin"))).toBe(true);
-    expect(configOf(home)).toMatch(/^AGNI_SECRETS_MODE=vault$/m);
+    expect(hasLine(configOf(home), "AGNI_SECRETS_MODE=vault")).toBe(true);
     expect(existsSync(join(home, "run"))).toBe(false);
     expect(existsSync(join(home, "logs"))).toBe(false);
   });
@@ -398,7 +400,7 @@ describe("the agni command line, with the passphrase keystore (no credential sto
     expect(out).toContain("agni vault migrate");
     expect(code).toBe(0);
     expect(existsSync(join(home, "vault.bin"))).toBe(false);
-    expect(configOf(home)).toMatch(/^AGNI_SECRETS_MODE=file$/m);
+    expect(hasLine(configOf(home), "AGNI_SECRETS_MODE=file")).toBe(true);
     expect(isOwnerOnlyFile(join(home, "config.env"))).toBe(true);
   });
 
