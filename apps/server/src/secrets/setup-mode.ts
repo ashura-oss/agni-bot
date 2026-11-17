@@ -40,7 +40,7 @@ export function recordedSecretsMode(home: string, env: Env = process.env): Recor
 }
 
 /**
- * True when nothing in `home` depends on the mode it was made in: no vault, no database, no plugin or provider file,
+ * True when nothing in `home` depends on the mode it was made in: no vault, no `data/` folder, no database, no plugin or provider file,
  * and no credential written in `config.env`. A `config.env` that is only the template (every key empty or commented)
  * does not count, because the installer writes that before `agni setup` runs. A home with a recorded mode is not
  * fresh: the owner's choice stands.
@@ -48,6 +48,8 @@ export function recordedSecretsMode(home: string, env: Env = process.env): Recor
 export function homeIsFresh(home: string, env: Env = process.env): boolean {
   const keeps = [
     join(home, "vault.bin"),
+    // Accounts, backups and the database live here; a home that has the folder has been run, whatever is in it now.
+    join(home, "data"),
     env.AGNI_DB_PATH?.trim() || join(home, "data", "agni.sqlite"),
     join(home, "agni.sqlite"),
     env.AGNI_PLUGINS_PATH?.trim() || join(home, "plugins.json"),

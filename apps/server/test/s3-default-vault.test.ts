@@ -84,6 +84,15 @@ describe("homeIsFresh and recordedSecretsMode", () => {
     expect(homeIsFresh(withFile("config.env", "AGNI_SECRETS_MODE=file\n"), {})).toBe(false);
   });
 
+  test("any data folder (accounts, backups, a database) makes a home not fresh, even with no database file in it", () => {
+    const empty = fresh();
+    mkdirSync(join(empty, "data"));
+    expect(homeIsFresh(empty, {})).toBe(false);
+    const accounts = fresh();
+    mkdirSync(join(accounts, "data", "chatgpt-accounts"), { recursive: true });
+    expect(homeIsFresh(accounts, {})).toBe(false);
+  });
+
   test("the recorded mode comes from the environment first, then config.env, else nothing", () => {
     const home = fresh();
     expect(recordedSecretsMode(home, {})).toBeUndefined();
