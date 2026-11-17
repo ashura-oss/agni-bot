@@ -1,19 +1,30 @@
 /**
  * What an approval card says about a call: the heading (`describeAction`) and the body (`previewAction`).
  *
- * The rule for every card: a card never shows less than what will run. Standing work (a job, a routine) is drawn from the
- * classification the engine decided (`card.standingKind`), not from a second look at the arguments, and shows the whole prompt, the
- * bot and the schedule. A call that cannot be shown whole is not shown at all: `previewAction` throws `CardNotShown`, and the
- * engine (`policy/engine.ts`) refuses the call before any card is raised.
+ * The rule for every card: a card never shows less than what will run.
+ *
+ *  - The body shows every field that decides what runs, whole: a command, the content of a file, a mail's recipients, subject and
+ *    body, every argument of a call the card has no view of its own for. Nothing is cut in the middle.
+ *  - Standing work (a job, a routine) is drawn from the classification the engine decided (`card.standingKind`), not from a second
+ *    look at the arguments, and shows the whole prompt, the bot and the schedule.
+ *  - A call that cannot be shown whole (it is more than a card holds, or its classification and its arguments disagree, or it names
+ *    a routine that is not there) is not shown at all: `previewAction` throws `CardNotShown`, and the engine (`policy/engine.ts`)
+ *    refuses the call before any card is raised.
+ *
+ * The heading is a one-line summary that the client cuts again for display, so it may be shortened; the body never is. The one-shot
+ * job heading carries its whole prompt anyway.
  */
 import type { Database } from "bun:sqlite";
-import { clip, entry, escapeUnsafe, quoted, quotedWhole, whole } from "./card-text";
+import { clip, entry, escapeUnsafe, quotedWhole, whole } from "./card-text";
 import type { ApprovalCard, StandingKind } from "../policy/types";
 import { describeRecurring, isRecurringSchedule, oneShotTime } from "../policy/standing-rules";
 import { ROUTINE_DEFAULTS } from "../routines/types";
 import type { Preflight } from "../routines/types";
 import { getRoutine } from "../stores/routines";
 import { isOutsideScratch, resolveWritePath, scratchDir, writeTargetExists } from "../tools/write-file";
+
+/** The most characters a card's body holds. A call whose body would be longer is not put to the owner: it is refused. */
+export const CARD_BODY_MAX_CHARS = 20_000;
 
 /** The call cannot be put on a card whole, so no card is raised for it. The message is for the model and says what to do. */
 export class CardNotShown extends Error {
@@ -31,18 +42,16 @@ export interface PreviewOptions {
   agentID?: string | null | undefined;
 }
 
-/** An argument for display. A missing one reads as "(not given)", never "?" or "undefined". */
+/** An argument for the one-line heading. A missing one reads as "(not given)", never "?" or "undefined". */
 function shown(value: unknown, max = 400): string {
   if (value === undefined || value === null || value === "") return "(not given)";
   return escapeUnsafe(clip(typeof value === "string" ? value : JSON.stringify(value) ?? "(not given)", max));
 }
 
-/** The arguments with every long string cut in the middle (start and end kept), for the JSON view. */
-function boundedArgs(value: unknown, max: number): unknown {
-  if (typeof value === "string") return clip(value, max);
-  if (Array.isArray(value)) return value.map((item) => boundedArgs(item, max));
-  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, boundedArgs(item, max)]));
-  return value;
+/** What a file write does to the file, in words. */
+function writeLabel(args: Record<string, unknown>, path: string): string {
+  const exists = path !== "" && !isOutsideScratch(path, scratchDir()) && writeTargetExists(path);
+  return !exists ? "write file" : args.append === true ? "append to existing file" : "overwrite existing file";
 }
 
 /** The one-line heading of a card. Never throws. */
@@ -51,9 +60,7 @@ export function describeAction(toolName: string, args: Record<string, unknown>):
     case "bash": return `run shell: ${shown(String(args.command ?? ""), 400)}`;
     case "write_file": {
       const path = typeof args.path === "string" ? args.path : "";
-      const exists = path !== "" && !isOutsideScratch(path, scratchDir()) && writeTargetExists(path);
-      const label = !exists ? "write file" : args.append === true ? "append to existing file" : "overwrite existing file";
-      return `${label}: ${shown(path)}`;
+      return `${writeLabel(args, path)}: ${shown(path)}`;
     }
     case "read_file": return `read file: ${shown(args.path)}`;
     case "memory_write": return `save memory: ${entry(String(args.text ?? ""), 80)}`;
@@ -73,27 +80,71 @@ export function describeAction(toolName: string, args: Record<string, unknown>):
 }
 
 /**
- * The body of a card. Throws `CardNotShown` when the call cannot be shown whole, or when the classification the engine put on the
- * card and the call disagree.
+ * The body of a card. Throws `CardNotShown` when the call cannot be shown whole (it is more than a card holds), or when the
+ * classification the engine put on the card and the call disagree.
  */
 export function previewAction(toolName: string, args: Record<string, unknown>, bot = "A bot", options: PreviewOptions = {}): string {
+  const body = bodyOf(toolName, args, bot, options);
+  if (body.length > CARD_BODY_MAX_CHARS) {
+    throw new CardNotShown(`this call is too long for the owner to read on one card (${body.length.toLocaleString("en-US")} characters; the most a card shows is ${CARD_BODY_MAX_CHARS.toLocaleString("en-US")}), so it was not shown and was not run. Split the work into smaller calls, each short enough to read.`);
+  }
+  return body;
+}
+
+function bodyOf(toolName: string, args: Record<string, unknown>, bot: string, options: PreviewOptions): string {
   const kind = options.card?.standingKind;
   if (kind !== undefined) return standingPreview(kind, toolName, args, bot, options);
   // A card with no classification is still the whole card for the tools that start work on their own: never the generic view.
   if (toolName === "job_schedule") return jobPreview(isRecurringSchedule(args) ? "repeating_job" : "next_job", args, bot);
   if (toolName === "routine_create") return routineCreatePreview(args, bot);
   if (toolName === "routine_pause" && args.enabled === true) return routineResumePreview(args, bot, options);
-  if (toolName === "bash") return quoted(String(args.command ?? ""), 4_000);
-  if (toolName === "mail_send") return [...audienceLines(args), describeAction(toolName, args), "", quoted(String(args.body ?? ""), 4_000)].join("\n");
-  if (toolName === "write_file" && typeof args.path === "string") {
-    // The path the write really lands on: a relative path means under scratch,
-    // and a link is followed. This is also what "always allow" would remember.
-    const real = resolveWritePath(args.path);
-    return `${describeAction(toolName, args)}
-
-Resolved path: ${real === null || real === undefined ? "(cannot be resolved)" : entry(real, 1_000)}`;
-  }
+  if (toolName === "bash") return bashPreview(args);
+  if (toolName === "run_privileged") return privilegedPreview(args);
+  if (toolName === "mail_send") return mailPreview(args);
+  if (toolName === "write_file" && typeof args.path === "string") return writePreview(args, args.path);
   return fullCall(toolName, args);
+}
+
+/** The command, quoted line by line, and where it runs. */
+function bashPreview(args: Record<string, unknown>): string {
+  const cwd = typeof args.cwd === "string" && args.cwd ? `\nWorking directory: ${whole(args.cwd)}` : "";
+  return `${quotedWhole(String(args.command ?? ""))}${cwd}`;
+}
+
+/** A command run as administrator: the whole command, and the reason given for it. */
+function privilegedPreview(args: Record<string, unknown>): string {
+  return [quotedWhole(String(args.command ?? "")), `Purpose: ${whole(args.purpose ?? "")}`, ...alsoGiven(args, ["command", "purpose"])].join("\n");
+}
+
+/** A mail: everyone it reaches first, the mailbox it leaves from, the subject, and the whole body. */
+function mailPreview(args: Record<string, unknown>): string {
+  return [
+    ...audienceLines(args),
+    `Account: ${whole(args.account ?? "agent")}`,
+    `Subject: ${whole(args.subject ?? "")}`,
+    "",
+    quotedWhole(String(args.body ?? "")),
+    ...alsoGiven(args, ["to", "cc", "bcc", "account", "subject", "body"]),
+  ].join("\n");
+}
+
+/**
+ * A file write: the path as given, where it really lands (a relative path means under scratch, and a link is followed: this is also
+ * what "always allow" would remember), and all of the content.
+ */
+function writePreview(args: Record<string, unknown>, path: string): string {
+  let real: string | null | undefined;
+  try { real = resolveWritePath(path); } catch { real = null; }
+  const content = typeof args.content === "string" ? args.content : "";
+  return [
+    `${writeLabel(args, path)}: ${whole(path)}`,
+    "",
+    `Resolved path: ${real === null || real === undefined ? "(cannot be resolved)" : whole(real)}`,
+    "",
+    `Content to ${args.append === true ? "add to the end of the file" : "write"} (${content.length} characters):`,
+    quotedWhole(content),
+    ...alsoGiven(args, ["path", "content", "append"]),
+  ].join("\n");
 }
 
 /**
@@ -207,23 +258,14 @@ function routineResumePreview(args: Record<string, unknown>, bot: string, option
   ].join("\n");
 }
 
-/** How much of a call's arguments the card shows: enough that padding cannot push anything out of sight. */
-const PREVIEW_ARGS_CHARS = 4_000;
-/** One string in the arguments view. */
-const PREVIEW_ARG_STRING_CHARS = 1_000;
-
 /**
- * A card for a tool that has no preview of its own: the whole call, not a cut
- * of its first and last 200 characters. Who the call reaches (recipients and
- * attendees) comes first, in plain lines, because an argument list long enough
- * to be cut would otherwise be able to hide them. A cut list also names every
- * argument and its size.
+ * A card for a tool that has no preview of its own (a connector's tool, a calendar call, anything else): every argument, whole, as
+ * JSON. Who the call reaches (recipients and attendees) comes first, in plain lines. What a tool does with each argument is not
+ * known here, so none is cut.
  */
 function fullCall(toolName: string, args: Record<string, unknown>): string {
-  const json = escapeUnsafe(JSON.stringify(boundedArgs(args, PREVIEW_ARG_STRING_CHARS), null, 2) ?? "{}", true);
-  const sizes = Object.entries(args).map(([name, value]) => `${entry(name, 80)} (${(typeof value === "string" ? value : JSON.stringify(value) ?? "").length} chars)`);
-  const body = json.length > PREVIEW_ARGS_CHARS ? `${clip(json, PREVIEW_ARGS_CHARS)}\n\nArguments given: ${sizes.join(", ")}` : json;
-  return [...audienceLines(args), `${entry(toolName, 80)} with these arguments:`, "", body].join("\n");
+  const json = escapeUnsafe(JSON.stringify(args, null, 2) ?? "{}", true);
+  return [...audienceLines(args), `${entry(toolName, 80)} with these arguments:`, "", json].join("\n");
 }
 
 /** Argument names that hold the people a call reaches. */
@@ -231,17 +273,15 @@ const AUDIENCE_KEYS: ReadonlyArray<readonly [string, string]> = [
   ["to", "To"], ["cc", "Cc"], ["bcc", "Bcc"], ["attendees", "Attendees"],
   ["recipients", "Recipients"], ["emails", "Emails"], ["invitees", "Invitees"], ["guests", "Guests"], ["participants", "Participants"],
 ];
-const AUDIENCE_SHOWN = 50;
 
-/** The people a call reaches, one line per kind with how many there are, ahead of everything else. */
+/** The people a call reaches, one line per kind with how many there are, ahead of everything else. Every one of them, whole. */
 function audienceLines(args: Record<string, unknown>): string[] {
   const out: string[] = [];
   for (const [key, label] of AUDIENCE_KEYS) {
     const value = args[key];
     const names = Array.isArray(value) ? value : typeof value === "string" && value ? [value] : [];
     if (names.length === 0) continue;
-    const more = names.length > AUDIENCE_SHOWN ? `, … (+${names.length - AUDIENCE_SHOWN} more)` : "";
-    out.push(`${label} (${names.length}): ${names.slice(0, AUDIENCE_SHOWN).map((name) => entry(name)).join(", ")}${more}`);
+    out.push(`${label} (${names.length}): ${names.map((name) => whole(name)).join(", ")}`);
   }
   return out;
 }

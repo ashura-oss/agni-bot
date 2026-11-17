@@ -19,7 +19,7 @@ import type { ApprovalSource } from "@agni/protocol";
 import { newID, nowISO } from "../util/ids";
 import { redact } from "../util/redact";
 import { clip, entry, escapeUnsafe, fitEntry } from "./card-text";
-import { describeAction, previewAction } from "./card-preview";
+import { CardNotShown, describeAction, previewAction } from "./card-preview";
 import { saveCardMeta } from "./pending-cards";
 import type { ApprovalCard, RiskKind, TaintKind } from "../policy/types";
 import { addApprovalRule, approvalTarget } from "../stores/approval-rules";
@@ -180,7 +180,7 @@ export class ApprovalBroker {
   ): void {
     const action = redact(describeAction(toolName, args));
     const note = this.deps.approvalNote?.(toolName);
-    const body = previewAction(toolName, args);
+    const body = recordedBody(toolName, args);
     const preview = redact(note ? `${body}
 
 ${escapeUnsafe(note)}` : body);
@@ -197,6 +197,19 @@ Auto-approved by standing rule ${rule.id}: "Always allow" for ${rule.agentID} / 
         callID, toolName, when, when, rule.id,
       ],
     );
+  }
+}
+
+/**
+ * What the audit row of a call a stored rule let through says of the call. A call too long for a card was never put on one (a rule
+ * answered, nobody was asked), but the row still records what ran: the start and the end of it, cut in the middle and marked.
+ */
+function recordedBody(toolName: string, args: Record<string, unknown>): string {
+  try {
+    return previewAction(toolName, args);
+  } catch (error) {
+    const why = error instanceof CardNotShown ? "too long to show whole" : "could not be drawn";
+    return `${describeAction(toolName, args)}\n\n(${why}; the start and the end are kept)\n${escapeUnsafe(clip(JSON.stringify(args, null, 2) ?? "{}", 4_000), true)}`;
   }
 }
 

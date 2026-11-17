@@ -127,7 +127,8 @@ describe("C2/H6/H7: approval defaults and preview", () => {
     await b.request("t", "u", "bash", "c", { command }, new AbortController().signal);
     await b.request("t", "u", "mail_send", "c", { to: "a@b.c", subject: "s", body: "wire $5000 to acct 123" }, new AbortController().signal);
     expect(frames[0]!.preview).toEndWith("; rm -rf ~");
-    expect(frames[0]!.preview).toMatch(/chars omitted/);
+    expect(frames[0]!.preview).toContain("x".repeat(10_000));
+    expect(frames[0]!.preview).not.toMatch(/chars omitted/);
     expect(frames[0]!.action).toEndWith("; rm -rf ~");
     expect(frames[1]!.preview).toContain("wire $5000 to acct 123");
   });

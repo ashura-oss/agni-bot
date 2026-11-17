@@ -5,7 +5,7 @@
  *   - A call whose arguments break the tool's schema never reaches a handler
  *     and never raises a card.
  *   - An approval nobody answers in time is a denial.
- *   - A long command's card shows its tail, and says when it cut anything.
+ *   - A long command's card shows all of it (nothing is cut); one too long for a card is refused, with no card.
  *   - "Always allow" is never offered for shell.
  */
 import { existsSync } from "node:fs";
@@ -86,7 +86,7 @@ describe("INV-13 an approval nobody answers is a denial", () => {
   });
 });
 
-describe("INV-13 a long command's card shows its tail, and says when it cut something", () => {
+describe("INV-13 a long command's card shows all of it, and one too long to show raises no card", () => {
   const LONG = `echo ${"a".repeat(4_960)} ; touch `;
 
   scenarioTest("the last 2,000 characters of a 5,000-character shell command are on the card", async () => {
@@ -103,19 +103,29 @@ describe("INV-13 a long command's card shows its tail, and says when it cut some
     expect(existsSync(s.outside("tail-marker")), "the command ran without approval").toBe(false);
   });
 
+  // Fix round I: a card shows the whole of what will run, so no card is cut; a command too long for a card is refused, with no card, and does not run.
   // Two turns, not one: a refused command is a denial for the rest of its run (INV-07), and the second command would share it.
-  scenarioTest("the card is marked as cut when it is, and not when it is whole (`truncated`)", async () => {
+  scenarioTest("a card is never cut (`truncated` is false), and a command too long to show whole raises no card and does not run", async () => {
     const s = await scenarios.start();
     const a = await s.connect({ label: "A" });
     const marker = shell(s.outside("cut-marker"));
-    s.model.queue(...scripted(true, [call("bash", { command: `${LONG}${marker}` }, "call_cut"), say("Done.")]));
-    const cut = await playTurn(s, a, "run the long command");
+    s.model.queue(...scripted(true, [call("bash", { command: `${LONG}${marker}` }, "call_long"), say("Done.")]));
+    const long = await playTurn(s, a, "run the long command");
     s.model.queue(...scripted(true, [call("bash", { command: `touch ${shell(s.outside("whole-marker"))}` }, "call_whole"), say("Done.")]));
     const whole = await playTurn(s, a, "run the short command");
-    expect(cut.cards.length).toBe(1);
+    expect(long.cards.length).toBe(1);
     expect(whole.cards.length).toBe(1);
-    expect(cut.cards[0]!.raw.truncated, "the cut card did not say it was cut").toBe(true);
+    expect(long.cards[0]!.preview, "a long card hid part of the command").toContain(`${LONG}${marker}`.slice(-4_900));
+    expect(long.cards[0]!.raw.truncated ?? false, "a card that shows everything said it was cut").toBe(false);
     expect(whole.cards[0]!.raw.truncated ?? false, "a whole card claimed to be cut").toBe(false);
+
+    const huge = shell(s.outside("huge-marker"));
+    s.model.queue(...scripted(true, [call("bash", { command: `echo ${"a".repeat(25_000)} ; touch ${huge}` }, "call_huge"), say("Done.")]));
+    const refused = await playTurn(s, a, "run the huge command");
+    expect(refused.cards, "a card was raised for a command too long to show whole").toEqual([]);
+    expect(existsSync(s.outside("huge-marker")), "a command the owner could not read in full ran").toBe(false);
+    const record = refused.calls.find((entry) => entry.callID === "call_huge");
+    expect(String(resultJson(record).error ?? "(no error)"), "the model was not told why").toMatch(/too long/i);
   });
 
   scenarioTest("a tier and an expiry ride on every card (`tier`, `expiresAt`)", async () => {
