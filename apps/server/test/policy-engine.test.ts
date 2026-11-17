@@ -188,7 +188,8 @@ describe("tainted runs (S2-03, S2-04, S2-05)", () => {
       ["update_agent", { role: "x" }],
       ["create_agent", { name: "Evil", role: "r", prompt: "p" }],
       ["rename_agent", { name: "Evil" }],
-      ["job_schedule", { text: "do it", everyMinutes: 60 }],
+      // A one-shot job is refused outright; a repeating one is put to the owner instead (s2-standing-jobs.test.ts).
+      ["job_schedule", { text: "do it", at: "2030-01-01T09:00:00.000Z" }],
       ["job_cancel", { id: "job_1" }],
       ["routine_create", { name: "r", prompt: "p", cron: "0 9 * * *", timezone: "UTC" }],
       ["routine_pause", { id: "r", enabled: false }],

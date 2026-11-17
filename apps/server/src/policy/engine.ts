@@ -15,7 +15,9 @@
  *   5. tier       what does this call do, and what has the run read: a call
  *                 that needs the owner is asked; a run that has read outside
  *                 text may not change bots or schedules, and may only send to
- *                 places the owner named
+ *                 places the owner named. A repeating job is a standing rule:
+ *                 only the owner's own untainted turn makes one unasked; any
+ *                 other run asks the owner (never "always", no stored rule)
  *   6. rules      a stored "always allow" for exactly this bot, tool and target
  *   7. owner      ask with a card
  *
@@ -26,10 +28,11 @@ import { entry } from "../agent/card-text";
 import { approvalTarget, matchApprovalRule } from "../stores/approval-rules";
 import { audit } from "./audit-sink";
 import { isTainted, newestFirst } from "./context";
-import { REFUSALS_BEFORE_STOP, anyDenial, findDenial, isShellDenial, noteBlockedAttempt, shellDenial, type DenialRecord } from "./denials";
+import { REFUSALS_BEFORE_STOP, anyDenial, findDenial, isShellDenial, noteBlockedAttempt, refusedThing, shellDenial, type DenialRecord } from "./denials";
 import { unnamedDestinations } from "./egress";
 import { policyHooks } from "./hooks";
 import { assessCall, policyFor } from "./metadata";
+import { standingRuleOrigin } from "./standing-rules";
 import type {
   ApprovalCard, CallAssessment, Decision, Operation, PolicyInput, RefusalCode, RunContext, ToolTier,
 } from "./types";
@@ -88,6 +91,8 @@ function judge(run: RunContext, input: PolicyInput, record: boolean): Decision {
   // unattended, sandboxed shell is off in any run that holds a refusal; the sandbox profile, not this check, is the
   // boundary there.)
   const refusedRun = refusalOnCard(run, tool, assessment);
+  // A repeating job is a standing rule (policy/standing-rules.ts): why the owner must be asked, or null when this is the owner's own clean turn.
+  const standing = policy?.standingWrite?.(args) ? standingRuleOrigin(run) : null;
 
   // 4. budget
   const budget = policyHooks.checkBudget(run);
@@ -95,7 +100,8 @@ function judge(run: RunContext, input: PolicyInput, record: boolean): Decision {
 
   // 5. tier and taint
   const tainted = isTainted(run);
-  if (tainted && policy?.protectedWrite) {
+  // (A repeating job from a tainted run is put to the owner below instead: a card, not a refusal.)
+  if (tainted && policy?.protectedWrite && standing === null) {
     return refuse(
       "protected_write",
       protectedWriteError(run),
@@ -119,13 +125,19 @@ function judge(run: RunContext, input: PolicyInput, record: boolean): Decision {
     tier = Math.max(tier, tool === "write_file" ? 1 : tool.startsWith("mcp_") ? 2 : 3) as ToolTier;
     why = "a run that holds a refusal: a shell command the server cannot read file names from, a connector tool, or a call the refused shell command could have reached";
   }
+  if (standing !== null) {
+    asks = true;
+    tier = Math.max(tier, 2) as ToolTier;
+    why = "a repeating job from a run that is not the owner's own untainted turn";
+  }
   if (!asks) return { action: "run", via: "free", reason: why, assessment };
 
   // 6. stored rules. A run that has read outside content never rides on an old "always", for any call: what the owner
-  // approved was one thing, once, not whatever this run now wants done after reading a page.
+  // approved was one thing, once, not whatever this run now wants done after reading a page. A repeating job is never
+  // remembered or answered by a rule: each one is the owner's decision.
   const target = approvalTarget(tool, args);
-  const canRemember = !tainted && target !== null && !refusedRun;
-  if (!tainted && !refusedRun) {
+  const canRemember = !tainted && target !== null && !refusedRun && standing === null;
+  if (!tainted && !refusedRun && standing === null) {
     // An exact rule (what "Always allow" stores) or a pattern rule over the call's resources (S2-08).
     const rule = matchApprovalRule(run.services.db, { agentID: run.bot, toolName: tool, args, resources: assessment.resources });
     if (rule) return { action: "run", via: "rule", reason: `stored rule ${rule.id}`, assessment: { ...assessment, tier }, ruleID: rule.id, rule: { id: rule.id, agentID: rule.agentID, toolName: rule.toolName, createdAt: rule.createdAt } };
@@ -134,7 +146,7 @@ function judge(run: RunContext, input: PolicyInput, record: boolean): Decision {
   // 7. owner
   const card: ApprovalCard = {
     tier,
-    risk: tainted && assessment.egress !== "none" && assessment.risk !== "command" ? "egress" : assessment.risk,
+    risk: standing !== null ? "standing" : tainted && assessment.egress !== "none" && assessment.risk !== "command" ? "egress" : assessment.risk,
     verb: verbFor(tool, args, assessment, unnamed.length > 0),
     sources: newestFirst(run),
     canRemember,
@@ -142,6 +154,7 @@ function judge(run: RunContext, input: PolicyInput, record: boolean): Decision {
     resources: assessment.resources,
     operation: assessment.operation,
     ...(refusedRun ? { refusedRun } : {}),
+    ...(standing !== null ? { standingRule: standing } : {}),
   };
   return { action: "ask", reason: why, assessment: { ...assessment, tier }, card };
 }
@@ -170,7 +183,7 @@ function deniedEarlier(run: RunContext, tool: string, args: Record<string, unkno
   if (record && attempts >= REFUSALS_BEFORE_STOP) {
     return {
       action: "stop", cause: "refused",
-      message: `I stopped: I kept trying to reach ${entry(hit.key, 120)} after you said no.`,
+      message: `I stopped: I kept trying to reach ${refusedThing(hit, (text) => entry(text, 120))} after you said no.`,
       reason: `refused ${attempts} times: ${hit.operation} on ${hit.kind}`,
     };
   }
@@ -199,7 +212,7 @@ function refusalNamedOnCard(run: RunContext, what: "command" | "tool"): string |
   if (!held) return null;
   if (isShellDenial(held)) return SHELL_REFUSED_LINE;
   const why = what === "command" ? "This command may touch it, and I cannot tell from the command which files it reaches." : "This tool may reach it, and I cannot tell from its arguments what it touches.";
-  return `You said no to ${OPERATION_PHRASE[held.operation]} ${entry(held.key, 200)} earlier in this task. ${why}`;
+  return `You said no to ${OPERATION_PHRASE[held.operation]} ${refusedThing(held, (text) => entry(text, 200))} earlier in this task. ${why}`;
 }
 
 function refusedAfterNo(run: RunContext, tool: string, args: Record<string, unknown>, assessment: CallAssessment, hit: DenialRecord): Decision {
@@ -207,7 +220,7 @@ function refusedAfterNo(run: RunContext, tool: string, args: Record<string, unkn
   return {
     ...refuse(
       "denied_resource",
-      `Refused: the owner said no to ${OPERATION_PHRASE[hit.operation]} ${entry(hit.key, 200)} earlier in this task. This covers every tool and every route to it, for the rest of this task. Do not try again. Tell the owner what you were trying to do and ask how to continue.`,
+      `Refused: the owner said no to ${OPERATION_PHRASE[hit.operation]} ${refusedThing(hit, (text) => entry(text, 200))} earlier in this task. This covers every tool and every route to it, for the rest of this task. Do not try again. Tell the owner what you were trying to do and ask how to continue.`,
       `owner said no to ${hit.operation} on ${hit.kind}`,
     ),
     preview: `Blocked: ${entry(bot, 60)} tried to ${verbFor(tool, args, assessment, false)} after you said no to ${DENIED_GERUND[hit.operation]} it.`,
@@ -256,6 +269,7 @@ export function verbFor(tool: string, args: Record<string, unknown>, assessment:
     }
     case "web_fetch": return "open a web page";
     case "share_thread": return "share this conversation";
+    case "job_schedule": return "start a repeating job";
     default:
       return tool.startsWith("mcp_") ? `use ${entry(tool.replace(/^mcp_/, ""), 60)}` : `use ${entry(tool, 60)}`;
   }
@@ -292,10 +306,10 @@ function auditDetail(run: RunContext, input: PolicyInput, decision: Decision): R
     callID: input.callID,
     action: decision.action,
     reason: decision.reason,
-    principal: run.principal.kind,
+    principal: run.principal?.kind ?? "unknown",
     tainted: isTainted(run),
   };
-  if (isTainted(run)) base.taint = run.taint.sources.map((source) => ({ kind: source.kind, label: source.label }));
+  if (isTainted(run)) base.taint = newestFirst(run).reverse().map((source) => ({ kind: source.kind, label: source.label }));
   switch (decision.action) {
     case "run":
       base.via = decision.via;
@@ -308,6 +322,7 @@ function auditDetail(run: RunContext, input: PolicyInput, decision: Decision): R
       base.canRemember = decision.card.canRemember;
       base.resources = decision.card.resources.slice(0, 10);
       if (decision.card.refusedRun) base.refusedRun = true;
+      if (decision.card.standingRule) base.standingRule = true;
       if (decision.card.unnamedDestinations.length) base.unnamedDestinations = decision.card.unnamedDestinations.slice(0, 10);
       break;
     case "refuse":

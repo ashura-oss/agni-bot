@@ -76,7 +76,9 @@ export function createRunContext(input: RunContextInput): RunContext {
 }
 
 export function isTainted(run: Pick<RunContext, "taint">): boolean {
-  return run.taint.sources.length > 0;
+  // A record that cannot be read is not "read nothing": it counts as tainted.
+  const sources = run.taint?.sources;
+  return !Array.isArray(sources) || sources.length > 0;
 }
 
 /** Add a source the run has now read. Returns true when it is new (same kind and label read twice counts once). */
@@ -128,7 +130,8 @@ export function ctxTainted(ctx: { run?: Pick<RunContext, "taint"> }): boolean {
 
 /** Newest source first, for the card. */
 export function newestFirst(run: Pick<RunContext, "taint">): TaintSource[] {
-  return [...run.taint.sources].reverse();
+  const sources = run.taint?.sources;
+  return Array.isArray(sources) ? [...sources].reverse() : [];
 }
 
 // ---------------------------------------------------------------------------

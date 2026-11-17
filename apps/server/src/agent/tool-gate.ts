@@ -13,6 +13,7 @@ import { expireApprovalForCall } from "./pending-cards";
 import { audit } from "../policy/audit-sink";
 import { SHELL_REFUSAL, recordDenial } from "../policy/denials";
 import { decide } from "../policy/engine";
+import { describeRecurring } from "../policy/standing-rules";
 import type { ApprovalCard, CallAssessment, PolicyInput, RunContext, RunStop } from "../policy/types";
 import { entry } from "./card-text";
 
@@ -110,6 +111,7 @@ async function askOwner(
     // a failure to write it is raised, and the call is refused either way.
     // A shell command the server could not read file names from names none, so its refusal is of running commands (policy/denials.ts).
     recordDenial(deps.db, run, { tool: input.tool, operation: card.operation, resources: assessment.unprovenShell ? [SHELL_REFUSAL] : card.resources, cause });
+    if (card.standingRule) auditStandingRefusal(run, input, cause);
   };
   // Nobody answered in time (the turn itself was not stopped): expire the card.
   if (!answer && !signal.aborted && waitSignal.aborted) {
@@ -121,6 +123,7 @@ async function askOwner(
   }
   if (!answer || answer === "reject") {
     if (answer) denial("denied");
+    else if (card.standingRule) auditStandingRefusal(run, input, "cancelled");
     return blocked("approval_rejected", declined(card, answer ? "User denied this action." : "Approval was cancelled."), answer ? "denied" : "cancelled", true);
   }
   try {
@@ -135,6 +138,24 @@ async function askOwner(
     return blocked("audit_unavailable", "Not run: the audit log could not record the approval, so the action was not run.", "not recorded", true);
   }
   return { go: true, assessment, approvedBy: "owner" };
+}
+
+/**
+ * A repeating job the owner did not approve leaves its own audit row, besides the denial. The call is refused either way, so a
+ * row the trail cannot take does not change the answer.
+ */
+function auditStandingRefusal(run: RunContext, input: PolicyInput, cause: "denied" | "expired" | "cancelled"): void {
+  try {
+    audit({
+      kind: "job.recurring.refused",
+      actor: run.bot,
+      turnID: run.turnID,
+      ...(run.jobID ? { jobID: run.jobID } : {}),
+      detail: { tool: input.tool, callID: input.callID, cause, schedule: describeRecurring(input.args), principal: run.principal?.kind ?? "unknown", request: run.denialRoot ?? run.rootJob ?? run.rootTurnID },
+    });
+  } catch {
+    // The refusal stands without its row.
+  }
 }
 
 /**

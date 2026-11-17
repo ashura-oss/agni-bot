@@ -23,6 +23,7 @@ import { saveCardMeta } from "./pending-cards";
 import type { ApprovalCard, RiskKind, TaintKind } from "../policy/types";
 import { isOutsideScratch, resolveWritePath, scratchDir, writeTargetExists } from "../tools/write-file";
 import { addApprovalRule, approvalTarget } from "../stores/approval-rules";
+import { describeRecurring, isRecurringSchedule } from "../policy/standing-rules";
 
 export { clip };
 
@@ -125,8 +126,9 @@ export class ApprovalBroker {
   ): Promise<Decision | null> {
     const action = redact(describeAction(toolName, args));
     const note = this.deps.approvalNote?.(toolName);
-    const body = previewAction(toolName, args);
-    const lead = info ? cardLead(info.card, info.botName?.trim() || "A bot") : "";
+    const bot = info?.botName?.trim() || "A bot";
+    const body = previewAction(toolName, args, bot);
+    const lead = info ? cardLead(info.card, bot) : "";
     const preview = redact(`${lead}${note ? `${body}\n\n${escapeUnsafe(note)}` : body}`);
     const { db } = this.deps;
     const requestID = newID("apr");
@@ -212,6 +214,7 @@ const RISK_LINE: Record<RiskKind, string> = {
   irreversible: "Risk: cannot be undone",
   either: "Risk: sends data out of this app, or changes something you cannot undo",
   command: "Risk: runs a command on this computer",
+  standing: "Risk: starts work that repeats by itself, with no further question, until you cancel it",
 };
 
 const SOURCE_LINE: Record<string, (bot: string, label: string) => string> = {
@@ -234,6 +237,7 @@ function cardLead(card: ApprovalCard, bot: string): string {
   const lines: string[] = [];
   // First: the owner said no to something in this run, and this command may reach it (policy/engine.ts).
   if (card.refusedRun) lines.push(escapeUnsafe(card.refusedRun));
+  if (card.standingRule) lines.push(escapeUnsafe(card.standingRule));
   const [newest, ...older] = card.sources;
   if (newest) {
     const say = SOURCE_LINE[newest.kind] ?? SOURCE_LINE.unknown!;
@@ -246,6 +250,7 @@ function cardLead(card: ApprovalCard, bot: string): string {
   }
   if (newest) lines.push("\"Always allow\" is off: this task used outside content.");
   if (card.refusedRun) lines.push("\"Always allow\" is off: you refused something in this task.");
+  if (card.standingRule) lines.push("\"Always allow\" is off: a repeating job is always put to you.");
   return `${lines.join("\n")}\n\n`;
 }
 
@@ -278,13 +283,15 @@ function describeAction(toolName: string, args: Record<string, unknown>): string
     case "task_create": return `add task: ${shown(args.title)}`;
     case "task_update": return `update task ${shown(args.id)}`;
     case "mail_send": return `send email to ${Array.isArray(args.to) ? shown(args.to.map((to) => entry(to)).join(", ")) : shown(args.to)}: ${entry(String(args.subject ?? ""), 80)}`;
+    case "job_schedule": return isRecurringSchedule(args) ? `start a repeating job: ${describeRecurring(args)}` : `job_schedule(${escapeUnsafe(clip(JSON.stringify(args), 400))})`;
     case "rename_agent": return args.agentId ? `rename ${shown(args.agentId)} to ${shown(args.name)}` : `rename the assistant to ${shown(args.name)}`;
     default: return `${entry(toolName, 80)}(${escapeUnsafe(clip(JSON.stringify(args), 400))})`;
   }
 }
 
-function previewAction(toolName: string, args: Record<string, unknown>): string {
+function previewAction(toolName: string, args: Record<string, unknown>, bot = "A bot"): string {
   if (toolName === "bash") return quoted(String(args.command ?? ""), 4_000);
+  if (toolName === "job_schedule" && isRecurringSchedule(args)) return repeatingJobPreview(args, bot);
   if (toolName === "mail_send") return [...audienceLines(args), describeAction(toolName, args), "", quoted(String(args.body ?? ""), 4_000)].join("\n");
   if (toolName === "write_file" && typeof args.path === "string") {
     // The path the write really lands on: a relative path means under scratch,
@@ -295,6 +302,22 @@ function previewAction(toolName: string, args: Record<string, unknown>): string 
 Resolved path: ${real === null || real === undefined ? "(cannot be resolved)" : entry(real, 1_000)}`;
   }
   return fullCall(toolName, args);
+}
+
+/**
+ * A repeating job: who it is for, when it runs in words, and the prompt it will run each time, quoted as data (the bot wrote it, and
+ * it will run without anyone reading it again). Every other argument it was given is named too.
+ */
+function repeatingJobPreview(args: Record<string, unknown>, bot: string): string {
+  const lines = [
+    `Bot: ${entry(bot, 80)}`,
+    `Runs: ${describeRecurring(args)}`,
+    `${entry(bot, 80)} would run this each time, on its own:`,
+    quoted(String(args.text ?? ""), 4_000),
+  ];
+  const others = Object.keys(args).filter((name) => !["text", "dailyAt", "days", "everyMinutes"].includes(name));
+  if (others.length > 0) lines.push("", `Also given: ${others.map((name) => `${entry(name, 40)} = ${entry(args[name], 80)}`).join(", ")}`);
+  return lines.join("\n");
 }
 
 /** How much of a call's arguments the card shows: enough that padding cannot push anything out of sight. */

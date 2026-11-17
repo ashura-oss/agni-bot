@@ -20,6 +20,8 @@ import { canonicalAgentID } from "../agent/personas";
 import { describeSchedule, nextDailyRun, parseDay, parseWallClock } from "../jobs/schedule";
 import { isPeerPrincipal, isTainted } from "../policy/context";
 import { denialScope } from "../policy/denials";
+import { audit } from "../policy/audit-sink";
+import { describeRecurring, isRecurringSchedule, standingRuleOrigin } from "../policy/standing-rules";
 import { CLOSURE_WORDING_REFUSAL, closureWording } from "../agent/closure";
 import { canSelfSchedule, maxSelfScheduledJobs } from "../agent/guardrails";
 
@@ -104,6 +106,13 @@ export interface ScheduledFrom {
    * takes it: each of its runs is a request of its own, counted by its own wakes (`jobID@turnID`).
    */
   root?: RequestRoot;
+  /**
+   * The request that made a repeating job, for the audit log: the scheduling run's refusal scope (the chat turn, or the job a chain
+   * began in). Set by the server from the run, never by a tool argument.
+   */
+  createdByRequest?: string;
+  /** For the audit row of a repeating job: the bot's turn, and how the job came to be allowed. */
+  created?: { turnID?: string; jobID?: string | null; approval: "own_turn" | "owner_card" };
 }
 
 /**
@@ -118,7 +127,7 @@ function inheritedRoot(ctx: ToolContext): RequestRoot | undefined {
 }
 
 export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: string, from: ScheduledFrom = {}): JobScheduleResult {
-  const { root, denialRoot } = from;
+  const { root, denialRoot, createdByRequest, created } = from;
   const requested = args.agentID?.trim();
   if (requested && canonicalAgentID(requested) !== canonicalAgentID(callerAgentID)) {
     throw new Error("an agent may only schedule jobs for itself");
@@ -164,6 +173,7 @@ export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: 
     recurrence = describeSchedule(at, days);
     payload.dailyAt = at;
     if (days && days.length > 0) payload.days = days;
+    if (createdByRequest) payload.createdByRequest = createdByRequest;
   } else {
     const minutes = Number(args.everyMinutes);
     if (!Number.isFinite(minutes) || minutes < MIN_EVERY_MINUTES || minutes > 10_080) {
@@ -173,9 +183,25 @@ export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: 
     runAt = new Date(Date.now() + everyMs).toISOString();
     recurrence = `every ${minutes} minute${minutes === 1 ? "" : "s"}`;
     payload.everyMs = everyMs;
+    if (createdByRequest) payload.createdByRequest = createdByRequest;
   }
 
   const row = enqueueJob(db, { kind: "turn", payload, runAt });
+  if (!args.at) {
+    // A repeating job leaves its own audit row, and is not kept without it (fail closed).
+    try {
+      audit({
+        kind: "job.recurring.created",
+        actor: callerAgentID,
+        ...(created?.turnID ? { turnID: created.turnID } : {}),
+        ...(created?.jobID ? { jobID: created.jobID } : {}),
+        detail: { jobID: row.id, agent: callerAgentID, schedule: recurrence, nextRun: runAt, createdByRequest: createdByRequest ?? null, approval: created?.approval ?? "direct", what: text.slice(0, 200) },
+      });
+    } catch (error) {
+      deleteJob(db, row.id);
+      throw new Error(`not done: the audit log could not record the repeating job, so it was not kept (${error instanceof Error ? error.message : String(error)})`);
+    }
+  }
   return {
     id: row.id,
     nextRun: runAt,
@@ -257,6 +283,38 @@ function callerOf(ctx: ToolContext): string {
   return id;
 }
 
+/** Why these `job_schedule` arguments can never be made into a job, or null. The same checks `scheduleJob` makes, said before the call is judged. */
+function scheduleProblem(args: Record<string, unknown>): string | null {
+  const given = (value: unknown): boolean => value !== undefined && value !== null;
+  if ([args.at, args.dailyAt, args.everyMinutes].filter(given).length > 1) return "pick one: `at`, `dailyAt` or `everyMinutes`";
+  try {
+    if (given(args.dailyAt)) parseWallClock(String(args.dailyAt));
+    if (given(args.dailyAt) && Array.isArray(args.days)) for (const day of args.days) parseDay(String(day));
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  return null;
+}
+
+/**
+ * The answer to a repeating job nobody may make unasked: the tool's own line of defence behind the policy engine, which puts the
+ * owner a card for the same call. It leaves an audit row too.
+ */
+function refuseStandingJob(ctx: ToolContext, input: Record<string, unknown>, why: string): { error: string } {
+  try {
+    audit({
+      kind: "job.recurring.refused",
+      actor: ctx.chain?.currentAgentID ?? "unknown",
+      turnID: ctx.turnID,
+      ...(ctx.run?.jobID ? { jobID: ctx.run.jobID } : {}),
+      detail: { tool: "job_schedule", cause: "not_approved", schedule: describeRecurring(input), principal: ctx.run?.principal?.kind ?? "unknown" },
+    });
+  } catch {
+    // The refusal stands without its row.
+  }
+  return { error: `not done: a repeating job is a standing rule, and only your owner's own turn may start one without asking. ${why} Tell the owner what you wanted to schedule and ask them to confirm it.` };
+}
+
 /** The scheduling tools, as the task lane sees them. */
 export function createJobTools(db: Database): ToolDefinition<unknown, unknown>[] {
   return [
@@ -278,10 +336,20 @@ export function createJobTools(db: Database): ToolDefinition<unknown, unknown>[]
         notify: { type: "boolean" },
       }, ["text"]),
       timeoutMs: 3_000,
+      // What the schema cannot say: a schedule that could never be made is refused before the owner is asked about a repeating job.
+      validate: scheduleProblem,
       handler: async (args, ctx) => {
-        const refusal = schedulingRefusal(ctx);
-        if (refusal) return { error: refusal };
         const input = (args ?? {}) as Record<string, unknown>;
+        const recurring = isRecurringSchedule(input);
+        if (recurring) {
+          // A repeating job is a standing rule: only the owner's own clean turn, or the owner's yes to this very call's card
+          // (set by the loop, never by an argument), makes one. A run or an origin that cannot be read is not the owner's.
+          const why = ctx.ownerApproved === true ? null : standingRuleOrigin(ctx.run);
+          if (why !== null) return refuseStandingJob(ctx, input, why);
+        } else {
+          const refusal = schedulingRefusal(ctx);
+          if (refusal) return { error: refusal };
+        }
         return scheduleJob(db, {
           text: String(input.text ?? ""),
           ...(input.at === undefined ? {} : { at: String(input.at) }),
@@ -290,7 +358,11 @@ export function createJobTools(db: Database): ToolDefinition<unknown, unknown>[]
           ...(input.everyMinutes === undefined ? {} : { everyMinutes: Number(input.everyMinutes) }),
           ...(input.agent_id === undefined ? {} : { agentID: String(input.agent_id) }),
           ...(input.notify === undefined ? {} : { notify: Boolean(input.notify) }),
-        }, callerOf(ctx), { ...(ctx.run ? { denialRoot: denialScope(ctx.run) } : {}), root: inheritedRoot(ctx) });
+        }, callerOf(ctx), {
+          ...(ctx.run ? { denialRoot: denialScope(ctx.run), ...(recurring ? { createdByRequest: denialScope(ctx.run) } : {}) } : {}),
+          root: inheritedRoot(ctx),
+          created: { turnID: ctx.turnID, jobID: ctx.run?.jobID ?? null, approval: ctx.ownerApproved === true ? "owner_card" : "own_turn" },
+        });
       },
     } as ToolDefinition<unknown, unknown>,
     {

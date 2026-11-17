@@ -17,6 +17,7 @@ import { newID, nowISO } from "../util/ids";
 import type { Operation, RunContext } from "./types";
 import type { ToolResource } from "./tool-meta";
 import { pathsOverlap } from "./resources";
+import { STANDING_JOB_LABEL, STANDING_JOB_RESOURCE } from "./standing-rules";
 
 /** Refusals of one resource in one run before the run itself is stopped. */
 export const REFUSALS_BEFORE_STOP = 3;
@@ -38,6 +39,12 @@ export interface DenialRecord {
  */
 export const SHELL_REFUSAL: ToolResource = { kind: "other", value: "agni:shell" };
 const isShellRefusal = (kind: ToolResource["kind"], key: string): boolean => kind === SHELL_REFUSAL.kind && key === SHELL_REFUSAL.value;
+/** The refusal of a repeating job (policy/standing-rules.ts): it names no file either, and nothing but another repeating job can reach it. */
+const isStandingRefusal = (kind: ToolResource["kind"], key: string): boolean => kind === STANDING_JOB_RESOURCE.kind && key === STANDING_JOB_RESOURCE.value;
+
+/** What a refusal was of, for the lines that say what the owner said no to: the file or address, or "repeating jobs". */
+export const refusedThing = (record: Pick<DenialRecord, "kind" | "key">, show: (text: string) => string): string =>
+  isStandingRefusal(record.kind, record.key) ? STANDING_JOB_LABEL : show(record.key);
 
 /** What names the run a denial belongs to. */
 export type DenialRun = Pick<RunContext, "rootJob" | "rootTurnID" | "denialRoot">;
@@ -81,11 +88,14 @@ interface DenialRow {
   id: string; resource_kind: ToolResource["kind"]; resource_key: string; operation: Operation; tool_name: string; cause: "denied" | "expired"; blocked_count: number;
 }
 
-/** The first refusal this run holds, whatever it was about, or null. One indexed read. */
+/**
+ * The first refusal this run holds about something a command or a connector tool could reach, or null. One indexed read.
+ * A refused repeating job is not one: no file or address is in it, so it makes no other call ask.
+ */
 export function anyDenial(db: Database, run: DenialRun): DenialRecord | null {
   const row = db
-    .query<DenialRow, [string]>("SELECT id, resource_kind, resource_key, operation, tool_name, cause, blocked_count FROM run_denials WHERE run_key = ? ORDER BY created_at LIMIT 1")
-    .get(denialScope(run));
+    .query<DenialRow, [string, string, string]>("SELECT id, resource_kind, resource_key, operation, tool_name, cause, blocked_count FROM run_denials WHERE run_key = ? AND NOT (resource_kind = ? AND resource_key = ?) ORDER BY created_at LIMIT 1")
+    .get(denialScope(run), STANDING_JOB_RESOURCE.kind, STANDING_JOB_RESOURCE.value);
   return row ? toRecord(row) : null;
 }
 

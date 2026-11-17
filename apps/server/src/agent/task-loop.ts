@@ -1276,6 +1276,7 @@ async function executeTool(
         signal: combined,
         peerInput: hooks.peerInput,
         run: hooks.run,
+        ownerApproved: gate.approvedBy === "owner",
         chain: {
           depth: guardrail.depth,
           rootAgentID: guardrail.rootAgentID,

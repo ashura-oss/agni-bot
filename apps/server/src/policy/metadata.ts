@@ -21,6 +21,7 @@ import { isOutsideScratch, scratchDir, writeTargetExists } from "../tools/write-
 import type { CallAssessment, RiskKind, TaintKind, TaintSource } from "./types";
 import type { ToolClass, ToolMeta, ToolResource, ToolTier } from "./tool-meta";
 import { hostResource, pathResource, recipientResources, shellFacts, shellWorkingDir } from "./resources";
+import { STANDING_JOB_RESOURCE, isRecurringSchedule } from "./standing-rules";
 
 type Args = Record<string, unknown>;
 
@@ -38,6 +39,12 @@ export interface ToolPolicy extends ToolMeta {
    * has read outsider text may not use it at all (S2-05).
    */
   protectedWrite?: boolean;
+  /**
+   * This call starts work that goes on by itself (a repeating job). Only the owner's own untainted turn may make it
+   * unasked; any other run puts a card to the owner, even a run that has read outside text, which `protectedWrite`
+   * would refuse outright (policy/standing-rules.ts).
+   */
+  standingWrite?: (args: Args) => boolean;
   /** This tool's result is outsider text: it taints the run that reads it. */
   taintedBy?: TaintedBy;
   /** What this particular call is, when that differs from the tool's defaults. */
@@ -212,7 +219,12 @@ export const TOOL_POLICY: Readonly<Record<string, ToolPolicy>> = {
   // Changing the bots, schedules and routines: never from a run that has read outside text.
   create_agent: local({ protectedWrite: true }),
   update_agent: local({ protectedWrite: true }),
-  job_schedule: local({ protectedWrite: true }),
+  // A one-shot job follows the taint rule; a repeating one is a standing rule: it names a refusal of its own (policy/standing-rules.ts).
+  job_schedule: local({
+    protectedWrite: true,
+    standingWrite: isRecurringSchedule,
+    resources: (args) => (isRecurringSchedule(args) ? [STANDING_JOB_RESOURCE] : []),
+  }),
   job_cancel: local({ protectedWrite: true }),
   routine_create: local({ protectedWrite: true }),
   routine_pause: local({ protectedWrite: true }),

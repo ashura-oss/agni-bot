@@ -43,6 +43,12 @@ export interface ToolContext {
   };
   /** Routine egress: true when a URL's host is on the run's allowlist. Absent outside routines. */
   hostAllowed?: (url: URL) => boolean;
+  /**
+   * The owner answered this very call's approval card with a yes. Set by the loop from the gate's answer, never from the
+   * call's arguments. A tool whose own rule would refuse the call (a repeating job asked for by a run that is not the owner's
+   * own clean turn) reads it as the owner's say-so; it is false for any call the owner was not asked about.
+   */
+  ownerApproved?: boolean;
 }
 
 export type ToolKind = "static" | "dynamic";

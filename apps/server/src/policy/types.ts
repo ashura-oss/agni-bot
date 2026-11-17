@@ -135,7 +135,7 @@ export interface PolicyInput {
 // ---------------------------------------------------------------------------
 
 /** What the owner's card should say about the harm, in words: the tier alone is not precise enough. */
-export type RiskKind = "undoable" | "egress" | "irreversible" | "either" | "command";
+export type RiskKind = "undoable" | "egress" | "irreversible" | "either" | "command" | "standing";
 
 /** What a call does once its arguments are read: the engine's own view of one call. */
 export interface CallAssessment {
@@ -184,6 +184,11 @@ export interface ApprovalCard {
    * card leads with it.
    */
   refusedRun?: string;
+  /**
+   * The call starts work that repeats on its own (a repeating job) and this run is not the owner's own untainted turn: one
+   * sentence saying why the owner is asked. "Always allow" is off for such a card, and no stored rule answers it.
+   */
+  standingRule?: string;
 }
 
 /** Why a call was refused, as a stable code for tests, the audit trail and the model's error. */
