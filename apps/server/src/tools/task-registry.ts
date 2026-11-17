@@ -150,7 +150,7 @@ export function buildTaskToolRegistry(db: Database, mailAccounts?: MailAccountRe
   register({
     name: "link_save", description: "Save a link and optional user note.", kind: "static",
     schema: objectSchema({ url: { type: "string", format: "uri", maxLength: 2_048 }, note: { type: "string", maxLength: 2_000 }, tags: { type: "array", maxItems: 20, items: stringProp } }, ["url"]), timeoutMs: 7_000,
-    handler: (args) => linkSave(db, parseObject(args, (v) => ({ url: boundedString(v.url, 2_048), note: v.note === undefined ? undefined : boundedString(v.note, 2_000), tags: optionalStrings(v.tags) }))),
+    handler: (args, ctx) => linkSave(db, parseObject(args, (v) => ({ url: boundedString(v.url, 2_048), note: v.note === undefined ? undefined : boundedString(v.note, 2_000), tags: optionalStrings(v.tags) })), ctx.hostAllowed),
   });
   register({
     name: "tasks_list", description: "List tasks by status.", kind: "static",

@@ -28,8 +28,8 @@ type Args = Record<string, unknown>;
 
 export interface TaintedBy {
   kind: TaintKind;
-  /** Only some calls bring outside text in (a shell command that can reach the network); absent means every call. */
-  when?: (args: Args) => boolean;
+  /** Only some calls bring outside text in (a shell command that can reach the network); absent means every call. `result` is the call's result when it has one. */
+  when?: (args: Args, result?: unknown) => boolean;
   /** One short line naming what was read. Cleaned for display by the caller. */
   label: (args: Args, result: unknown) => string;
 }
@@ -128,6 +128,10 @@ function searchRoot(args: Args): ToolResource[] {
 
 const MCP_POLICY_BASE: ToolPolicy = { classes: ["untrusted-reader", "effector"], tier: 2 };
 
+/** True only for a links_search result that is readable and holds no link: anything else may carry text from a page. */
+const noSavedLinks = (result: unknown): boolean =>
+  typeof result === "object" && result !== null && Array.isArray((result as { links?: unknown }).links) && (result as { links: unknown[] }).links.length === 0;
+
 /**
  * The table. Keyed by tool name. Comments say why a row is what it is only
  * where that is not obvious from the tool's name.
@@ -147,7 +151,10 @@ export const TOOL_POLICY: Readonly<Record<string, ToolPolicy>> = {
   transcript_search: readOnly(["private-reader"]),
   recall_fact: readOnly(["private-reader"]),
   get_fact: readOnly(["private-reader"]),
-  links_search: readOnly(["private-reader"]),
+  // Saved links carry page titles and summaries link_save fetched, and URLs and notes a run that read pages may have written.
+  links_search: readOnly(["private-reader", "untrusted-reader"], {
+    taintedBy: { kind: "web", when: (_args, result) => !noSavedLinks(result), label: (args) => `saved links: ${clean(args.query, 60)}` },
+  }),
   expand: readOnly(["private-reader"]),
   skills_list: readOnly(["private-reader"]),
   skills_load: readOnly(["private-reader"]),
@@ -165,7 +172,7 @@ export const TOOL_POLICY: Readonly<Record<string, ToolPolicy>> = {
   task_cancel: local(),
   scratch_append: local(),
   // Opens the link to read its title: a request that leaves the app.
-  link_save: local({ assess: assessFetch }),
+  link_save: local({ classes: ["effector", "untrusted-reader"], assess: assessFetch, taintedBy: fromWeb((args) => pageLabel(args.url)) }),
   // Renders the whole conversation, tool results included, into a page anyone with the link can open.
   share_thread: { classes: ["private-reader", "effector"], tier: 0, assess: () => ({ egress: "send", risk: "egress", operation: "send" }) },
 
@@ -311,7 +318,7 @@ export function asksWhenClean(tool: string, args: Args, own?: ToolMeta): boolean
 /** The taint a result brings, or null when the tool's result is not outside text. */
 export function taintFrom(policy: ToolPolicy | null, tool: string, args: Args, result: unknown, at: string): TaintSource | null {
   const by = policy?.taintedBy;
-  if (!by || by.when?.(args) === false) return null;
+  if (!by || by.when?.(args, result) === false) return null;
   return { kind: by.kind, label: by.label(args, result) || tool, tool, at };
 }
 

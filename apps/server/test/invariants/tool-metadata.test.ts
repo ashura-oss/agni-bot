@@ -114,7 +114,7 @@ describe("INV-03 every registered tool has a class and a tier", () => {
 
 describe("INV-03 the tools that matter are classed as what they are", () => {
   const expectations: Array<{ tools: string[]; cls: ToolClass; why: string }> = [
-    { tools: ["web_search", "web_fetch", "deep_research", "mail_search", "mail_read"], cls: "untrusted-reader", why: "text an outsider can write" },
+    { tools: ["web_search", "web_fetch", "deep_research", "mail_search", "mail_read", "link_save", "links_search"], cls: "untrusted-reader", why: "text an outsider can write" },
     { tools: ["memory_search", "recall_fact", "read_file", "transcript_search", "mail_read", "drive_read"], cls: "private-reader", why: "the owner's own data" },
     { tools: ["mail_send", "write_file", "bash", "run_privileged", "calendar_create", "calendar_update", "create_agent", "update_agent", "routine_create", "job_schedule"], cls: "effector", why: "changes something outside the app" },
     { tools: ["say", "load_tools"], cls: "inert", why: "neither reads nor changes anything that matters" },
