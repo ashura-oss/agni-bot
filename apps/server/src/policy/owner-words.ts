@@ -6,13 +6,18 @@
  */
 import type { Database } from "bun:sqlite";
 import { nowISO } from "../util/ids";
+import { redactForStorage } from "../util/redact-storage";
 
 const MAX_STORED_CHARS = 8_000;
 const MAX_READ_ROWS = 16;
 
-/** Record the owner's message for a thread. Called only for a turn the owner started. */
+/**
+ * Record the owner's message for a thread. Called only for a turn the owner started. A key the owner pasted is masked first, then
+ * the text is cut (a key that straddled the cut would otherwise be stored in part); the addresses and hosts the egress check looks
+ * for are not secrets, so masking leaves them as they were written.
+ */
 export function recordOwnerWords(db: Database, threadID: string, text: string): void {
-  const flat = text.trim();
+  const flat = redactForStorage(text.trim());
   if (!flat) return;
   db.run("INSERT INTO owner_words (thread_id, text, created_at) VALUES (?, ?, ?)", [threadID, flat.slice(0, MAX_STORED_CHARS), nowISO()]);
 }
