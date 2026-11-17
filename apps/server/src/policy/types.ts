@@ -112,6 +112,13 @@ export interface RunContext {
    * scheduled), not just by the persona. A job this run schedules carries the set so its fires are cut down to it too.
    */
   narrowed?: boolean;
+  /**
+   * Where this run's chain came from (`policy/provenance.ts`). `ownerStarted` is a positive marker set by the front door that knows
+   * (the owner's own chat turn, a job the owner made); `botChained` is set by any link a bot made, and never cleared. A run is the
+   * owner's own work only when the first is true and the second false: a missing or unreadable record is a bot's.
+   */
+  ownerStarted: boolean;
+  botChained: boolean;
   /** Outsider text this run has read. Empty means untainted. Grows during the run; never shrinks. */
   taint: { sources: TaintSource[] };
   budget: RunBudget;

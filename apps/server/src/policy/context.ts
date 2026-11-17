@@ -11,6 +11,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { nowISO } from "../util/ids";
+import { OWNER_STARTED, readProvenance, type Provenance } from "./provenance";
 import type { PrincipalKind, RunContext, RunServices, TaintSource } from "./types";
 import type { ToolMeta } from "./tool-meta";
 
@@ -41,6 +42,11 @@ export interface RunContextInput {
   allowedDomains?: string[];
   /** Taint the run is born with: the principal's own, an attachment, what a parent carried down. */
   taint?: TaintSource[];
+  /**
+   * Where the chain this run belongs to came from, as the job, brief or result that started it carried it (read with `readProvenance`).
+   * Absent: the owner's own chat turn (the owner, no job behind it) starts a chain; any other run has no record of its chain.
+   */
+  provenance?: Provenance;
 }
 
 export function createRunContext(input: RunContextInput): RunContext {
@@ -55,11 +61,14 @@ export function createRunContext(input: RunContextInput): RunContext {
     botName: input.botName ?? null,
   };
   const sources: TaintSource[] = [];
+  const jobID = input.jobID ?? null;
+  // The front door that knows: the owner's own chat turn starts a chain. Every other run takes what its starter handed it, or has none.
+  const provenance = readProvenance(input.provenance ?? (input.principal.kind === "owner" && jobID === null ? OWNER_STARTED : undefined));
   const run: RunContext = {
     bot: input.bot,
     threadID: input.threadID,
     turnID: input.turnID,
-    jobID: input.jobID ?? null,
+    jobID,
     // A job that nobody delegated from is its own root; a delegated child shares its parent's (which may be no job at all).
     rootJob: input.rootJob !== undefined ? input.rootJob : input.jobID ?? null,
     rootTurnID: input.rootTurnID ?? input.turnID,
@@ -68,6 +77,8 @@ export function createRunContext(input: RunContextInput): RunContext {
     principal: { ...input.principal },
     effectiveCapabilities: new Set(input.capabilities),
     ...(input.narrowed ? { narrowed: true } : {}),
+    ownerStarted: provenance.ownerStarted,
+    botChained: provenance.botChained,
     taint: { sources },
     budget: { extraAllowanceUSD: 0 },
     ownerText: input.ownerText ?? [],
