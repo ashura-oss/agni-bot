@@ -5,7 +5,7 @@
  */
 import { useId, useRef, useState } from "react";
 import { Pause, Play } from "lucide-react";
-import { spendLine, type AgentInfo } from "@agni/client";
+import { safeLine, spendLine, type AgentInfo } from "@agni/client";
 import { useAppModel, useAppSnapshot } from "../state/use-app-model";
 import { Switch } from "./bits";
 import { useDialog } from "./use-dialog";
@@ -106,14 +106,15 @@ export function BotPowerSwitch({ agent }: { agent: AgentInfo }) {
   const snapshot = useAppSnapshot();
   const [asking, setAsking] = useState(false);
   const off = model.isBotOff(agent.id);
+  const name = safeLine(agent.name, 80);
   const state = snapshot.policy.pause?.bots.find((bot) => bot.agentID === agent.id);
   const busy = (state?.runningTurns ?? 0) > 0 || (state?.scheduledJobs ?? 0) > 0;
   return (
     <div className="bot-power">
-      <span className="bot-power-text">{`${agent.name} is ${off ? "off" : "on"}`}</span>
+      <span className="bot-power-text">{`${name} is ${off ? "off" : "on"}`}</span>
       <Switch
         checked={!off}
-        label={agent.name}
+        label={name}
         onChange={(next) => {
           // Turning off something that is running or scheduled asks first; nothing else does.
           if (!next && busy) setAsking(true);
@@ -122,7 +123,7 @@ export function BotPowerSwitch({ agent }: { agent: AgentInfo }) {
       />
       {asking ? (
         <TurnOffDialog
-          name={agent.name}
+          name={name}
           running={state?.runningTurns ?? 0}
           scheduled={state?.scheduledJobs ?? 0}
           onKeepOn={() => setAsking(false)}

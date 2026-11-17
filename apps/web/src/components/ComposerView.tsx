@@ -8,7 +8,7 @@ import { useAppModel, useAppSnapshot } from "../state/use-app-model";
 import { copyText } from "./bits";
 import { shortcutLabel } from "../state/display";
 
-import { MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, type AttachmentInfo } from "@agni/client";
+import { MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, safeLine, type AttachmentInfo } from "@agni/client";
 
 interface DraftAttachment { id: string; file: File; preview?: string; uploaded?: AttachmentInfo; }
 
@@ -39,7 +39,7 @@ export function ComposerView() {
   const focusToken = useRef(snapshot.focusComposerToken);
   const isStreaming = snapshot.conversation.isStreaming;
   // A bot that is off cannot answer, and while every bot is paused a message waits: the box says which.
-  const botName = model.agent?.name ?? "New Bot";
+  const botName = safeLine(model.agent?.name ?? "New Bot", 80);
   const botOff = model.agent ? model.isBotOff(model.agent.id) : false;
   const allPaused = snapshot.policy.pause?.paused === true;
   const offHintID = useId();
@@ -301,7 +301,7 @@ export function ComposerView() {
                   ? `Message ${botName} — working…`
                   : `Message ${botName}`
           }
-          aria-label={isStreaming ? `Message ${model.agent?.name ?? "New Bot"}; send stop to interrupt` : `Message ${model.agent?.name ?? "New Bot"}`}
+          aria-label={isStreaming ? `Message ${botName}; send stop to interrupt` : `Message ${botName}`}
         />
 
         {isStreaming ? (

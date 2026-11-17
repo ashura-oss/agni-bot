@@ -87,6 +87,11 @@ function notice(kind: NoticeKind, title: string, body: string, threadID: string 
   };
 }
 
+/** The card an error frame answers, when the daemon named it (`requestID` is optional on the frame). */
+function frameRequestID(frame: { requestID?: unknown }): string | undefined {
+  return typeof frame.requestID === "string" && frame.requestID.length > 0 ? frame.requestID : undefined;
+}
+
 export class AppModel {
   private readonly listeners = new Set<() => void>();
   private snapshotValue: AppSnapshot;
@@ -183,10 +188,12 @@ export class AppModel {
    */
   private answered = new Set<string>();
   /**
-   * Allow answers on their way: the card is hidden the moment the send succeeds, so when the daemon refuses an answer
-   * without naming the card (`approval_not_opened`), these are the cards to give back.
+   * Answers on their way, Allow and Deny alike: the card is hidden the moment the send succeeds, so when the daemon
+   * refuses an answer these are the cards to give back. A refusal that names its card gives back only that one; one
+   * that names none gives back every card here. Cleared when the connection is ready again (the daemon re-sends the
+   * cards it still has waiting).
    */
-  private allowing = new Set<string>();
+  private outstanding = new Map<string, "allow" | "deny">();
   /** Pause, spend and the runs a spend cap stopped (S2). The frames land here; the views read the snapshot. */
   private policy = new PolicyState();
   /** Runs the owner asked to continue and the daemon has not answered: its `not_found` names no run. */
@@ -1068,6 +1075,40 @@ export class AppModel {
   }
 
   /**
+   * The daemon refused an answer to an approval card and said the card is still waiting: put it back. The refusal
+   * names its card when the daemon could tell (`requestID`); then only that card comes back. A refusal that names none
+   * (an older daemon) gives back every answer on its way: showing a card the daemon already decided is corrected by
+   * its `approval.closed`, hiding one it still holds is not. Returns false when the frame is not such a refusal.
+   * - `approval_not_opened`: the full text was not opened, so the card is locked again.
+   * - `approval_text_cut`: the full text was cut, so Allow stays off and the card keeps what it knows of the text.
+   * - `internal`: the answer was not applied (the audit log is down); the card comes back as it was, with the reason.
+   */
+  private giveBackRefused(frame: Extract<IncomingFrame, { type: "error" }>): boolean {
+    const code = frame.code;
+    if (code !== "approval_not_opened" && code !== "approval_text_cut" && code !== "internal") return false;
+    const named = frameRequestID(frame);
+    let ids: string[];
+    if (named) {
+      // Only that card. When its answer is no longer on its way (closed, or settled by a reconnect) there is nothing
+      // to give back; an `internal` error for something that is not one of our answers is not ours to swallow.
+      if (!this.outstanding.has(named)) return code !== "internal";
+      ids = [named];
+    } else {
+      // Only a refused Allow is ever answered with a "not opened" or "cut" code; a Deny can only have failed as `internal`.
+      ids = [...this.outstanding].filter(([, kind]) => code === "internal" || kind === "allow").map(([id]) => id);
+      if (ids.length === 0 && code === "internal") return false;
+    }
+    for (const id of ids) {
+      this.outstanding.delete(id);
+      this.answered.delete(id);
+      if (code === "approval_not_opened") this.conversation.reopenApproval(id);
+      else this.conversation.reopenApproval(id, { notice: frame.message, relock: false });
+    }
+    this.publish();
+    return true;
+  }
+
+  /**
    * Send an answer and resolve the card only once the send succeeded. A failed
    * send keeps the card pending and queues the frame for the next reconnect
    * (`keep`; secrets are never kept, their value must not outlive the form).
@@ -1112,7 +1153,7 @@ export class AppModel {
       { type: "approve.reply", requestID: approval.id, decision: decision as "once" | "always" | "reject" },
       () => {
         this.conversation.resolveApproval(approval.id, decision);
-        if (decision !== "reject") this.allowing.add(approval.id);
+        this.outstanding.set(approval.id, decision === "reject" ? "deny" : "allow");
         // "Always allow" makes a rule: the reply is already on the wire, so the list asked for
         // next comes back with it.
         if (decision === "always") this.refreshApprovalRules();
@@ -1735,6 +1776,8 @@ export class AppModel {
         if (!isReady(event.state)) this.conversation.failLoadingApprovalFulls();
         switch (event.state.kind) {
           case "ready": {
+            // What was on its way over the old connection is settled by what the daemon re-sends.
+            this.outstanding.clear();
             if (this.pendingPairing) {
               const accepted = { ...this.pendingPairing.settings };
               accepted.lastSeq = this.connection?.lastSeq ?? accepted.lastSeq;
@@ -2234,18 +2277,7 @@ export class AppModel {
         this.publish();
         return;
       }
-      if (frame.code === "approval_not_opened" || (frame.code === "internal" && this.allowing.size > 0)) {
-        // The daemon refused an Allow and said the card is still waiting: give back every Allow that is on its way.
-        // (approval_not_opened: its text was not opened, so the card is locked again; internal: the audit log is down.)
-        const notOpened = frame.code === "approval_not_opened";
-        for (const id of this.allowing) {
-          this.answered.delete(id);
-          this.conversation.reopenApproval(id, notOpened ? {} : { notice: frame.message, relock: false });
-        }
-        this.allowing.clear();
-        this.publish();
-        return;
-      }
+      if (this.giveBackRefused(frame)) return;
       if (frame.code === "not_found" && this.conversation.loadingApprovalIDs.length > 0) {
         // The full text of a card that is gone: the card says so, and Deny still works.
         this.conversation.failLoadingApprovalFulls();
@@ -2283,10 +2315,10 @@ export class AppModel {
         // single answer still waiting. With two in flight, closing a guess could drop a live card.
         const outstanding = [...this.answered];
         const named = outstanding.filter((id) => frame.message.includes(id));
-        const id = named.length === 1 ? named[0] : outstanding.length === 1 ? outstanding[0] : undefined;
+        const id = frameRequestID(frame) ?? (named.length === 1 ? named[0] : outstanding.length === 1 ? outstanding[0] : undefined);
         if (id) {
           this.answered.delete(id);
-          this.allowing.delete(id);
+          this.outstanding.delete(id);
           this.unsent.delete(id);
           this.conversation.apply({ type: "approval.closed", seq: frame.seq, requestID: id, kind: "approval", reason: "expired" });
           this.conversation.apply({ type: "approval.closed", seq: frame.seq, requestID: id, kind: "form", reason: "expired" });
@@ -2362,7 +2394,7 @@ export class AppModel {
     if (frame.type === "approval.closed") {
       this.unsent.delete(frame.requestID);
       this.answered.delete(frame.requestID);
-      this.allowing.delete(frame.requestID);
+      this.outstanding.delete(frame.requestID);
     }
     if (frame.type === "turn.end" && frame.stopReason !== "end" && frame.stopReason !== "needs_input") {
       rememberStop(frame.turnID, frame.stopReason);
@@ -2536,7 +2568,9 @@ export class AppModel {
   /** The display name of the bot that asked for something, or null when no bot is known. */
   requesterName(agentID: string | null | undefined): string | null {
     if (!agentID) return null;
-    return [...this.mentionAgents, ...this.agents].find((agent) => agent.id === agentID)?.name ?? null;
+    const name = [...this.mentionAgents, ...this.agents].find((agent) => agent.id === agentID)?.name;
+    // A bot names itself, and this name heads a card the owner decides from: drawn as safe text, never as it came.
+    return name === undefined ? null : safeLine(name, 80);
   }
 
   /** "<bot> needs your approval", or the neutral wording when the frames named no bot. */
