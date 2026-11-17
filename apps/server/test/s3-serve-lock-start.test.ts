@@ -8,6 +8,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ServeLockError, serveLockPath, serveLockState } from "../src/startup/s3-serve-lock";
+import { IPV6_LOOPBACK } from "./ipv6-loopback";
 import { acquireServeLockAtStart } from "../src/startup/s3-serve-start";
 
 let roots: string[] = [];
@@ -127,7 +128,7 @@ describe("which recorded hosts allow a takeover (fail closed)", () => {
     held.release();
   });
 
-  test("an IP literal that refuses is stale: an IPv6 literal too", async () => {
+  test.skipIf(!IPV6_LOOPBACK)("an IP literal that refuses is stale: an IPv6 literal too", async () => {
     const home = fresh();
     lock(home, await liveOther(), { host: "::1", port: await closedPort() });
     const held = await acquireServeLockAtStart({ home, ...quick });
@@ -135,7 +136,7 @@ describe("which recorded hosts allow a takeover (fail closed)", () => {
     held.release();
   });
 
-  test("a live bind on an IPv6 literal keeps the lock", async () => {
+  test.skipIf(!IPV6_LOOPBACK)("a live bind on an IPv6 literal keeps the lock", async () => {
     const home = fresh();
     const server = Bun.serve({ port: 0, hostname: "::1", fetch: () => Response.json({ ok: true, v: 2, uptimeMs: 1 }) });
     cleanups.push(() => server.stop(true));
