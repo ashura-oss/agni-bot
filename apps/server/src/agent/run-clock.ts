@@ -5,7 +5,7 @@
  * child carries its parent's clock key). It is not the same thing as the root the owner's refusals
  * belong to: a wake, a task resumed after the owner answered, and a job's next scheduled run keep the
  * refusals of the request they came from but each start a clock of their own. Each scheduled run of a job has
- * its own clock (`startJobClock`); a retry of that run keeps the clock its first attempt started.
+ * its own clock (`startJobClock`); a retry of that run keeps the clock the run started.
  *
  * The time the owner spends deciding (an approval card, a question, a password prompt) is not the run's
  * time, as it is not the turn timer's (`TurnTimer`): those waits are written down here, per clock, so the
@@ -45,25 +45,31 @@ export function startClock(db: Database, key: string, nowMs: number = Date.now()
 
 /**
  * Start the clock of one scheduled run of a job, and return its key. Every run has a clock of its own, named for the job
- * and the slot it was scheduled for (`slot`: the job's `run_at` when the run was first tried), so a delegated child that is
- * still running when the job's next slot starts stays on the clock of the run it belongs to. A retry of the same run
- * (`retry`) finds the clock its first try started and keeps it; if there is none to find (it was dropped as too old), it
- * starts one for this slot.
+ * and the slot it was scheduled for (`slot`: the job's `run_at` when the run's clock started), so a delegated child that is
+ * still running when the job's next slot starts stays on the clock of the run it belongs to.
+ *
+ * The key is written on the job (`jobs.run_clock_key`) when the clock starts, and the runner clears it when it schedules the
+ * next run. A retry of the same run finds the key and keeps that clock. A first try that failed before its clock started
+ * (a busy thread, a crash) left none, so its retry starts one for its own slot: it must not take the newest clock of the
+ * job, which is the previous run's.
  */
-export function startJobClock(db: Database, jobID: string, slot: string, retry: boolean, nowMs: number = Date.now()): string {
-  const prefix = `${jobID}@`;
-  if (retry) {
+export function startJobClock(db: Database, jobID: string, slot: string, nowMs: number = Date.now()): string {
+  let stored: string | null = null;
+  try {
+    stored = db.query<{ run_clock_key: string | null }, [string]>("SELECT run_clock_key FROM jobs WHERE id = ?").get(jobID)?.run_clock_key ?? null;
+  } catch (error) {
+    log.warn(`run clock of job ${jobID} could not be looked up: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  // A key whose clock was dropped as too old starts again now: the clock is the run's, and the run is long over.
+  const key = stored || `${jobID}@${slot}`;
+  startClock(db, key, nowMs);
+  if (!stored) {
     try {
-      const first = db
-        .query<{ clock_key: string }, [number, string]>("SELECT clock_key FROM run_clocks WHERE substr(clock_key, 1, ?) = ? ORDER BY started_at DESC LIMIT 1")
-        .get(prefix.length, prefix);
-      if (first) return first.clock_key;
+      db.run("UPDATE jobs SET run_clock_key = ? WHERE id = ?", [key, jobID]);
     } catch (error) {
-      log.warn(`run clock of job ${jobID} could not be looked up: ${error instanceof Error ? error.message : String(error)}`);
+      log.warn(`run clock ${key} could not be recorded on its job: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  const key = `${prefix}${slot}`;
-  startClock(db, key, nowMs);
   return key;
 }
 

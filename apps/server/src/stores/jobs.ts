@@ -135,7 +135,7 @@ export type WakeOutcome = "woken" | "running" | "not_found";
  */
 export function wakeJob(db: Database, id: string): WakeOutcome {
   const result = db.run(
-    "UPDATE jobs SET state = 'queued', run_at = ?, attempts = 0, result = NULL, run_once = CASE WHEN enabled = 1 THEN 0 ELSE 1 END, updated_at = ? WHERE id = ? AND state != 'running'",
+    "UPDATE jobs SET state = 'queued', run_at = ?, attempts = 0, run_clock_key = NULL, result = NULL, run_once = CASE WHEN enabled = 1 THEN 0 ELSE 1 END, updated_at = ? WHERE id = ? AND state != 'running'",
     [nowISO(), nowISO(), id],
   );
   if (result.changes > 0) return "woken";

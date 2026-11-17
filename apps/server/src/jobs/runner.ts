@@ -248,7 +248,7 @@ export class JobRunner {
     }
     if (next) {
       requeueJob(this.db, job.id, next);
-      this.db.run("UPDATE jobs SET attempts = 0, result = ? WHERE id = ?", [result, job.id]);
+      this.db.run("UPDATE jobs SET attempts = 0, run_clock_key = NULL, result = ? WHERE id = ?", [result, job.id]);
     } else {
       finishJob(this.db, job.id, state, result);
     }
@@ -268,7 +268,7 @@ export class JobRunner {
       if (outcome.nextRunAt) {
         requeueJob(this.db, job.id, outcome.nextRunAt);
         // A clean recurring run starts a fresh retry budget for its next failure.
-        this.db.run("UPDATE jobs SET attempts = 0 WHERE id = ?", [job.id]);
+        this.db.run("UPDATE jobs SET attempts = 0, run_clock_key = NULL WHERE id = ?", [job.id]);
         if (outcome.result !== undefined) {
           this.db.run("UPDATE jobs SET result = ? WHERE id = ?", [`${outcome.result} (recurring)`, job.id]);
         }
@@ -290,7 +290,7 @@ export class JobRunner {
         if (next) {
           // M38: a recurring job outlives a bad run: skip to its next slot.
           requeueJob(this.db, job.id, next);
-          this.db.run("UPDATE jobs SET attempts = 0, result = ? WHERE id = ?", [`run failed: ${message}; next run ${next}`, job.id]);
+          this.db.run("UPDATE jobs SET attempts = 0, run_clock_key = NULL, result = ? WHERE id = ?", [`run failed: ${message}; next run ${next}`, job.id]);
           log.error(`job ${job.id} (${job.kind}) gave up on this run: ${message} — next run ${next}`);
           if (!quiet) this.notify("Job failed", `${job.kind}: ${truncate(message, 120)} (will run again ${next})`);
         } else {

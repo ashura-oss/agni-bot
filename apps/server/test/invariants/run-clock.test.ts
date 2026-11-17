@@ -13,7 +13,7 @@ import { afterEach, describe, expect, setSystemTime } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { toolUsage } from "../../src/jobs/harness-review";
-import { enqueueJob } from "../../src/stores/jobs";
+import { enqueueJob, wakeJob } from "../../src/stores/jobs";
 import { scenarioTest, useScenarios, gate, say, type Scenario, type ModelStep } from "../scenarios/harness";
 import { call, later, minutes, playTurn, scripted } from "./support";
 
@@ -150,6 +150,16 @@ describe("INV-14 a retry keeps the job's first clock", () => {
     expect(s.get<{ state: string }>("SELECT state FROM jobs WHERE id = ?", id)?.state).toBe("failed");
   });
 
+  scenarioTest("the owner's Run now is a new run, with a clock of its own", async () => {
+    const s = await scenarios.start({ turnTimeoutMs: 150 });
+    const id = await failedFirstAttempt(s, 20);
+    expect(wakeJob(s.db, id)).toBe("woken");
+    later(minutes(15)); // 35 minutes after the interrupted run began
+    s.model.queue(say("Done."));
+    await s.runner().tick();
+    expect(s.get<{ state: string }>("SELECT state FROM jobs WHERE id = ?", id)?.state, "a Run now was held to the clock of the run it replaced").toBe("done");
+  });
+
   scenarioTest("a retry inside the first attempt's 30 minutes goes on", async () => {
     const s = await scenarios.start({ turnTimeoutMs: 150 });
     const id = await failedFirstAttempt(s, 10);
@@ -268,5 +278,29 @@ describe("INV-14 each scheduled run of a job has its own clock", () => {
     s.model.queue(say("All quiet."));
     await s.runner().tick();
     expect(s.all("SELECT clock_key FROM run_clocks").length, "the next slot did not get a clock of its own").toBe(2);
+  });
+
+  scenarioTest("a try that failed before its clock started leaves the retry a clock of its own slot, not the previous run's", async () => {
+    const s = await scenarios.start();
+    const id = enqueueJob(s.db, { kind: "turn", payload: { text: "check the warehouse", agentID: "ea", notify: false, everyMs: minutes(60) } }).id;
+    s.model.queue(say("All quiet."));
+    await s.runner().tick();
+    expect(s.all("SELECT clock_key FROM run_clocks").length, "the first run did not start exactly one clock; the script is out of step").toBe(1);
+
+    // The next slot's first try fails before any clock starts (here the turn row cannot be written), as a busy thread or a crash would.
+    later(minutes(61));
+    s.db.run("CREATE TRIGGER fail_turn_row BEFORE INSERT ON turns BEGIN SELECT RAISE(ABORT, 'disk full'); END");
+    await s.runner().tick();
+    s.db.run("DROP TRIGGER fail_turn_row");
+    expect(s.get<{ state: string; attempts: number }>("SELECT state, attempts FROM jobs WHERE id = ?", id), "the first try did not fail into a retry; the script is out of step").toEqual({ state: "queued", attempts: 1 });
+    expect(s.all("SELECT clock_key FROM run_clocks").length, "the failed try started a clock after all; the script is out of step").toBe(1);
+
+    // The retry is 76 minutes after the previous run began, inside its own slot's 30 minutes.
+    later(minutes(15));
+    s.model.queue(say("All quiet again."));
+    const before = s.model.requests.length;
+    await s.runner().tick();
+    expect(s.model.requests.length - before, "the retry was stopped by the previous run's clock").toBe(1);
+    expect(s.all("SELECT clock_key FROM run_clocks").length, "the retry did not start a clock for its own slot").toBe(2);
   });
 });

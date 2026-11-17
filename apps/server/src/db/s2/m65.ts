@@ -15,9 +15,12 @@ import type { Migration } from "../migrations";
  *    that has not ended: it counts for at most the longest wait the app allows. A restart closes the ones a
  *    dead process left open (`closeOpenWaits`), so a crash does not give a retried job that time for free.
  *
- * A column on `jobs` belongs to the same fix round:
+ * Two columns on `jobs` belong to the same fix round:
  *  - `wake_scope`: set when a wake is counted against its request (`takeWakePlace`), so the wake count is one indexed read
  *    and not a JSON read of every turn job.
+ *  - `run_clock_key`: the clock the job's current scheduled run started. A retry reads it and keeps that clock; the runner
+ *    clears it when it schedules the next run. A first try that failed before a clock started leaves it empty, so its retry
+ *    starts one for its own slot instead of taking the previous run's.
  *
  * `turns.ended_by` marks a turn the run's time limit ended. Its `stop_reason` stays `timeout` (that is the
  * protocol's word for it), but the nightly harness review must not read it as a model that is too slow.
@@ -40,6 +43,7 @@ export const migration: Migration | null = {
     CREATE INDEX idx_run_clocks_started ON run_clocks(started_at);   -- every clock start drops the ones older than a week
     ALTER TABLE turns ADD COLUMN ended_by TEXT;   -- NULL, or wall_time
     ALTER TABLE jobs ADD COLUMN wake_scope TEXT;      -- the request a counted wake belongs to (jobs/wake-limit.ts)
+    ALTER TABLE jobs ADD COLUMN run_clock_key TEXT;   -- the clock of the job's current scheduled run (agent/run-clock.ts)
     CREATE INDEX idx_jobs_wake_scope ON jobs(wake_scope) WHERE wake_scope IS NOT NULL;
   `,
 };

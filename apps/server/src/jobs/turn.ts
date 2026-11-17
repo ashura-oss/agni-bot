@@ -669,9 +669,8 @@ async function runTurn(
         // undefined says the sender did not say what it had read (a bot that starts from it is tainted); a list, even empty, says it did.
         ...(payload.taint !== undefined || payload.wakeKey ? { taint: [...(payload.taint !== undefined ? readTaint(payload.taint) : []), ...wakeTaint(deps.db, payload.results)] } : {}),
         ...(payload.rootTurnID ? { rootTurnID: payload.rootTurnID, rootJob: payload.rootJob ?? null } : {}),
-        // A delegated child is on its parent's clock; a wake, a resumed task and any other job start their own, and a retry keeps its first.
+        // A delegated child is on its parent's clock; a wake, a resumed task and any other job start their own, and a retry keeps the one its run started (`jobs.run_clock_key`).
         ...(payload.clockKey ? { clockKey: payload.clockKey } : {}),
-        ...(retry ? { keepClock: true } : {}),
         ...(jobSlot ? { jobSlot } : {}),
         jobID: jobID ?? null,
         capabilities: readCapabilities(payload.capabilities),

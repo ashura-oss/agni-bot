@@ -164,9 +164,7 @@ export interface TaskTurnRun {
      * Without it the run has a clock of its own, started now: the job's, or the turn's.
      */
     clockKey?: string;
-    /** This job is a retry of one that already started its clock: the clock keeps its first start. */
-    keepClock?: boolean;
-    /** The slot this scheduled run of the job was first tried for (the job's `run_at`): it names the run's clock. */
+    /** The job's `run_at` when this try started: it names the run's clock when the run has none yet (a retry keeps the one its job records). */
     jobSlot?: string;
     jobID?: string | null;
     capabilities?: string[];
@@ -512,7 +510,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   let clockKey = run.policy?.clockKey;
   if (clockKey === undefined) {
     if (run.policy?.jobID) {
-      clockKey = startJobClock(db, run.policy.jobID, run.policy.jobSlot ?? new Date().toISOString(), Boolean(run.policy.keepClock));
+      clockKey = startJobClock(db, run.policy.jobID, run.policy.jobSlot ?? new Date().toISOString());
     } else {
       clockKey = turnID;
       startClock(db, clockKey);
