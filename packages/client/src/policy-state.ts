@@ -4,7 +4,7 @@
  * so the wording is tested without a screen. The app model owns one of these and forwards the
  * frames; nothing here talks to the network.
  */
-import type { BotPauseState, SpendCaps } from "@agni/protocol";
+import type { BotPauseState, RunCapsInfo, SpendCaps } from "@agni/protocol";
 import type { IncomingFrame } from "./protocol";
 
 export interface PauseView {
@@ -23,6 +23,8 @@ export interface SpendView {
   daySpentUsd: number;
   bots: Array<{ agentID: string; spentUsd: number; capUsd: number | null }>;
   unpricedCalls: number;
+  /** The run limits, shown read-only. Null when the daemon did not send them (an older daemon, or a read that failed). */
+  runCaps: RunCapsInfo | null;
 }
 
 export type StopScope = "day" | "bot" | "job";
@@ -86,6 +88,18 @@ export function spendLine(spend: SpendView | null): SpendLine {
   };
 }
 
+/** The run limits as label and value pairs, in the words `agni policy caps` uses. */
+export function runLimitLines(caps: RunCapsInfo): Array<{ label: string; value: string }> {
+  const minutes = caps.rootJobWallMinutes;
+  const time = Number.isInteger(minutes) ? `${minutes} ${minutes === 1 ? "minute" : "minutes"}` : `${Math.round(minutes * 60)} seconds`;
+  return [
+    { label: "Time limit per run", value: time },
+    { label: "Delegations at once", value: String(caps.maxConcurrentDelegations) },
+    { label: "Self-scheduled jobs per bot", value: String(caps.maxSelfScheduledJobsPerBot) },
+    { label: "Wakes per request", value: String(caps.maxWakesPerRequest) },
+  ];
+}
+
 /** The headline of a stopped run and the "Raise" button for the limit that stopped it. `bot` is the asking bot's name, or null. */
 export function stopTitle(stop: Pick<BudgetStop, "scope" | "reason">, bot: string | null): { headline: string; raise: string } {
   const name = bot ?? "A bot";
@@ -133,6 +147,7 @@ export class PolicyState {
           daySpentUsd: frame.daySpentUsd,
           bots: frame.bots,
           unpricedCalls: frame.unpricedCalls,
+          runCaps: frame.runCaps ?? null,
         };
         return true;
       case "spend.stopped": {

@@ -355,6 +355,11 @@
   gap: 14px;
 }
 
+/* The run limits are read-only: same rows as the per-bot list, and the command wraps on a phone. */
+.run-limits-group .settings-note {
+  overflow-wrap: anywhere;
+}
+
 .spending-field {
   display: flex;
   flex-direction: column;

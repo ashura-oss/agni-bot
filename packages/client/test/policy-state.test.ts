@@ -3,7 +3,7 @@
  * the runs a spend cap stopped. Pure, so the wording and the rules are tested without a screen.
  */
 import { describe, expect, test } from "vitest";
-import { PolicyState, money, spendLine, stopTitle, type IncomingFrame } from "../src";
+import { PolicyState, money, runLimitLines, spendLine, stopTitle, type IncomingFrame } from "../src";
 
 function wire(object: Record<string, unknown>): IncomingFrame {
   return object as unknown as IncomingFrame;
@@ -137,6 +137,45 @@ describe("spend line", () => {
     const policy = new PolicyState();
     policy.apply(statusFrame({ unpricedCalls: 3 }));
     expect(spendLine(policy.spend).hint).toMatch(/3 calls? had no price/);
+  });
+});
+
+const RUN_CAPS = { rootJobWallMinutes: 30, maxConcurrentDelegations: 4, maxSelfScheduledJobsPerBot: 10, maxWakesPerRequest: 10 };
+
+describe("run caps", () => {
+  test("a status that carries them keeps them next to the spend", () => {
+    const policy = new PolicyState();
+    policy.apply(statusFrame({ runCaps: RUN_CAPS }));
+    expect(policy.spend?.runCaps).toEqual(RUN_CAPS);
+  });
+
+  test("a status without them (an older daemon, or a read that failed) leaves them unknown", () => {
+    const policy = new PolicyState();
+    policy.apply(statusFrame());
+    expect(policy.spend?.runCaps).toBeNull();
+  });
+
+  test("the newest status wins: a later one without them does not keep the old numbers", () => {
+    const policy = new PolicyState();
+    policy.apply(statusFrame({ runCaps: RUN_CAPS }));
+    policy.apply(statusFrame({ runCaps: { ...RUN_CAPS, maxWakesPerRequest: 3 } }));
+    expect(policy.spend?.runCaps?.maxWakesPerRequest).toBe(3);
+    policy.apply(statusFrame());
+    expect(policy.spend?.runCaps).toBeNull();
+  });
+
+  test("the lines say each limit in words", () => {
+    expect(runLimitLines(RUN_CAPS)).toEqual([
+      { label: "Time limit per run", value: "30 minutes" },
+      { label: "Delegations at once", value: "4" },
+      { label: "Self-scheduled jobs per bot", value: "10" },
+      { label: "Wakes per request", value: "10" },
+    ]);
+  });
+
+  test("one minute is singular, and a time that is not whole minutes is said in seconds", () => {
+    expect(runLimitLines({ ...RUN_CAPS, rootJobWallMinutes: 1 })[0]!.value).toBe("1 minute");
+    expect(runLimitLines({ ...RUN_CAPS, rootJobWallMinutes: 1.5 })[0]!.value).toBe("90 seconds");
   });
 });
 

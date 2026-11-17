@@ -3,11 +3,12 @@
  * messages, spend frames, the full text behind a card, and the audit trail of
  * what the owner decides.
  */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { bindPauseStore, unbindPauseStore } from "../src/policy/pause";
 import { setAuditSink } from "../src/policy/audit-sink";
 import { installAuditSink, listAuditEvents, verifyAuditChain } from "../src/stores/audit";
 import { saveCardMeta } from "../src/agent/pending-cards";
+import { setRunCaps } from "../src/stores/policy-settings";
 import { setSpendProvider } from "../src/ws/policy-frames";
 import { gatedFetch, sseResponse, sseToolCall, startHarness, toolsThenText, waitFor, type Harness, type TestClient } from "./ws-harness";
 
@@ -219,6 +220,39 @@ describe("spend frames", () => {
     setSpendProvider({ status: () => status, setCaps: (_db, caps) => ({ ...status.caps, ...caps }) });
     client.send({ type: "spend.status" });
     expect(await client.next("spend.status.ok")).toMatchObject({ day: "2026-11-16", daySpentUsd: 0.42, caps: { dayUsd: 2 } });
+  });
+
+  test("spend.status carries the run caps, read live, so the app can show them", async () => {
+    const { client, h } = await start();
+    setSpendProvider({ status: () => status, setCaps: (_db, caps) => ({ ...status.caps, ...caps }) });
+    client.send({ type: "spend.status" });
+    expect((await client.next("spend.status.ok")).runCaps).toEqual({ rootJobWallMinutes: 30, maxConcurrentDelegations: 4, maxSelfScheduledJobsPerBot: 10, maxWakesPerRequest: 10 });
+    setRunCaps(h.db, { rootJobWallMs: 45 * 60_000, maxConcurrentDelegations: 2, maxSelfScheduledJobsPerBot: 3, maxWakesPerRequest: 7 });
+    client.send({ type: "spend.status" });
+    expect((await client.next("spend.status.ok")).runCaps).toEqual({ rootJobWallMinutes: 45, maxConcurrentDelegations: 2, maxSelfScheduledJobsPerBot: 3, maxWakesPerRequest: 7 });
+  });
+
+  test("the broadcast after spend.caps.set carries the run caps too", async () => {
+    const { client } = await start();
+    setSpendProvider({ status: () => status, setCaps: (_db, caps) => ({ ...status.caps, ...caps }) });
+    client.send({ type: "spend.caps.set", dayUsd: 5 });
+    expect((await client.next("spend.status.ok")).runCaps?.maxWakesPerRequest).toBe(10);
+  });
+
+  test("a run-caps read that fails sends the status without them, and logs it", async () => {
+    const { client, h } = await start();
+    setSpendProvider({ status: () => status, setCaps: (_db, caps) => ({ ...status.caps, ...caps }) });
+    h.db.run("DROP TABLE policy_settings");
+    const logged = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      client.send({ type: "spend.status" });
+      const ok = await client.next("spend.status.ok");
+      expect(ok).toMatchObject({ day: "2026-11-16", daySpentUsd: 0.42 });
+      expect("runCaps" in ok).toBe(false);
+      expect(logged.mock.calls.some((call) => String(call[0]).includes("run caps"))).toBe(true);
+    } finally {
+      logged.mockRestore();
+    }
   });
 
   test("spend.caps.set records the old and new caps first, applies them, and tells everyone", async () => {

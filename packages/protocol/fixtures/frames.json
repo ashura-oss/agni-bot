@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-16T18:27:03.585Z",
+  "generatedAt": "2026-11-17T09:27:16.709Z",
   "protocolVersion": 2,
   "client": [
     {
@@ -991,7 +991,13 @@
           "capUsd": 1
         }
       ],
-      "unpricedCalls": 0
+      "unpricedCalls": 0,
+      "runCaps": {
+        "rootJobWallMinutes": 30,
+        "maxConcurrentDelegations": 4,
+        "maxSelfScheduledJobsPerBot": 10,
+        "maxWakesPerRequest": 10
+      }
     },
     {
       "type": "spend.stopped",

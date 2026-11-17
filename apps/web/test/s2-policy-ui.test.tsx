@@ -469,6 +469,33 @@ describe("Settings, Spending", () => {
     expect((screen.getByLabelText("Limit per task") as HTMLInputElement).value).toBe("0.50");
   });
 
+  it("shows the run limits read-only, with how to change them", () => {
+    const { model } = rig();
+    frame(model, { type: "agents.update", seq: 1, agents: roster, mentions: roster });
+    frame(model, spendOk({ runCaps: { rootJobWallMinutes: 30, maxConcurrentDelegations: 4, maxSelfScheduledJobsPerBot: 10, maxWakesPerRequest: 7 } }));
+    act(() => model.openSettings("spending"));
+    renderWith(model);
+    const group = screen.getByRole("heading", { name: "Run limits" }).closest(".settings-group") as HTMLElement;
+    const limits = within(group);
+    expect(limits.getByText("Time limit per run").nextSibling?.textContent).toBe("30 minutes");
+    expect(limits.getByText("Delegations at once").nextSibling?.textContent).toBe("4");
+    expect(limits.getByText("Self-scheduled jobs per bot").nextSibling?.textContent).toBe("10");
+    expect(limits.getByText("Wakes per request").nextSibling?.textContent).toBe("7");
+    expect(group.textContent).toMatch(/agni policy caps set/);
+    // Read-only: nothing in the group can be typed into or pressed.
+    expect(group.querySelector("input, button, select, textarea")).toBeNull();
+  });
+
+  it("says so when the daemon sent no run limits, instead of showing made-up numbers", () => {
+    const { model } = rig();
+    open(model);
+    renderWith(model);
+    const group = screen.getByRole("heading", { name: "Run limits" }).closest(".settings-group") as HTMLElement;
+    expect(group.textContent).toMatch(/not available right now/);
+    expect(group.textContent).not.toMatch(/minutes/);
+    expect(group.textContent).toMatch(/agni policy caps set/);
+  });
+
   it("with no spend yet it says so", () => {
     const { model } = rig();
     frame(model, { type: "agents.update", seq: 1, agents: roster, mentions: roster });

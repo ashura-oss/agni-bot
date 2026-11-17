@@ -12,6 +12,7 @@ import { log } from "../log";
 import { audit } from "../policy/audit-sink";
 import { grantContinueOnce } from "../policy/budget";
 import { listBotStates, readPauseState, setAgentEnabled, setAllPaused } from "../policy/pause";
+import { getRunCaps } from "../stores/policy-settings";
 import { fullApprovalText, markFullOpened } from "./approval-full";
 import { cancelTurnsForPause, runningTurnCountForAgent, type PauseAbortReason } from "./turn-registry";
 
@@ -158,9 +159,29 @@ export function setSpendProvider(provider: SpendProvider | null): void {
 
 const NO_SPEND = "Spending limits are not available in this build.";
 
+/**
+ * The `spend.status.ok` body: today's numbers, and the owner's run limits to show beside them (read-only). A run-limit
+ * read that fails leaves `runCaps` out and says so in the log; the status itself still goes.
+ */
+function spendStatusBody(provider: SpendProvider, db: Database): SpendOk {
+  const body: SpendOk = { type: "spend.status.ok", ...provider.status(db) };
+  try {
+    const caps = getRunCaps(db);
+    body.runCaps = {
+      rootJobWallMinutes: caps.rootJobWallMs / 60_000,
+      maxConcurrentDelegations: caps.maxConcurrentDelegations,
+      maxSelfScheduledJobsPerBot: caps.maxSelfScheduledJobsPerBot,
+      maxWakesPerRequest: caps.maxWakesPerRequest,
+    };
+  } catch (error) {
+    log.error("spend status sent without the run caps: they could not be read", error);
+  }
+  return body;
+}
+
 export function handleSpendStatus(deps: PolicyFrameDeps): void {
   if (!spendProvider) return deps.error("spend_unavailable", NO_SPEND);
-  deps.reply({ type: "spend.status.ok", ...spendProvider.status(deps.db) });
+  deps.reply(spendStatusBody(spendProvider, deps.db));
 }
 
 export function handleSpendCapsSet(deps: PolicyFrameDeps, frame: Extract<ClientFrame, { type: "spend.caps.set" }>): void {
@@ -186,7 +207,7 @@ export function handleSpendCapsSet(deps: PolicyFrameDeps, frame: Extract<ClientF
   } catch (error) {
     return deps.error("bad_cap", error instanceof Error ? error.message : "Those limits cannot be used.");
   }
-  deps.emit({ type: "spend.status.ok", ...spendProvider.status(deps.db) });
+  deps.emit(spendStatusBody(spendProvider, deps.db));
 }
 
 /**

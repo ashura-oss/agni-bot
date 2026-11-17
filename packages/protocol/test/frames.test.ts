@@ -357,6 +357,20 @@ describe("Sprint 2 frames (additive)", () => {
     expect(parseServerFrame({ type: "approval.full.ok", seq: 1, requestID: "apr_1", text: "everything" }).ok).toBe(true);
   });
 
+  test("spend.status.ok carries the run caps when it has them, and parses without them", () => {
+    const base = { type: "spend.status.ok", seq: 1, day: "2026-11-16", resetsAt: "2026-11-17T00:00:00.000Z", timeZone: "UTC", caps: { dayUsd: 2, perBotDayUsd: 1, perJobUsd: 0.5 }, daySpentUsd: 0, bots: [], unpricedCalls: 0 };
+    const runCaps = { rootJobWallMinutes: 30, maxConcurrentDelegations: 4, maxSelfScheduledJobsPerBot: 10, maxWakesPerRequest: 10 };
+    const withCaps = parseServerFrame({ ...base, runCaps });
+    expect(withCaps.ok).toBe(true);
+    if (withCaps.ok && withCaps.frame.type === "spend.status.ok") expect(withCaps.frame.runCaps).toEqual(runCaps);
+    expect(parseServerFrame(base).ok).toBe(true);
+    // A run cap is a positive number, and the counts are whole numbers.
+    expect(parseServerFrame({ ...base, runCaps: { ...runCaps, rootJobWallMinutes: 0 } }).ok).toBe(false);
+    expect(parseServerFrame({ ...base, runCaps: { ...runCaps, maxWakesPerRequest: 1.5 } }).ok).toBe(false);
+    expect(parseServerFrame({ ...base, runCaps: { ...runCaps, maxConcurrentDelegations: -1 } }).ok).toBe(false);
+    expect(parseServerFrame({ ...base, runCaps: { rootJobWallMinutes: 30 } }).ok).toBe(false);
+  });
+
   test("spend.continue needs a run key; spend.stopped and spend.continue.ok parse", () => {
     expect(parseClientFrame({ type: "spend.continue", runKey: "agent:ea" }).ok).toBe(true);
     expect(parseClientFrame({ type: "spend.continue" }).ok).toBe(false);

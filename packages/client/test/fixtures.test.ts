@@ -208,6 +208,11 @@ describe("protocol fixtures", () => {
     expect(decoded.frame.seq).toBe(99);
   });
 
+  test("the spend.status.ok fixture carries the run caps", () => {
+    const status = serverFrame("spend.status.ok");
+    expect(status.type === "spend.status.ok" ? status.runCaps : undefined).toEqual({ rootJobWallMinutes: 30, maxConcurrentDelegations: 4, maxSelfScheduledJobsPerBot: 10, maxWakesPerRequest: 10 });
+  });
+
   test("a known frame with a broken payload fails", () => {
     const token = decodeServerFrame(JSON.stringify({ type: "token", seq: 1, turnID: "trn_1" }));
     expect(token.ok).toBe(false);

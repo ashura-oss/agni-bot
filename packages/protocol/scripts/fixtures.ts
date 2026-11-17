@@ -376,6 +376,7 @@ const SERVER_FRAMES: ServerFrame[] = [
       { agentID: "researcher", spentUsd: 0.12, capUsd: 1 },
     ],
     unpricedCalls: 0,
+    runCaps: { rootJobWallMinutes: 30, maxConcurrentDelegations: 4, maxSelfScheduledJobsPerBot: 10, maxWakesPerRequest: 10 },
   },
   {
     type: "spend.stopped",

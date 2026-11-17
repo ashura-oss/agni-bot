@@ -12,6 +12,7 @@ import { setPolicyHooks } from "../src/policy/hooks";
 import { budgetStopMessage, budgetStopFromRefusal, money } from "../src/policy/budget-messages";
 import { startupS2, resetS2Startup } from "../src/startup/s2";
 import { runTaskTurn } from "../src/agent/task-loop";
+import { setRunCaps } from "../src/stores/policy-settings";
 import { createThread } from "../src/stores/threads";
 import { listAuditEvents } from "../src/stores/audit";
 import { startHarness, type Harness, type TestClient } from "./ws-harness";
@@ -54,6 +55,15 @@ describe("the spend frames are live after startup", () => {
     const ok = await client.next("spend.status.ok");
     expect(ok.caps).toEqual({ dayUsd: 2, perBotDayUsd: 1, perJobUsd: 0.5 });
     expect(ok.daySpentUsd).toBe(0);
+  });
+
+  test("spend.status carries the run caps from the real store, and a change shows in the next status", async () => {
+    const { client, h } = await start();
+    client.send({ type: "spend.status" });
+    expect((await client.next("spend.status.ok")).runCaps).toEqual({ rootJobWallMinutes: 30, maxConcurrentDelegations: 4, maxSelfScheduledJobsPerBot: 10, maxWakesPerRequest: 10 });
+    setRunCaps(h.db, { maxWakesPerRequest: 2 });
+    client.send({ type: "spend.caps.set", dayUsd: 3 });
+    expect((await client.next("spend.status.ok")).runCaps?.maxWakesPerRequest).toBe(2);
   });
 
   test("spend.caps.set changes the caps and tells everyone", async () => {

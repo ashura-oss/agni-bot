@@ -5,7 +5,7 @@
  */
 import { useEffect, useId, useState } from "react";
 import type { SpendCaps } from "@agni/protocol";
-import { money, safeLine, spendLine } from "@agni/client";
+import { money, runLimitLines, safeLine, spendLine } from "@agni/client";
 import { useAppModel, useAppSnapshot } from "../state/use-app-model";
 
 type Field = "dayUsd" | "perBotDayUsd" | "perJobUsd";
@@ -76,6 +76,8 @@ export function SpendingView() {
 
   const line = spendLine(spend);
   const spenders = (spend?.bots ?? []).filter((bot) => bot.spentUsd > 0);
+
+  const runLimits = spend?.runCaps ? runLimitLines(spend.runCaps) : null;
 
   return (
     <div className="settings-section spending-view">
@@ -161,6 +163,25 @@ export function SpendingView() {
           ) : null}
         </div>
       </form>
+
+      <div className="settings-group run-limits-group">
+        <h3>Run limits</h3>
+        {runLimits ? (
+          <ul className="spending-bots run-limits" aria-label="Run limits">
+            {runLimits.map((line) => (
+              <li key={line.label}>
+                <span>{line.label}</span>
+                <span>{line.value}</span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="settings-note">Run limits are not available right now.</p>
+        )}
+        <p className="settings-note">
+          Change these in a terminal with <code className="code">agni policy caps set</code>.
+        </p>
+      </div>
     </div>
   );
 }

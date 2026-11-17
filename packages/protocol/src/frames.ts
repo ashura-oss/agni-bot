@@ -303,6 +303,18 @@ export const SpendCapsSchema = z.object({
 });
 export type SpendCaps = z.infer<typeof SpendCapsSchema>;
 
+/**
+ * The run limits the owner sets with `agni policy caps set`. Read-only on the wire: no frame changes them.
+ * The time limit is in minutes (the unit the command takes); the three counts are whole numbers.
+ */
+export const RunCapsSchema = z.object({
+  rootJobWallMinutes: z.number().positive(),
+  maxConcurrentDelegations: z.number().int().positive(),
+  maxSelfScheduledJobsPerBot: z.number().int().positive(),
+  maxWakesPerRequest: z.number().int().positive(),
+});
+export type RunCapsInfo = z.infer<typeof RunCapsSchema>;
+
 export const TaskStatusSchema = z.enum(["open", "done", "snoozed"]);
 export const TaskWorkflowStatusSchema = z.enum(["not_started", "in_progress", "ai_review"]);
 export const DelegateStateSchema = z.enum(["none", "queued", "running", "needs_input", "done", "failed"]);
@@ -989,7 +1001,8 @@ export const ServerFrameSchema = z.discriminatedUnion("type", [
   /**
    * Today's spend against the caps (local day), answering `spend.status` and broadcast after
    * `spend.caps.set`. `daySpentUsd` and the bots' `spentUsd` count priced calls only;
-   * `unpricedCalls` says how many calls had no price. Additive in v2.
+   * `unpricedCalls` says how many calls had no price. `runCaps` is the owner's run limits, shown read-only;
+   * it is left out when the daemon could not read them. Additive in v2.
    */
   z.object({
     type: z.literal("spend.status.ok"),
@@ -1001,6 +1014,7 @@ export const ServerFrameSchema = z.discriminatedUnion("type", [
     daySpentUsd: z.number().nonnegative(),
     bots: z.array(z.object({ agentID: z.string(), spentUsd: z.number().nonnegative(), capUsd: z.number().positive().nullable() })),
     unpricedCalls: z.number().int().nonnegative(),
+    runCaps: RunCapsSchema.optional(),
   }),
   /**
    * A run was stopped because spending reached a cap (or could not be counted). `message` is the notice the owner
