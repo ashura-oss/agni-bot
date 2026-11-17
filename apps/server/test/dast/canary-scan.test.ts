@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { createCipheriv, randomBytes } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { scanFile, walkFiles } from "../../../../scripts/canary-scan";
@@ -253,11 +253,26 @@ describe("a file or folder the scan skipped is not a clean pass", () => {
     expect(run.err).toContain("big.bin");
   });
 
-  test("a file that cannot be statted is reported as skipped, not as clean", () => {
+  test("a path that is not a readable file is reported as skipped, not as clean", () => {
+    const home = makeHome();
     const skipped: string[] = [];
-    expect(scanFile(join(tmpdir(), "agni-canary-no-such-file.bin"), [CANARY], "file", undefined, skipped)).toEqual([]);
+    expect(scanFile(join(home.home, "scratch"), [CANARY], "file", undefined, skipped)).toEqual([]);
     expect(skipped).toHaveLength(1);
-    expect(skipped[0]).toContain("agni-canary-no-such-file.bin");
+    expect(skipped[0]).toContain("scratch");
+  });
+
+  test("a file that vanished between the walk and the scan is gone, not an error: it is noted on stderr and does not fail the scan", () => {
+    const skipped: string[] = [];
+    const notes: string[] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]) => void notes.push(args.join(" "));
+    try {
+      expect(scanFile(join(tmpdir(), "agni-canary-no-such-file.bin"), [CANARY], "file", undefined, skipped)).toEqual([]);
+    } finally {
+      console.error = original;
+    }
+    expect(skipped).toEqual([]);
+    expect(notes.join(" ")).toContain("agni-canary-no-such-file.bin");
   });
 
   test("a folder that cannot be listed is reported as skipped, not as empty", () => {
@@ -265,6 +280,33 @@ describe("a file or folder the scan skipped is not a clean pass", () => {
     expect(walkFiles(join(tmpdir(), "agni-canary-no-such-folder"), skipped)).toEqual([]);
     expect(skipped).toHaveLength(1);
     expect(skipped[0]).toContain("agni-canary-no-such-folder");
+  });
+});
+
+describe("entries that are neither a file nor a folder are not silently dropped", () => {
+  test("a junction (or symlink) out of the home to a folder holding the canary: exit 2, naming it, never 'clean'", async () => {
+    const home = makeHome();
+    const outside = mkdtempSync(join(tmpdir(), "agni-canary-outside-"));
+    dirs.push(outside);
+    writeFileSync(join(outside, "stash.txt"), `KEY=${CANARY}
+`);
+    symlinkSync(outside, join(home.home, "linked"), "junction");
+    const run = await secretsScan(home);
+    expect(run.code).toBe(2);
+    expect(run.err).toContain("linked");
+    expect(run.out).not.toContain("clean");
+  });
+
+  test("a link and a real leak together: the leak still exits 1 and the link is still named", async () => {
+    const home = makeHome();
+    const outside = mkdtempSync(join(tmpdir(), "agni-canary-outside-"));
+    dirs.push(outside);
+    symlinkSync(outside, join(home.home, "linked"), "junction");
+    writeFileSync(join(home.home, "config.env"), `KEY=${CANARY}
+`);
+    const run = await secretsScan(home);
+    expect(run.code).toBe(1);
+    expect(run.err).toContain("linked");
   });
 });
 

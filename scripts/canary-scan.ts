@@ -97,12 +97,15 @@ export function scanBuffer(bytes: Buffer, canaries: string[], sink: string, path
 /**
  * One file against every canary. A file that cannot be statted or read, or is over the size limit, is not
  * scanned: it is recorded in `skipped` (with the reason) so the caller can refuse to call the scan clean.
+ * A file that is gone (it was there when the walk listed it) is not a failure: a live server removes and
+ * renames files all the time (temporary files, rotated logs). It is noted on stderr and not counted.
  */
 export function scanFile(path: string, canaries: string[], sink: string, root?: string, skipped: string[] = []): FileHit[] {
   let size: number;
   try {
     size = statSync(path).size;
   } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return gone(path);
     skipped.push(`${path}: cannot stat (${(error as NodeJS.ErrnoException).code ?? "error"})`);
     return [];
   }
@@ -114,13 +117,26 @@ export function scanFile(path: string, canaries: string[], sink: string, root?: 
   try {
     bytes = readFileSync(path);
   } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return gone(path);
     skipped.push(`${path}: cannot read (${(error as NodeJS.ErrnoException).code ?? "error"})`);
     return [];
   }
   return scanBuffer(bytes, canaries, sink, root ? relative(root, path) || path : path);
 }
 
-/** Every file under `dir`, found without following links out of it. A folder that cannot be listed is recorded in `skipped`. */
+/** A file that no longer exists: nothing to scan, nothing to fail. */
+function gone(path: string): FileHit[] {
+  console.error(`note: ${path} was removed before it could be scanned (not counted as skipped)`);
+  return [];
+}
+
+/**
+ * Every file under `dir`, found without following links out of it. A folder that cannot be listed is recorded
+ * in `skipped`, and so is every entry that is neither a file nor a folder: a symbolic link or a Windows junction
+ * (never followed: it can point out of the home, or in a circle), a named pipe, a socket, a device. Dropping them
+ * quietly would let a link to a folder holding the secret read as a clean home. A folder removed during the walk
+ * (not the root) is gone, not an error.
+ */
 export function walkFiles(dir: string, skipped: string[] = []): string[] {
   const files: string[] = [];
   const visit = (current: string): void => {
@@ -128,6 +144,10 @@ export function walkFiles(dir: string, skipped: string[] = []): string[] {
     try {
       entries = readdirSync(current, { withFileTypes: true });
     } catch (error) {
+      if (current !== dir && (error as NodeJS.ErrnoException).code === "ENOENT") {
+        console.error(`note: ${current} was removed during the walk (not counted as skipped)`);
+        return;
+      }
       skipped.push(`${current}: cannot list (${(error as NodeJS.ErrnoException).code ?? "error"})`);
       return;
     }
@@ -135,6 +155,7 @@ export function walkFiles(dir: string, skipped: string[] = []): string[] {
       const full = join(current, entry.name);
       if (entry.isDirectory()) visit(full);
       else if (entry.isFile()) files.push(full);
+      else skipped.push(`${full}: ${entry.isSymbolicLink() ? "a link (symbolic link or junction), not followed" : "not a regular file or folder"}`);
     }
   };
   visit(dir);
