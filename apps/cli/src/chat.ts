@@ -52,6 +52,10 @@ export async function startChat(options: ChatOptions): Promise<void> {
   let pendingSend = false;
   let streamedHeader = false;
   let lastApprovalID: string | null = null;
+  // Cards marked `truncated` (the preview hides part of the call, or is too long to take in at a glance) cannot be allowed until the
+  // owner has been shown the full text (`approval.full`); the server refuses an allow otherwise.
+  const truncatedCards = new Set<string>();
+  const openedCards = new Set<string>();
   const pendingSecrets = new Map<string, Extract<ServerFrame, { type: "secret.request" }>>();
   let closing = false;
   let reconnecting = false;
@@ -138,9 +142,17 @@ export async function startChat(options: ChatOptions): Promise<void> {
         break;
       case "approval.request":
         lastApprovalID = frame.requestID;
+        if (frame.truncated) truncatedCards.add(frame.requestID);
         print(color.yellow(`[approval ${frame.requestID}] ${frame.action}`));
         print(indent(frame.preview));
+        if (frame.truncated) print(color.dim(`  this card is long: /approve ${frame.requestID} once|always shows the whole text first`));
         print(color.dim(`  answer: /approve ${frame.requestID} ${frame.buttons.join("|")}`));
+        break;
+      case "approval.full.ok":
+        openedCards.add(frame.requestID);
+        print(color.yellow(`[approval ${frame.requestID}] the whole call${frame.cut ? " (cut: it is longer than the server will show)" : ""}`));
+        print(indent(frame.text));
+        print(color.dim(`  answer: /approve ${frame.requestID} once|always|reject`));
         break;
       case "secret.request":
         pendingSecrets.set(frame.requestID, frame);
@@ -368,6 +380,12 @@ export async function startChat(options: ChatOptions): Promise<void> {
         }
         if (!["once", "always", "reject"].includes(decision)) {
           print("decision must be one of: once, always, reject");
+          break;
+        }
+        if (decision !== "reject" && truncatedCards.has(requestID) && !openedCards.has(requestID)) {
+          // Allowing a card that hides part of the call needs the whole text read first: ask for it, and let the owner answer after.
+          socket.send({ type: "approval.full", requestID });
+          print(color.dim(`approval ${requestID} is long: fetching the whole text; answer again once you have read it`));
           break;
         }
         socket.send({ type: "approve.reply", requestID, decision: decision as "once" | "always" | "reject" });
