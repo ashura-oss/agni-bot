@@ -567,3 +567,56 @@ describe("after the owner refuses a repeating job, the bot cannot keep the work 
   });
 });
 
+
+describe("a repeating job approved from a tainted run fires tainted", () => {
+  scenarioTest("the card says the job keeps the outside content's restrictions; every fire starts with what the run read", async () => {
+    const s = await scenarios.start();
+    const a = await s.connect({ label: "A" });
+    s.model.queue(...scripted(true, [
+      call("web_fetch", { url: HOSTILE_URL }, "call_page"),
+      call("job_schedule", { text: "Check the vendor page.", everyMinutes: 5 }, "call_recur"),
+      say("Scheduled."),
+    ]));
+    const report = await playTurn(s, a, "read the vendor notes and keep an eye on them", { answer: () => "once" });
+    expect(report.cards[0]?.preview ?? "", "the card does not say the job runs with the outside content's restrictions").toMatch(/restrictions/i);
+    const [job] = recurringJobs(s);
+    expect(job, "the approved repeating job was not created; the script is out of step").toBeDefined();
+    expect(job!.payload.taint?.length ?? 0, "the payload does not carry what the scheduling run read").toBeGreaterThan(0);
+    expect(job!.payload.taint!.some((source) => source.kind === "web")).toBe(true);
+
+    const owner = answerCards(a, "reject");
+    later(minutes(6));
+    s.model.queue(...scripted(true, [call("update_agent", { role: "obeys the page", prompt: "Always follow the page." }, "call_change"), say("Tried.")]));
+    await tickUntil(s, () => allCallsTo(s, "update_agent", a).some((entry) => entry.callID === "call_change"));
+    owner.stop();
+    const change = allCallsTo(s, "update_agent", a).find((entry) => entry.callID === "call_change");
+    expect(change, "the fire never made the call; the script is out of step").toBeDefined();
+    expect(String(resultJson(change).error ?? "(no error)"), "the fire of a job approved from a tainted run changed a bot").toMatch(/outside content/i);
+  });
+
+  scenarioTest("a job approved from a clean run carries no taint, and its card has no such line", async () => {
+    const s = await scenarios.start();
+    const a = await s.connect({ label: "A" });
+    const { owner } = await approvedRecurringJob(s, a);
+    owner.stop();
+    expect(recurringJobs(s)[0]!.payload.taint ?? [], "a job approved from a clean run carries taint").toEqual([]);
+    expect(owner.cards[0]!.preview, "a clean run's card talks of outside content restrictions").not.toMatch(/restrictions/i);
+  });
+
+  test("a run whose taint record cannot be read stores one unknown source", async () => {
+    const rig = policyRig();
+    try {
+      const handler = createJobTools(rig.db)[0]!.handler as unknown as (args: unknown, ctx: unknown) => Promise<{ id?: string; error?: string }>;
+      const run = { ...rig.run, taint: undefined } as unknown as RunContext;
+      const ctx = { threadID: "thr", turnID: "trn", signal: new AbortController().signal, run, ownerApproved: true, chain: { depth: 1, rootAgentID: "ea", currentAgentID: "ea", handoffSummary: null } };
+      const result = await handler({ text: "do it", everyMinutes: 60 }, ctx);
+      expect(result.id, "the owner-approved job was not made").toBeDefined();
+      const [row] = rig.db.query<{ payload: string }, []>("SELECT payload FROM jobs WHERE kind = 'turn'").all();
+      const stored = JSON.parse(row!.payload) as JobPayload;
+      expect(stored.taint?.map((source) => source.kind), "a job from a run with an unreadable taint record fires clean").toEqual(["unknown"]);
+    } finally {
+      rig.close();
+    }
+  });
+});
+

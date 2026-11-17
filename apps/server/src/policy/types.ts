@@ -189,6 +189,11 @@ export interface ApprovalCard {
    * sentence saying why the owner is asked. "Always allow" is off for such a card, and no stored rule answers it.
    */
   standingRule?: string;
+  /**
+   * The standing rule is asked of a run that has read outside text, so what it starts will run with that text's restrictions
+   * from its first step. The card says so.
+   */
+  standingTainted?: boolean;
 }
 
 /** Why a call was refused, as a stable code for tests, the audit trail and the model's error. */

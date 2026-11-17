@@ -238,6 +238,7 @@ function cardLead(card: ApprovalCard, bot: string): string {
   // First: the owner said no to something in this run, and this command may reach it (policy/engine.ts).
   if (card.refusedRun) lines.push(escapeUnsafe(card.refusedRun));
   if (card.standingRule) lines.push(escapeUnsafe(card.standingRule));
+  if (card.standingTainted) lines.push("If you approve, every run of this job starts with the restrictions of the outside content this task read: it may not change bots, schedules or rules, and it asks you before it sends anything out.");
   const [newest, ...older] = card.sources;
   if (newest) {
     const say = SOURCE_LINE[newest.kind] ?? SOURCE_LINE.unknown!;

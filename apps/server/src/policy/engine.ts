@@ -155,6 +155,7 @@ function judge(run: RunContext, input: PolicyInput, record: boolean): Decision {
     operation: assessment.operation,
     ...(refusedRun ? { refusedRun } : {}),
     ...(standing !== null ? { standingRule: standing } : {}),
+    ...(standing !== null && tainted ? { standingTainted: true } : {}),
   };
   return { action: "ask", reason: why, assessment: { ...assessment, tier }, card };
 }

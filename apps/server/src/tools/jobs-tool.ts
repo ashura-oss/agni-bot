@@ -18,7 +18,8 @@ import {
 } from "../stores/jobs";
 import { canonicalAgentID } from "../agent/personas";
 import { describeSchedule, nextDailyRun, parseDay, parseWallClock } from "../jobs/schedule";
-import { isPeerPrincipal, isTainted } from "../policy/context";
+import { isPeerPrincipal, isTainted, packTaint, unknownTaint } from "../policy/context";
+import type { RunContext, TaintSource } from "../policy/types";
 import { denialScope } from "../policy/denials";
 import { audit } from "../policy/audit-sink";
 import { describeRecurring, isRecurringSchedule, standingRuleOrigin } from "../policy/standing-rules";
@@ -113,6 +114,17 @@ export interface ScheduledFrom {
   createdByRequest?: string;
   /** For the audit row of a repeating job: the bot's turn, and how the job came to be allowed. */
   created?: { turnID?: string; jobID?: string | null; approval: "own_turn" | "owner_card" };
+  /**
+   * What the scheduling run had read, when it had read outside text (or could not say): every run of the job starts with it, so a job
+   * the owner approved from such a run does not shed its restrictions. Absent for a run that read nothing outside.
+   */
+  taint?: TaintSource[];
+}
+
+/** What a job made by this run must start with, or undefined when the run read nothing outside. A record that cannot be read is one unknown source. */
+function carriedTaint(run: RunContext | undefined): TaintSource[] | undefined {
+  if (!run || !isTainted(run)) return undefined;
+  return Array.isArray(run.taint?.sources) && run.taint.sources.length > 0 ? packTaint(run) : [unknownTaint("a run with no record of what it had read")];
 }
 
 /**
@@ -127,7 +139,7 @@ function inheritedRoot(ctx: ToolContext): RequestRoot | undefined {
 }
 
 export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: string, from: ScheduledFrom = {}): JobScheduleResult {
-  const { root, denialRoot, createdByRequest, created } = from;
+  const { root, denialRoot, createdByRequest, created, taint } = from;
   const requested = args.agentID?.trim();
   if (requested && canonicalAgentID(requested) !== canonicalAgentID(callerAgentID)) {
     throw new Error("an agent may only schedule jobs for itself");
@@ -154,6 +166,8 @@ export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: 
     notify: args.notify !== false,
     // The owner's refusals in the run that scheduled it hold in every run of this job, for good (what the run delegates, wakes and schedules too).
     ...(denialRoot ? { denialRoot } : {}),
+    // What the scheduling run read stays with the job: each fire starts as tainted as that run was.
+    ...(taint && taint.length > 0 ? { taint } : {}),
   };
 
   let runAt: string;
@@ -363,6 +377,7 @@ export function createJobTools(db: Database): ToolDefinition<unknown, unknown>[]
         }, callerOf(ctx), {
           ...(ctx.run ? { denialRoot: denialScope(ctx.run), ...(recurring ? { createdByRequest: denialScope(ctx.run) } : {}) } : {}),
           root: inheritedRoot(ctx),
+          taint: carriedTaint(ctx.run),
           created: { turnID: ctx.turnID, jobID: ctx.run?.jobID ?? null, approval: ctx.ownerApproved === true ? "owner_card" : "own_turn" },
         });
       },
