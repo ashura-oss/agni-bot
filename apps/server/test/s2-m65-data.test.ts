@@ -1,14 +1,18 @@
 /**
- * Sprint 2, fix round L (E): what migration 65 does to the data already there.
+ * Sprint 2, fix round L (E, H): what migration 65 does to the data and the indexes already there.
  *
  *  - E: a job the owner made with `agni job add` before the owner bit existed carries no marker, and now reads as a bot's. The migration
  *    stamps `ownerOnly` on the queued turn jobs that are exactly what a run treats as the owner's (`principalOf`): no `inputRole`, `peer`,
  *    `wakeKey`, `delegationTaskID` and no `scheduledBy`. Nothing a bot made is touched.
+ *  - H: the day cap counts calls whose cost is unknown. A covering index on (created_at, call_kind, cost_usd) lets that count read the index
+ *    alone instead of every row of the day.
  */
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
+import { openDatabase } from "../src/db";
 import { MIGRATIONS } from "../src/db/migrations";
 import { readCarried } from "../src/policy/carry";
+import { unknownCostCallsSince } from "../src/stores/usage";
 
 let db: Database | undefined;
 afterEach(() => { db?.close(); db = undefined; });
@@ -93,5 +97,29 @@ describe("migration 65 stamps the owner's own jobs", () => {
     db.exec(m65());
     expect(readCarried(payloadOf(db, "job_owner"))).toMatchObject({ ownerOnly: true, taint: [] });
     expect(readCarried(payloadOf(db, "job_bot")).ownerOnly).toBe(false);
+  });
+});
+
+describe("the day cap's count of calls with an unknown cost reads an index, not the day's rows", () => {
+  // The query `unknownCostCallsSince` makes with no filter (the day's whole count).
+  const SQL = "SELECT COUNT(*) AS n FROM usage_ledger WHERE created_at >= ? AND call_kind IS NOT NULL AND cost_usd IS NULL";
+
+  test("the plan is a covering index", () => {
+    db = openDatabase(":memory:");
+    const plan = db.query<{ detail: string }, [string]>(`EXPLAIN QUERY PLAN ${SQL}`).all("2026-11-17T00:00:00.000Z").map((row) => row.detail).join("\n");
+    expect(plan, `the count does not use a covering index:\n${plan}`).toMatch(/USING COVERING INDEX idx_usage_created_kind_cost/);
+  });
+
+  test("and it counts what it should", () => {
+    db = openDatabase(":memory:");
+    const row = (id: string, at: string, kind: string | null, cost: number | null): void => {
+      db!.run("INSERT INTO usage_ledger (id, provider, model, input_tokens, output_tokens, day, created_at, call_kind, cost_usd) VALUES (?, 'p', 'm', 1, 1, ?, ?, ?, ?)", [id, at.slice(0, 10), at, kind, cost]);
+    };
+    row("u1", "2026-11-17T08:00:00.000Z", "turn", null);
+    row("u2", "2026-11-17T09:00:00.000Z", "side", null);
+    row("u3", "2026-11-17T09:30:00.000Z", "turn", 0.01);
+    row("u4", "2026-11-17T10:00:00.000Z", null, null);
+    row("u5", "2026-11-16T10:00:00.000Z", "turn", null);
+    expect(unknownCostCallsSince(db, "2026-11-17T00:00:00.000Z")).toBe(2);
   });
 });

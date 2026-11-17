@@ -25,11 +25,13 @@ import type { Migration } from "../migrations";
  * `turns.ended_by` marks a turn the run's time limit ended. Its `stop_reason` stays `timeout` (that is the
  * protocol's word for it), but the nightly harness review must not read it as a model that is too slow.
  *
- * One more thing belongs to the same round, to the data already there (fix round L):
+ * Two more things belong to the same round, one to the data and one to an index (fix round L):
  *  - A job the owner made with `agni job add` before the owner bit existed (`ownerOnly`, `policy/carry.ts`) has no marker, and now reads as a
  *    bot's: its follow-ups ask. The queued turn jobs that are exactly what a
  *    run treats as the owner's (`principalOf` in `agent/task-loop.ts`: no `inputRole`, `peer`, `wakeKey` or `delegationTaskID`, and no
  *    `scheduledBy`) are stamped. A job that already says whether it is the owner's keeps what it says; nothing a bot made is touched.
+ *  - The day cap counts the calls whose cost is unknown (`unknownCostCallsSince`). A covering index on (created_at, call_kind, cost_usd)
+ *    lets that count read the index alone, not every row of the day.
  */
 export const migration: Migration | null = {
   id: 65,
@@ -58,5 +60,6 @@ export const migration: Migration | null = {
         AND json_type(payload, '$.inputRole') IS NULL AND json_type(payload, '$.peer') IS NULL
         AND json_type(payload, '$.wakeKey') IS NULL AND json_type(payload, '$.delegationTaskID') IS NULL
         AND json_type(payload, '$.scheduledBy') IS NULL;
+    CREATE INDEX idx_usage_created_kind_cost ON usage_ledger(created_at, call_kind, cost_usd);   -- the day cap's count of calls with no known cost
   `,
 };
