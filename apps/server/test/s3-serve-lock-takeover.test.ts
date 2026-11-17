@@ -3,11 +3,11 @@
  * file that is left is the winner's. The stale file removal must not be a read followed by a delete, because a process
  * that reads it, loses the race to a faster one that deletes it and creates its own, would then delete the new lock.
  */
-import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { afterEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { removeServeLockIfUnchanged, serveLockPath } from "../src/startup/s3-serve-lock";
+import { ServeLockError, removeServeLockIfUnchanged, serveLockPath } from "../src/startup/s3-serve-lock";
 
 let roots: string[] = [];
 const fresh = (): string => {
@@ -93,4 +93,77 @@ test("the lock that was judged is removed, and no side file is left behind", () 
   expect(removeServeLockIfUnchanged(path, text)).toBe(true);
   expect(existsSync(path)).toBe(false);
   expect(new Bun.Glob("*").scanSync(home).next().done).toBe(true);
+});
+
+const lockText = (token: string): string => `${JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), token })}\n`;
+const errnoError = (code: string): Error => Object.assign(new Error(code), { code });
+
+describe("a lock that was set aside and cannot be put back because another one took its name", () => {
+  test("fails closed: the set-aside lock stays in its side file, the newer name is untouched, and the error says so", () => {
+    const home = fresh();
+    const path = serveLockPath(home);
+    const moved = lockText("second");
+    const third = lockText("third");
+    writeFileSync(path, moved);
+    // Between the rename away and the put-back, a third process creates a lock under the name.
+    const afterSetAside = (): void => writeFileSync(path, third);
+    let error: unknown;
+    try {
+      removeServeLockIfUnchanged(path, lockText("judged"), { afterSetAside });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(ServeLockError);
+    expect(readFileSync(path, "utf8")).toBe(third);
+    const sideFiles = readdirSync(home).filter((name) => name.endsWith(".removing"));
+    expect(sideFiles).toHaveLength(1);
+    expect(readFileSync(join(home, sideFiles[0]!), "utf8")).toBe(moved);
+    expect((error as Error).message).toContain(sideFiles[0]!);
+  });
+});
+
+describe("renaming the lock away is retried while another process briefly holds it (EPERM/EBUSY on Windows)", () => {
+  test.each(["EPERM", "EBUSY"])("%s twice, then it works: the lock that was judged is removed", (code) => {
+    const home = fresh();
+    const path = serveLockPath(home);
+    const text = lockText("old");
+    writeFileSync(path, text);
+    let calls = 0;
+    const rename = (from: string, to: string): void => {
+      if (++calls <= 2) throw errnoError(code);
+      renameSync(from, to);
+    };
+    expect(removeServeLockIfUnchanged(path, text, { rename })).toBe(true);
+    expect(calls).toBe(3);
+    expect(existsSync(path)).toBe(false);
+  });
+
+  test("a rename that keeps failing gives up with its own error, and the lock is untouched", () => {
+    const home = fresh();
+    const path = serveLockPath(home);
+    const text = lockText("old");
+    writeFileSync(path, text);
+    let calls = 0;
+    const rename = (): void => {
+      calls++;
+      throw errnoError("EPERM");
+    };
+    expect(() => removeServeLockIfUnchanged(path, text, { rename })).toThrow("EPERM");
+    expect(calls).toBeGreaterThan(1);
+    expect(calls).toBeLessThanOrEqual(6);
+    expect(readFileSync(path, "utf8")).toBe(text);
+  });
+
+  test("another error is not retried", () => {
+    const home = fresh();
+    const path = serveLockPath(home);
+    writeFileSync(path, lockText("old"));
+    let calls = 0;
+    const rename = (): void => {
+      calls++;
+      throw errnoError("EACCES");
+    };
+    expect(() => removeServeLockIfUnchanged(path, lockText("old"), { rename })).toThrow("EACCES");
+    expect(calls).toBe(1);
+  });
 });

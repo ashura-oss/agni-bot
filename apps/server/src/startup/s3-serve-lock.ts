@@ -142,21 +142,53 @@ function ownedBy(path: string, pid: number, token: string | undefined): boolean 
   }
 }
 
+/** Test seams for `removeServeLockIfUnchanged`: nothing in the product passes them. */
+export interface RemoveServeLockHooks {
+  /** Stands in for `renameSync`. */
+  rename?: (from: string, to: string) => void;
+  /** Runs once the lock has been moved aside, before it is judged: the gap another process can use. */
+  afterSetAside?: (aside: string) => void;
+}
+
+/** A rename a reader or scanner briefly holds up fails with EPERM or EBUSY on Windows: try again, as `recordEndpoint` does. */
+function renameWithRetry(rename: (from: string, to: string) => void, from: string, to: string): void {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      rename(from, to);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if ((code !== "EPERM" && code !== "EBUSY") || attempt >= 4) throw error;
+      pause(25);
+    }
+  }
+}
+
 /**
  * Remove the lock file only if it is still the one that was read (it says `raw`). Reading and then deleting is not safe:
  * between the two a faster process can delete the file and create its own lock, and the delete would then take that one.
  * So the file is first renamed to a name of its own (one process's rename takes it, any other finds nothing), the renamed
- * file is checked against `raw`, and only then deleted. A file that is not the one that was judged is put back, unless
- * a newer lock already has the name: then that one stays and the renamed file is dropped. True when the lock was removed.
+ * file is checked against `raw`, and only then deleted. A file that is not the one that was judged is put back. True when
+ * the lock was removed.
+ *
+ * If it cannot be put back because a lock was created under the name in the meantime, both are kept and this throws
+ * `ServeLockError`: the one that was moved aside stays in its side file (named in the message), the newer one keeps the
+ * name, and the caller refuses to go on. That is the one window left open, and it needs three processes at once: A reads a
+ * stale lock, B (faster) replaces it with its own, and C creates a lock in the instant A has B's file moved aside. Neither
+ * B's nor C's lock is deleted, so nothing is lost, but B and C can both believe they hold the lock until a person clears it
+ * (a second server is still stopped by the port). Closing it fully would take an operating-system lock held across the
+ * rename, which the commands that read this file (`vault migrate`, `daemon`) cannot share.
  */
-export function removeServeLockIfUnchanged(path: string, raw: string): boolean {
+export function removeServeLockIfUnchanged(path: string, raw: string, hooks: RemoveServeLockHooks = {}): boolean {
+  const rename = hooks.rename ?? renameSync;
   const aside = `${path}.${randomUUID()}.removing`;
   try {
-    renameSync(path, aside);
+    renameWithRetry(rename, path, aside);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw error;
   }
+  hooks.afterSetAside?.(aside);
   let text: string | undefined;
   try {
     text = readFileSync(aside, "utf8");
@@ -175,14 +207,17 @@ export function removeServeLockIfUnchanged(path: string, raw: string): boolean {
     // A hard link refuses to replace a lock that was created in the meantime; a rename would overwrite it.
     linkSync(aside, path);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-      try {
-        renameSync(aside, path);
-      } catch {
-        throw new Error(`the server lock ${path} was set aside as ${aside} and could not be put back; rename it back if no other Agni server is running`);
-      }
-      return false;
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw new ServeLockError(
+        `the server lock ${path} was replaced while a stale lock was being removed, and the lock that was moved aside is kept as ${aside}. Another Agni server may be starting on this home: check, then delete both files if no Agni server is running.`,
+      );
     }
+    try {
+      renameWithRetry(rename, aside, path);
+    } catch {
+      throw new ServeLockError(`the server lock ${path} was set aside as ${aside} and could not be put back; rename it back if no other Agni server is running`);
+    }
+    return false;
   }
   try {
     unlinkSync(aside);
@@ -249,6 +284,7 @@ export function acquireServeLock(options: ServeLockOptions = {}): ServeLock {
       try {
         removeServeLockIfUnchanged(path, raw);
       } catch (error) {
+        if (error instanceof ServeLockError) throw error;
         throw new ServeLockError(`the stale server lock ${path} could not be removed: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
