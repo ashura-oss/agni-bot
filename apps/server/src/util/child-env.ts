@@ -13,8 +13,10 @@
  *  - "pdf-worker": parses an untrusted file. Core names only.
  *  - "daemon": the server itself, started by `agni daemon start`. Needs its
  *    own settings (`AGNI_*`), the provider keys the owner exported
- *    (`providerKeyEnvNames()`), the mail settings, and the owner's PATH (it
- *    launches the owner's MCP tools). It is never reachable by the model.
+ *    (`providerKeyEnvNames()`), the mail settings, the names the key store
+ *    needs (the keyring's bus, the runtime and credential folders), and the
+ *    owner's PATH (it launches the owner's MCP tools). It is never reachable
+ *    by the model.
  *
  * A key stored in `config.env` needs no name here: the server loads that file
  * itself. Custom endpoints that name their own key variable are loaded the
@@ -47,6 +49,13 @@ const NETWORK_NAMES = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "SSL_CERT_FILE",
 const SSH_AGENT_NAMES = ["SSH_AUTH_SOCK"];
 /** The server only: also the SOCKS/all-protocol proxy. */
 const DAEMON_NETWORK_NAMES = [...NETWORK_NAMES, "ALL_PROXY"];
+/**
+ * The server only: what the key store needs. libsecret talks to the owner's keyring over the session bus
+ * (`DBUS_SESSION_BUS_ADDRESS`, found through `XDG_RUNTIME_DIR`), and the systemd passphrase for the vault arrives in the
+ * folder `CREDENTIALS_DIRECTORY` names. None is a secret, but each is a door to one: a command the model wrote must not
+ * be able to reach the keyring or that folder, so no other kind of child gets them. (`AGNI_TEST_RUN` passes as `AGNI_*`.)
+ */
+const DAEMON_KEYSTORE_NAMES = ["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "CREDENTIALS_DIRECTORY"];
 /** The server only: its own settings, mail settings, and each provider's base URL and model (`GROQ_MODEL`, `OPENROUTER_BASE_URL`, ...). */
 const DAEMON_PATTERNS = [/^AGNI_/i, /^GMAIL_/i, /^[A-Z0-9]+_(?:BASE_URL|MODEL)$/i];
 
@@ -56,7 +65,7 @@ function lowerSet(names: string[]): Set<string> {
 
 const CORE = lowerSet(CORE_NAMES);
 const SHELL_EXTRA = lowerSet([...WINDOWS_PLATFORM_NAMES, ...POSIX_IDENTITY_NAMES, ...NETWORK_NAMES, ...SSH_AGENT_NAMES]);
-const DAEMON_EXTRA = lowerSet([...WINDOWS_PLATFORM_NAMES, ...POSIX_IDENTITY_NAMES, ...DAEMON_NETWORK_NAMES]);
+const DAEMON_EXTRA = lowerSet([...WINDOWS_PLATFORM_NAMES, ...POSIX_IDENTITY_NAMES, ...DAEMON_NETWORK_NAMES, ...DAEMON_KEYSTORE_NAMES]);
 
 function isAllowed(kind: ChildKind, name: string): boolean {
   const lower = name.toLowerCase();

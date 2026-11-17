@@ -152,6 +152,22 @@ describe("childEnv allowlist", () => {
     expect(env.RANDOM_THING).toBeUndefined();
   });
 
+  test("daemon: the names the key store needs pass (the keyring's bus, the runtime folder, the systemd credential folder); no other kind of child gets them", () => {
+    const source = {
+      DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus", XDG_RUNTIME_DIR: "/run/user/1000", CREDENTIALS_DIRECTORY: "/run/credentials/agni.service",
+      AGNI_TEST_RUN: "1", PATH: "/usr/bin", HOME: "/home/o",
+    };
+    const daemon = childEnv("daemon", { source, platform: "linux" });
+    expect(daemon).toMatchObject({
+      DBUS_SESSION_BUS_ADDRESS: "unix:path=/run/user/1000/bus", XDG_RUNTIME_DIR: "/run/user/1000", CREDENTIALS_DIRECTORY: "/run/credentials/agni.service", AGNI_TEST_RUN: "1",
+    });
+    // A command the model wrote must not reach the owner's keyring or the credential folder, so these stay the daemon's alone.
+    for (const kind of ["shell", "pdf-worker"] as const) {
+      const env = childEnv(kind, { source, platform: "linux" });
+      for (const name of ["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "CREDENTIALS_DIRECTORY"]) expect({ kind, name, value: env[name] }).toEqual({ kind, name, value: undefined });
+    }
+  });
+
   test("daemon: the owner's PATH passes (the server launches the owner's MCP tools) but loses empty, '.', and relative entries", () => {
     const env = childEnv("daemon", { source: { PATH: "/usr/bin::.:bin:/opt/tools:./x" }, platform: "linux" });
     expect(env.PATH).toBe("/usr/bin:/opt/tools");
