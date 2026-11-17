@@ -107,18 +107,20 @@ export function reconcilePins(db: Database, plugin: string, offered: PinCandidat
       }
     }
     for (const item of offered) {
-      // The definition is the server's own text, kept so the owner can see a diff. A server that echoes the
-      // bearer into a description must not leave it here; `hash` is of the definition as offered, so masking
-      // the copy changes no verdict. Masked as JSON (each string on its own): a registered value that equals
-      // JSON syntax would corrupt the stored copy if it were masked as one blob.
-      const shown = redactJSONText(item.definition);
-      if (!trusted) {
-        db.run("INSERT INTO mcp_tool_pins (plugin_id, tool_name, status, hash, definition, recorded_at) VALUES (?, ?, 'approved', ?, ?, ?)", [plugin, item.tool, item.hash, shown, stamp]);
+      // Nothing to store for a tool that still matches its approved pin. (An untrusted plugin has no approved
+      // pins at this point: they were cleared above.)
+      if (approved.get(item.tool) === item.hash) {
+        db.run("DELETE FROM mcp_tool_pins WHERE plugin_id = ? AND tool_name = ? AND status = 'pending'", [plugin, item.tool]);
         verdicts.set(item.tool, "approved");
         continue;
       }
-      if (approved.get(item.tool) === item.hash) {
-        db.run("DELETE FROM mcp_tool_pins WHERE plugin_id = ? AND tool_name = ? AND status = 'pending'", [plugin, item.tool]);
+      // The definition is the server's own text, kept so the owner can see a diff. A server that echoes the
+      // bearer into a description must not leave it here; `hash` is of the definition as offered, so masking
+      // the copy changes no verdict. Masked as JSON (each string on its own): a registered value that equals
+      // JSON syntax would corrupt the stored copy if it were masked as one blob. Only for a row that is written.
+      const shown = redactJSONText(item.definition);
+      if (!trusted) {
+        db.run("INSERT INTO mcp_tool_pins (plugin_id, tool_name, status, hash, definition, recorded_at) VALUES (?, ?, 'approved', ?, ?, ?)", [plugin, item.tool, item.hash, shown, stamp]);
         verdicts.set(item.tool, "approved");
         continue;
       }
