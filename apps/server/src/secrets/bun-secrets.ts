@@ -34,14 +34,19 @@ function unavailable(error: unknown, platform = process.platform): VaultError {
   return new VaultError("KEYSTORE_UNAVAILABLE", `The operating system's credential store could not be used (${why}).${hint}`, { cause: error });
 }
 
+/** The variable the test preload sets. `loadHomeEnv` never reads it from `config.env`, so a real server cannot be switched into a test run that way. */
+export const TEST_RUN_VARIABLE = "AGNI_TEST_RUN";
+
 /**
- * Under a test run (`NODE_ENV=test`, which `bun test` sets and a child process a test starts inherits) the
- * product's own entry in the real credential store is off limits: a test that forgot the in-memory override
- * would create or read the owner's vault key. A test that really needs the store names a service of its own.
+ * Under a test run (`AGNI_TEST_RUN=1`, which the test preload sets, or `NODE_ENV=test`) the product's own entry in the
+ * real credential store is off limits: a test that forgot the in-memory override would create or read the owner's
+ * vault key. `bun test` does not replace a `NODE_ENV` that is already set, so `NODE_ENV` alone cannot be relied on;
+ * a child process a test starts inherits both. A test that really needs the store names a service of its own.
  */
 function refuseInTestRun(service: string): void {
-  if (process.env.NODE_ENV !== "test" || service !== DEFAULT_KEYSTORE_SERVICE) return;
-  throw new VaultError("KEYSTORE_UNAVAILABLE", "The operating system's credential store is not available to a test run (NODE_ENV=test). Install a test keystore with setKeyStoreOverride, or pass a service name of your own.");
+  if (service !== DEFAULT_KEYSTORE_SERVICE) return;
+  if (process.env[TEST_RUN_VARIABLE] !== "1" && process.env.NODE_ENV !== "test") return;
+  throw new VaultError("TEST_RUN", "This is a test run, and a test run may not use the operating system's credential store. Install a test keystore with setKeyStoreOverride, or pass a service name of your own.");
 }
 
 export function createBunSecretsKeyStore(options: { service?: string } = {}): KeyStore {

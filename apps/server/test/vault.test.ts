@@ -344,7 +344,9 @@ describe("keystore selection", () => {
     // Choosing the OS keystore is refused under NODE_ENV=test (s3-keystore-test-guard.test.ts). Building one touches
     // nothing until it is used, so the platform rules can be checked with the guard lifted for these lines only.
     const nodeEnv = process.env.NODE_ENV;
+    const testRun = process.env.AGNI_TEST_RUN;
     process.env.NODE_ENV = "production";
+    delete process.env.AGNI_TEST_RUN;
     try {
       expect(selectKeyStore({ env: {}, platform: "win32" }).kind).toBe("bun-secrets");
       expect(selectKeyStore({ env: {}, platform: "darwin" }).kind).toBe("bun-secrets");
@@ -357,6 +359,8 @@ describe("keystore selection", () => {
     } finally {
       if (nodeEnv === undefined) delete process.env.NODE_ENV;
       else process.env.NODE_ENV = nodeEnv;
+      if (testRun === undefined) delete process.env.AGNI_TEST_RUN;
+      else process.env.AGNI_TEST_RUN = testRun;
       setKeyStoreOverride(createMemoryKeyStore());
     }
   });

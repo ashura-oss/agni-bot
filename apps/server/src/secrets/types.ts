@@ -74,7 +74,9 @@ export type VaultErrorCode =
   /** The vault file or its folder could not be made owner-only or written. */
   | "WRITE_FAILED"
   /** Another process holds the vault write lock and did not let go. */
-  | "LOCK_TIMEOUT";
+  | "LOCK_TIMEOUT"
+  /** A test run asked for the operating system's credential store under the product's own service name. */
+  | "TEST_RUN";
 
 /** Thrown by every vault and keystore operation. The message is safe to show the owner and never holds a secret. */
 export class VaultError extends Error {

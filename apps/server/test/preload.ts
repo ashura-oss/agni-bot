@@ -3,6 +3,10 @@ import { clearSecretsForTests } from "../src/util/redact-core.ts";
 import { Router } from "../src/models/router.ts";
 import { createMemoryKeyStore, setKeyStoreOverride } from "../src/secrets";
 
+// A test run is marked here, not by NODE_ENV: `bun test` leaves a NODE_ENV that is already set as it is, so the
+// guard that keeps tests out of the real credential store (secrets/bun-secrets.ts) must not depend on it.
+process.env.AGNI_TEST_RUN = "1";
+
 // Retries still run in tests, just without the 2s wait between them.
 Router.retryBackoffMs = 0;
 

@@ -65,6 +65,9 @@ export function loadHomeEnv(env: Env = process.env): void {
   // Only vault mode needs the classifier, so file mode never reads providers.json here.
   const isSecret = mode === "vault" ? secretClassifier({ env, home: agniHome(env) }) : undefined;
   for (const [key, value] of Object.entries(values)) {
+    // Only the test preload marks a run as a test run: never a file the daemon reads, or a real server could be
+    // switched into a mode where it refuses the credential store.
+    if (key === "AGNI_TEST_RUN") continue;
     if (isSecret?.(key, value)) continue;
     if (!env[key]) env[key] = value;
   }
