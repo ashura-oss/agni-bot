@@ -19,6 +19,8 @@ import {
   pageOrigin,
   websocketURL,
   type AgentInfo,
+  answerNeedsFullText,
+  READ_FIRST,
   type ApprovalRow,
   type ApprovalRuleInfo,
   safeLine,
@@ -179,6 +181,11 @@ export class AppModel {
    * error names no card, so it is only pinned to one when exactly one answer is outstanding.
    */
   private answered = new Set<string>();
+  /**
+   * Allow answers on their way: the card is hidden the moment the send succeeds, so when the daemon refuses an answer
+   * without naming the card (`approval_not_opened`), these are the cards to give back.
+   */
+  private allowing = new Set<string>();
   /**
    * Counts connection attempts (one per hello). A card is stamped with the count when it
    * arrives, so after a restart the cards the new process re-sent can be told from the
@@ -1086,17 +1093,40 @@ export class AppModel {
 
   answer(approval: ApprovalRow, decision: string): void {
     // A card the daemon has closed (answered elsewhere, expired) is gone: nothing to send.
-    if (!this.conversation.approvals.some((candidate) => candidate.id === approval.id)) return;
+    const row = this.conversation.approvals.find((candidate) => candidate.id === approval.id);
+    if (!row) return;
+    // An Allow on a card whose full text was not opened is never sent; Deny always is.
+    if (answerNeedsFullText(row, decision)) {
+      row.notice = READ_FIRST;
+      this.publish();
+      return;
+    }
     this.reply(
       approval.id,
       { type: "approve.reply", requestID: approval.id, decision: decision as "once" | "always" | "reject" },
       () => {
         this.conversation.resolveApproval(approval.id, decision);
+        if (decision !== "reject") this.allowing.add(approval.id);
         // "Always allow" makes a rule: the reply is already on the wire, so the list asked for
         // next comes back with it.
         if (decision === "always") this.refreshApprovalRules();
       },
     );
+  }
+
+  /** Ask the daemon for the whole call behind a long card; Allow stays locked until `approval.full.ok` comes. */
+  openApprovalFull(approval: ApprovalRow): void {
+    const row = this.conversation.approvals.find((candidate) => candidate.id === approval.id);
+    if (!row || row.full?.state === "loading") return;
+    this.conversation.beginApprovalFull(row.id);
+    this.publish();
+    const connection = this.connection;
+    const failed = (): void => {
+      this.conversation.failApprovalFull(row.id);
+      this.publish();
+    };
+    if (!connection || !isReady(this.connectionState)) return failed();
+    connection.send({ type: "approval.full", requestID: row.id }).catch(failed);
   }
 
   /**
@@ -1642,6 +1672,8 @@ export class AppModel {
           this.appearanceInFlight = null;
           this.appearanceSaveStatus = "pending";
         }
+        // A full text on its way will not come over a connection that is gone.
+        if (!isReady(event.state)) this.conversation.failLoadingApprovalFulls();
         switch (event.state.kind) {
           case "ready": {
             if (this.pendingPairing) {
@@ -2129,6 +2161,24 @@ export class AppModel {
         this.publish();
         return;
       }
+      if (frame.code === "approval_not_opened" || (frame.code === "internal" && this.allowing.size > 0)) {
+        // The daemon refused an Allow and said the card is still waiting: give back every Allow that is on its way.
+        // (approval_not_opened: its text was not opened, so the card is locked again; internal: the audit log is down.)
+        const notOpened = frame.code === "approval_not_opened";
+        for (const id of this.allowing) {
+          this.answered.delete(id);
+          this.conversation.reopenApproval(id, notOpened ? {} : { notice: frame.message, relock: false });
+        }
+        this.allowing.clear();
+        this.publish();
+        return;
+      }
+      if (frame.code === "not_found" && this.conversation.loadingApprovalIDs.length > 0) {
+        // The full text of a card that is gone: the card says so, and Deny still works.
+        this.conversation.failLoadingApprovalFulls();
+        this.publish();
+        return;
+      }
       if (frame.code === "not_found") {
         // A rule that was already revoked (here or on another device): show what is true now.
         this.showToast(notice("info", "Already gone", frame.message));
@@ -2151,6 +2201,7 @@ export class AppModel {
         const id = named.length === 1 ? named[0] : outstanding.length === 1 ? outstanding[0] : undefined;
         if (id) {
           this.answered.delete(id);
+          this.allowing.delete(id);
           this.unsent.delete(id);
           this.conversation.apply({ type: "approval.closed", seq: frame.seq, requestID: id, kind: "approval", reason: "expired" });
           this.conversation.apply({ type: "approval.closed", seq: frame.seq, requestID: id, kind: "form", reason: "expired" });
@@ -2226,6 +2277,7 @@ export class AppModel {
     if (frame.type === "approval.closed") {
       this.unsent.delete(frame.requestID);
       this.answered.delete(frame.requestID);
+      this.allowing.delete(frame.requestID);
     }
     if (frame.type === "turn.end" && frame.stopReason !== "end" && frame.stopReason !== "needs_input") {
       rememberStop(frame.turnID, frame.stopReason);

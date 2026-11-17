@@ -366,12 +366,18 @@ export class Conversation {
    * The daemon refused an Allow that was already sent (the full text was not open on its side): the card
    * comes back, locked again, with the reason. A card the daemon has closed is not here and is left alone.
    */
-  reopenApproval(id: string): void {
+  reopenApproval(id: string, options: { notice?: string; relock?: boolean } = {}): void {
     const approval = this.approvals.find((candidate) => candidate.id === id);
     if (!approval) return;
     approval.decision = null;
-    approval.full = { ...NO_FULL_TEXT };
-    approval.notice = NOT_OPENED_NOTICE;
+    // Unless the refusal was about something else (the audit log), the card is locked again: the text must be opened again.
+    if (options.relock !== false) approval.full = { ...NO_FULL_TEXT };
+    approval.notice = options.notice ?? NOT_OPENED_NOTICE;
+  }
+
+  /** The connection was lost while the full text was on its way: it will not come. */
+  failLoadingApprovalFulls(): void {
+    for (const id of this.loadingApprovalIDs) this.failApprovalFull(id);
   }
 
   resolveForm(id: string, answer: string): void {

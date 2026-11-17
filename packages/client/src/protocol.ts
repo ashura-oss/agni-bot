@@ -140,7 +140,7 @@ export function decisionTitle(decision: string): string {
     case "always":
       return "Always allow";
     case "reject":
-      return "Reject";
+      return "Deny";
     default:
       return decision;
   }
