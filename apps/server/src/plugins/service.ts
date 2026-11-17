@@ -458,13 +458,15 @@ export class PluginService {
     const entry = this.authFor(pluginID);
     if (!entry || entry.auth.kind !== "oauth") throw new Error(`plugin ${pluginID}/${account} is not connected`);
     const tokens = entry.auth;
-    const token = await oauth.ensureAccessToken(this.oauthDeps(), tokens);
-    // Persist the fresh access token so the next turn does not redo the exchange.
-    if (tokens.access_token !== token) {
-      entry.auth = { ...tokens, access_token: token };
+    const fresh = await oauth.ensureAccessToken(this.oauthDeps(), tokens);
+    // Persist the fresh access token with its own expiry so the next turn does not redo the exchange, and so the
+    // token it replaces is masked until that one's expiry, not this one's.
+    if (tokens.access_token !== fresh.access_token) {
+      const { expires_at: _replaced, ...rest } = tokens;
+      entry.auth = { ...rest, access_token: fresh.access_token, ...(fresh.expires_at === undefined ? {} : { expires_at: fresh.expires_at }) };
       this.save();
     }
-    return token;
+    return fresh.access_token;
   }
 
   /** Auto-connect app-password and api-key plugins from plugins.json on daemon start. */

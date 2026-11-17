@@ -149,14 +149,19 @@ export async function whoami(
   return { email: data.email };
 }
 
+/**
+ * A usable access token and the time (epoch ms) it stops working, when known. A stored token that is still good is
+ * returned with the expiry it was stored with; a refreshed one comes with its own, which the caller must store
+ * beside it (the old expiry belongs to the token it replaced).
+ */
 export async function ensureAccessToken(
   deps: OAuthDeps,
   tokens: { access_token?: string; refresh_token?: string; expires_at?: number },
-): Promise<string> {
+): Promise<{ access_token: string; expires_at?: number }> {
   if (tokens.access_token && tokens.expires_at && tokens.expires_at - 60_000 > Date.now()) {
-    return tokens.access_token;
+    return { access_token: tokens.access_token, expires_at: tokens.expires_at };
   }
   if (!tokens.refresh_token) throw new Error("no refresh token stored — reconnect the plugin");
   const fresh = await refresh(deps, tokens.refresh_token);
-  return fresh.access_token!;
+  return { access_token: fresh.access_token!, ...(fresh.expires_at === undefined ? {} : { expires_at: fresh.expires_at }) };
 }
