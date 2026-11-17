@@ -9,7 +9,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { cleanChildEnv } from "./child-env";
+import { cleanChildEnv } from "./test-child-env";
 import { optionalDatabase } from "../src/cli/s3-vault";
 import { DatabaseBehindError, openDatabase } from "../src/db";
 

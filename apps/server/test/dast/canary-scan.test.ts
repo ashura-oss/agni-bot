@@ -4,7 +4,7 @@ import { createCipheriv, randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { AGNI_ONLY, cleanChildEnv } from "../child-env";
+import { AGNI_ONLY, cleanChildEnv } from "../test-child-env";
 import { scanFile, walkFiles } from "../../../../scripts/canary-scan";
 import { openDatabase } from "../../src/db";
 import { rememberFact } from "../../src/tools/facts";

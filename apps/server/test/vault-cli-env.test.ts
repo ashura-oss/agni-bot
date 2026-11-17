@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { cleanChildEnv } from "./child-env";
+import { cleanChildEnv } from "./test-child-env";
 import { localDeviceToken } from "../src/daemon";
 import { createMemoryKeyStore, isVaultUnlocked, lockVault, setKeyStoreOverride, unlockVault, type KeyStore } from "../src/secrets";
 import { loadVaultEnvForCli } from "../src/startup/s3-vault";

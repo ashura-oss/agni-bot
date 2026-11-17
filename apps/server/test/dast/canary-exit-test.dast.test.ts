@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { PROTOCOL_VERSION } from "@agni/protocol";
-import { AGNI_ONLY, cleanChildEnv } from "../child-env";
+import { AGNI_ONLY, cleanChildEnv } from "../test-child-env";
 import { installFakeMailNetwork, type FakeMailNetwork } from "../injection/fake-mail-network";
 import { lockVault, unlockVault } from "../../src/secrets";
 import { startDast, type Dast } from "./dast-harness";

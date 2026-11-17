@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { cleanChildEnv } from "./child-env";
+import { cleanChildEnv } from "./test-child-env";
 import { s3VaultCommands } from "../src/cli/s3-vault";
 import { lockVault } from "../src/secrets";
 import { serveLockPath, serveLockState } from "../src/startup/s3-serve-lock";

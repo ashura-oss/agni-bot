@@ -11,7 +11,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { cleanChildEnv } from "./child-env";
+import { cleanChildEnv } from "./test-child-env";
 
 const ENTRY = resolve(import.meta.dir, "../src/index.ts");
 const CANARY = "gsk_e2e_canary_value_0123456789";

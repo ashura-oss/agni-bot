@@ -6,7 +6,7 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { AGNI_ONLY, cleanChildEnv } from "./child-env";
+import { AGNI_ONLY, cleanChildEnv } from "./test-child-env";
 
 describe("cleanChildEnv", () => {
   const source = {
@@ -42,7 +42,7 @@ describe("cleanChildEnv", () => {
 
 describe("test files do not strip the environment themselves", () => {
   // A copy of the strip that forgets the marker leaves a child able to open the owner's real credential store.
-  test("only child-env.ts removes AGNI_* names from an environment", () => {
+  test("only test-child-env.ts removes AGNI_* names from an environment", () => {
     const own: string[] = [];
     const walk = (dir: string): void => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {

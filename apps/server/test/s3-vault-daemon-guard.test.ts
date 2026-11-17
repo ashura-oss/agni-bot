@@ -8,7 +8,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { cleanChildEnv } from "./child-env";
+import { cleanChildEnv } from "./test-child-env";
 import { daemonRunningRefusal } from "../src/cli/s3-vault";
 import { loadConfig } from "../src/config";
 
