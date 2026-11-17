@@ -24,6 +24,7 @@ import { addTaint } from "../src/policy/context";
 import { assessCall, policyFor } from "../src/policy/metadata";
 import { recordDenial } from "../src/policy/denials";
 import { STANDING_JOB_RESOURCE } from "../src/policy/standing-rules";
+import { noopAuditSink, setAuditSink } from "../src/policy/audit-sink";
 import type { Decision, RunContext } from "../src/policy/types";
 import { scenarioTest, useScenarios, say, type Scenario, type ScenarioClient } from "./scenarios/harness";
 import { HOSTILE_URL, allCallsTo, answerCards, call, later, minutes, playTurn, resultJson, scripted, useWeb, type Answer, type TurnReport } from "./invariants/support";
@@ -706,6 +707,37 @@ describe("a routine is a repeating job: a job run's routine_create and routine_p
     expect(owner.cards.length, "a fire of the owner's job created a routine with no card").toBe(1);
     expect(owner.cards[0]!.buttons).toEqual(["once", "reject"]);
     expect(s.all("SELECT id FROM routines")).toEqual([]);
+  });
+});
+
+
+describe("a repeating job whose audit row cannot be written is not kept", () => {
+  const handlerOf = (rig: PolicyRig) => createJobTools(rig.db)[0]!.handler as unknown as (args: unknown, ctx: unknown) => Promise<{ id?: string; error?: string }>;
+  const ctxOf = (rig: PolicyRig) => ({ threadID: "thr", turnID: "trn", signal: new AbortController().signal, run: rig.run, chain: { depth: 1, rootAgentID: "ea", currentAgentID: "ea", handoffSummary: null } });
+  afterEach(() => setAuditSink(noopAuditSink));
+
+  test("a sink that throws: the jobs table is empty and the caller is told why", async () => {
+    const rig = policyRig();
+    try {
+      setAuditSink({ record() { throw new Error("audit store down"); } });
+      await expect(handlerOf(rig)({ text: "do it", everyMinutes: 60 }, ctxOf(rig))).rejects.toThrow(/audit log could not record.*audit store down/);
+      expect(rig.db.query("SELECT id FROM jobs WHERE kind = 'turn'").all()).toEqual([]);
+    } finally {
+      rig.close();
+    }
+  });
+
+  test("when the job cannot be deleted either, the caller still hears the audit error and the job does not run", async () => {
+    const rig = policyRig();
+    try {
+      setAuditSink({ record() { throw new Error("audit store down"); } });
+      rig.db.run("CREATE TRIGGER keep_jobs BEFORE DELETE ON jobs BEGIN SELECT RAISE(ABORT, 'delete blocked'); END");
+      await expect(handlerOf(rig)({ text: "do it", everyMinutes: 60 }, ctxOf(rig))).rejects.toThrow(/audit log could not record.*audit store down/);
+      const rows = rig.db.query<{ enabled: number }, []>("SELECT enabled FROM jobs WHERE kind = 'turn'").all();
+      expect(rows.every((row) => row.enabled === 0), "a repeating job with no audit row is still enabled").toBe(true);
+    } finally {
+      rig.close();
+    }
   });
 });
 

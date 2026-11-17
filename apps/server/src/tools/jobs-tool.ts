@@ -215,8 +215,14 @@ export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: 
         detail: { jobID: row.id, agent: callerAgentID, schedule: recurrence, nextRun: runAt, createdByRequest: createdByRequest ?? null, approval: created?.approval ?? "direct", what: text.slice(0, 200) },
       });
     } catch (error) {
-      deleteJob(db, row.id);
-      throw new Error(`not done: the audit log could not record the repeating job, so it was not kept (${error instanceof Error ? error.message : String(error)})`);
+      const told = new Error(`not done: the audit log could not record the repeating job, so it was not kept (${error instanceof Error ? error.message : String(error)})`);
+      // Whatever goes wrong while taking the job back, the caller is told why it was not kept. A job that cannot be removed is stopped.
+      let removed = false;
+      try { removed = deleteJob(db, row.id); } catch { /* stopped below */ }
+      if (!removed) {
+        try { setJobEnabled(db, row.id, false); } catch { /* the caller is still told */ }
+      }
+      throw told;
     }
   }
   return {
