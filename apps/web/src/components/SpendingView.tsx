@@ -13,11 +13,13 @@ type Field = "dayUsd" | "perBotDayUsd" | "perJobUsd";
 const FIELDS: Array<{ id: Field; label: string; hint?: string }> = [
   { id: "dayUsd", label: "Daily limit, all bots" },
   { id: "perBotDayUsd", label: "Daily limit, each bot" },
-  // The daemon applies this cap only to a run with a root job (policy/budget.ts): chats never hit it.
+  // The daemon caps per root job (policy/budget.ts): every background job is its own root unless
+  // it was delegated from one, so a bot delegating from a chat is capped too. Only replies in a
+  // chat (the owner's turn, and a bot stepping in inside it) are not.
   {
     id: "perJobUsd",
     label: "Limit per background job",
-    hint: "Covers scheduled jobs and the work they hand to other bots. Chats count toward the daily limits only.",
+    hint: "Applies to each background job: scheduled jobs and work a bot delegates in the background, even from a chat. Replies in a chat count toward the daily limits only.",
   },
 ];
 

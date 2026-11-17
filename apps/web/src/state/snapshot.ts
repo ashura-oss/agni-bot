@@ -136,4 +136,6 @@ export interface AppModelEnv {
   healthFetch?: (url: string) => Promise<HealthReport>;
   notifier?: NotificationBridge;
   healthPollMs?: number;
+  /** A monotonic clock in ms (default `performance.now()`); tests set it. */
+  clock?: () => number;
 }

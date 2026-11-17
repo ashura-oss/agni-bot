@@ -238,6 +238,8 @@ export class AppModel {
   private readonly healthFetch: (url: string) => Promise<HealthReport>;
   private readonly makeTransport: (() => FrameTransport) | undefined;
   private readonly healthPollMs: number;
+  /** Monotonic ms, for throttles a wall-clock change must not upset. */
+  private readonly clock: () => number;
 
   constructor(env: AppModelEnv = {}) {
     this.settingsStore = env.settingsStore ?? new SettingsStore();
@@ -245,6 +247,7 @@ export class AppModel {
     this.healthFetch = env.healthFetch ?? ((url) => fetchHealth(url));
     this.makeTransport = env.makeTransport;
     this.healthPollMs = env.healthPollMs ?? 20_000;
+    this.clock = env.clock ?? (() => performance.now());
     this.settings = this.settingsStore.load();
     this.applyLocationRoute(false);
     if (typeof window !== "undefined") {
@@ -434,23 +437,24 @@ export class AppModel {
 
   private onLocationChange = (): void => { this.applyLocationRoute(true); };
 
-  /** When the last page-return read went out (ms since the epoch). */
-  private lastPageReturnRead = 0;
+  /** When the last page-return read went out (`clock` ms), or null before the first. */
+  private lastPageReturnRead: number | null = null;
 
   /**
    * The owner came back to this page: the window took focus, or the tab is shown again. Read the
-   * pause state and today's spend again, because `agni pause` in a terminal changes them in the
-   * database and the daemon does not yet tell an open page (Sprint 5 item 0c). At most once per
-   * `PAGE_RETURN_READ_MS`, never while hidden, and only while connected (offline it stays quiet;
-   * the read on reconnect covers that).
+   * pause state again, because `agni pause` in a terminal changes it in the database and the
+   * daemon does not yet tell an open page (Sprint 5 item 0c). Only the pause state: a spend read
+   * here would clear a save error the owner has not dealt with. At most once per
+   * `PAGE_RETURN_READ_MS` on the monotonic clock, never while hidden, and only while connected; a
+   * return that finds no connection does not count (the read on reconnect covers it).
    */
   private onPageReturn = (): void => {
     if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
     if (!this.connection || !isReady(this.connectionState)) return;
-    const now = Date.now();
-    if (now - this.lastPageReturnRead < PAGE_RETURN_READ_MS) return;
+    const now = this.clock();
+    if (this.lastPageReturnRead !== null && now - this.lastPageReturnRead < PAGE_RETURN_READ_MS) return;
     this.lastPageReturnRead = now;
-    this.refreshPolicy();
+    this.sendPolicy({ type: "policy.pause" }, true);
   };
 
   /** Read the address bar: back, forward, a reload, or a link opened in this tab. */

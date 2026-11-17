@@ -476,12 +476,12 @@ describe("Settings, Spending", () => {
     expect(screen.queryByLabelText("Limit per task")).not.toBeInTheDocument();
     const field = screen.getByLabelText("Limit per background job");
     const hint = screen.getByText(
-      "Covers scheduled jobs and the work they hand to other bots. Chats count toward the daily limits only.",
+      "Applies to each background job: scheduled jobs and work a bot delegates in the background, even from a chat. Replies in a chat count toward the daily limits only.",
     );
     expect(hint.id).not.toBe("");
     expect(field.getAttribute("aria-describedby")?.split(" ")).toContain(hint.id);
     expect(field).toHaveAccessibleDescription(
-      "Covers scheduled jobs and the work they hand to other bots. Chats count toward the daily limits only.",
+      "Applies to each background job: scheduled jobs and work a bot delegates in the background, even from a chat. Replies in a chat count toward the daily limits only.",
     );
     // The daily limits have no hint.
     expect(screen.getByLabelText("Daily limit, all bots")).not.toHaveAttribute("aria-describedby");
@@ -497,7 +497,7 @@ describe("Settings, Spending", () => {
     await settle();
     expect(field).toHaveAttribute("aria-invalid", "true");
     expect(field).toHaveAccessibleDescription(
-      "Covers scheduled jobs and the work they hand to other bots. Chats count toward the daily limits only. Enter an amount, like 2.00.",
+      "Applies to each background job: scheduled jobs and work a bot delegates in the background, even from a chat. Replies in a chat count toward the daily limits only. Enter an amount, like 2.00.",
     );
   });
 
@@ -640,16 +640,24 @@ describe("a pause made outside this page (agni pause in a terminal)", () => {
     return () => void delete (document as unknown as { visibilityState?: unknown }).visibilityState;
   }
 
-  it("reads the pause state and today's spend again when the window takes focus", async () => {
-    const { sent } = rig();
+  /** The rig with the model's monotonic clock under the test's control. */
+  function rigWithClock(start: number) {
+    const rigged = rig();
+    const clock = { now: start };
+    (rigged.model as unknown as { clock: () => number }).clock = () => clock.now;
+    return { ...rigged, clock };
+  }
+
+  it("reads the pause state again when the window takes focus, and nothing else", async () => {
+    const { sent } = rigWithClock(0);
     act(() => void window.dispatchEvent(new Event("focus")));
     await settle();
     expect(pauseReads(sent)).toBe(1);
-    expect(sent).toContainEqual({ type: "spend.status" });
+    expect(sent.filter((item) => item.type === "spend.status")).toHaveLength(0);
   });
 
   it("reads again when the tab is shown, and not when it is hidden", async () => {
-    const { sent } = rig();
+    const { sent } = rigWithClock(0);
     const undoHidden = visibility("hidden");
     try {
       act(() => void document.dispatchEvent(new Event("visibilitychange")));
@@ -669,36 +677,79 @@ describe("a pause made outside this page (agni pause in a terminal)", () => {
   });
 
   it("focus and the tab showing together read once; a second later it reads again", async () => {
-    const { sent } = rig();
-    const now = vi.spyOn(Date, "now").mockReturnValue(5_000_000);
+    const { sent, clock } = rigWithClock(5_000);
     act(() => {
       window.dispatchEvent(new Event("focus"));
       document.dispatchEvent(new Event("visibilitychange"));
     });
     await settle();
     expect(pauseReads(sent)).toBe(1);
-    now.mockReturnValue(5_000_999);
+    clock.now = 5_999;
     act(() => void window.dispatchEvent(new Event("focus")));
     await settle();
     expect(pauseReads(sent)).toBe(1);
-    now.mockReturnValue(5_001_000);
+    clock.now = 6_000;
     act(() => void window.dispatchEvent(new Event("focus")));
     await settle();
     expect(pauseReads(sent)).toBe(2);
   });
 
-  it("while not connected it sends nothing and says nothing", async () => {
-    const { model, sent } = rig();
-    (model as unknown as { connectionState: unknown }).connectionState = { kind: "connecting" };
-    renderWith(model);
+  it("the throttle runs on the monotonic clock, not the wall clock", async () => {
+    const { sent, clock } = rigWithClock(10_000);
+    const wall = vi.spyOn(Date, "now").mockReturnValue(9_000_000);
+    act(() => void window.dispatchEvent(new Event("focus")));
+    await settle();
+    expect(pauseReads(sent)).toBe(1);
+    // The wall clock jumps back an hour; the monotonic clock moves on two seconds.
+    wall.mockReturnValue(9_000_000 - 3_600_000);
+    clock.now = 12_000;
+    act(() => void window.dispatchEvent(new Event("focus")));
+    await settle();
+    expect(pauseReads(sent)).toBe(2);
+  });
+
+  it("reads in the page's first second (the clock may start near zero)", async () => {
+    const { sent } = rigWithClock(3);
+    act(() => void window.dispatchEvent(new Event("focus")));
+    await settle();
+    expect(pauseReads(sent)).toBe(1);
+  });
+
+  it("a return while not connected does not use up the next read", async () => {
+    const { model, sent } = rigWithClock(20_000);
+    const inner = model as unknown as { connectionState: unknown };
+    inner.connectionState = { kind: "connecting" };
     act(() => void window.dispatchEvent(new Event("focus")));
     await settle();
     expect(sent).toHaveLength(0);
-    expect(screen.queryByText("Not sent")).not.toBeInTheDocument();
+    // Connected again within the same second: the return that found no connection did not count.
+    inner.connectionState = { kind: "ready", lastSeq: 0 };
+    act(() => void window.dispatchEvent(new Event("focus")));
+    await settle();
+    expect(pauseReads(sent)).toBe(1);
+  });
+
+  it("an unresolved save error stays when the owner comes back to the page", async () => {
+    const { model, sent } = rigWithClock(0);
+    frame(model, { type: "agents.update", seq: 1, agents: roster, mentions: roster });
+    frame(model, spendOk());
+    act(() => model.openSettings("spending"));
+    renderWith(model);
+    fireEvent.click(screen.getByRole("button", { name: "Save limits" }));
+    await settle();
+    frame(model, { type: "error", seq: 30, code: "bad_cap", message: "The per-bot limit cannot be more than the daily limit." });
+    expect(screen.getByRole("alert").textContent).toMatch(/cannot be more than the daily limit/);
+    const before = sent.length;
+    act(() => void window.dispatchEvent(new Event("focus")));
+    await settle();
+    expect(sent.slice(before)).toEqual([{ type: "policy.pause" }]);
+    frame(model, pauseOk(false));
+    expect(screen.getByRole("alert").textContent).toMatch(/cannot be more than the daily limit/);
+    expect(model.getSnapshot().policy.capsError).toMatch(/cannot be more than the daily limit/);
   });
 
   it("a pause from the terminal shows in an open page once the owner comes back to it", async () => {
-    const { model, sent } = rig();
+    const { model, sent } = rigWithClock(0);
     frame(model, { type: "agents.update", seq: 1, agents: roster, mentions: roster });
     frame(model, pauseOk(false));
     renderWith(model);
