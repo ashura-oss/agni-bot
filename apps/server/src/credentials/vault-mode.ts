@@ -14,7 +14,7 @@
  * plugin code can use it without loading the vault's crypto, and without a
  * cycle (`secrets/classify.ts` imports `models/providers.ts`).
  */
-import { lstatSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, fstatSync, fsyncSync, lstatSync, openSync, unlinkSync, writeSync } from "node:fs";
 import { registerSecretFor } from "../util/redact";
 import { secretsMode } from "../secrets/mode";
 import { tryGetVault } from "../secrets/state";
@@ -71,6 +71,26 @@ function segment(value: string): string {
   return value;
 }
 
+/** Open `path` for the overwrite: read-write, never through a symlink where the platform can say so. */
+function openForErase(path: string): { fd: number; writable: boolean } {
+  const noFollow = fsConstants.O_NOFOLLOW ?? 0; // not defined on Windows: the lstat/fstat comparison below covers it there
+  const notRegular = (): Error => new Error(`${path} is not a regular file (a link or a folder), so it was left alone`);
+  try {
+    return { fd: openSync(path, fsConstants.O_RDWR | noFollow), writable: true };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ELOOP") throw notRegular();
+    if (code !== "EACCES" && code !== "EPERM" && code !== "EROFS" && code !== "EBUSY" && code !== "ETXTBSY") throw error;
+  }
+  // Read-only or locked: still look at it through a handle, so the checks below run, and try to delete it.
+  try {
+    return { fd: openSync(path, fsConstants.O_RDONLY | noFollow), writable: false };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ELOOP") throw notRegular();
+    throw error;
+  }
+}
+
 /**
  * Remove a plaintext file that held secrets: overwrite its bytes with zeros, then delete it, so the
  * content is not left in the file's old blocks. The overwrite is best effort (a journalled or
@@ -80,22 +100,62 @@ function segment(value: string): string {
  * have the other names' bytes zeroed with it, and a directory has nothing to zero: each is left exactly as it is
  * and refused with an error that says why (the callers report a refusal as "could not erase", so the owner sees
  * the name and deletes it by hand).
+ *
+ * The file is opened once and every check and the overwrite go through that one handle, so what was checked is what
+ * is written: the path is never trusted a second time between checking and writing (a swap in between would
+ * otherwise send the zeros to another file). The handle is opened without following a symlink where the platform
+ * can say so; elsewhere (Windows) its device and inode must equal what `lstat` saw.
  */
 export function eraseFile(path: string): boolean {
-  let info: ReturnType<typeof lstatSync>;
+  let seen: ReturnType<typeof lstatSync>;
   try {
-    info = lstatSync(path);
+    seen = lstatSync(path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw error;
   }
-  if (!info.isFile()) throw new Error(`${path} is not a regular file (a link or a folder), so it was left alone`);
-  if (info.nlink !== 1) throw new Error(`${path} has ${info.nlink - 1} other hard link(s), so it was left alone (overwriting it would change those names too)`);
+  if (!seen.isFile()) throw new Error(`${path} is not a regular file (a link or a folder), so it was left alone`);
+  let opened: { fd: number; writable: boolean };
   try {
-    writeFileSync(path, Buffer.alloc(info.size));
-  } catch {
-    // Read-only or locked: still try to delete it below.
+    opened = openForErase(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
   }
+  let identity: { dev: number | bigint; ino: number | bigint };
+  try {
+    const info = fstatSync(opened.fd);
+    if (!info.isFile() || info.dev !== seen.dev || info.ino !== seen.ino) {
+      throw new Error(`${path} is not the file that was looked at (it was replaced), so it was left alone`);
+    }
+    if (info.nlink !== 1) {
+      throw new Error(
+        `${path} has ${info.nlink - 1} other hard link(s), so it was left alone (overwriting it would change those names too); ` +
+          "a plaintext copy of its content may remain at another link: find and delete the other name(s) yourself",
+      );
+    }
+    identity = { dev: info.dev, ino: info.ino };
+    if (opened.writable) {
+      try {
+        const zeros = Buffer.alloc(info.size);
+        for (let done = 0; done < zeros.length; ) done += writeSync(opened.fd, zeros, done, zeros.length - done, done);
+        fsyncSync(opened.fd);
+      } catch {
+        // Locked or full: still try to delete it below.
+      }
+    }
+  } finally {
+    closeSync(opened.fd);
+  }
+  // The name must still be the file that was overwritten: a name that now points elsewhere is not ours to delete.
+  let now: ReturnType<typeof lstatSync>;
+  try {
+    now = lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  if (now.dev !== identity.dev || now.ino !== identity.ino) throw new Error(`${path} was replaced while it was being erased, so the new file was left alone`);
   unlinkSync(path);
   return true;
 }

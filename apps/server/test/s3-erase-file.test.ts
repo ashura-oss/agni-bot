@@ -4,7 +4,7 @@
  * no bytes to zero. Those are left alone and refused (the callers report a refusal as "could not erase").
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, linkSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eraseFile } from "../src/credentials/vault-mode";
@@ -55,6 +55,32 @@ describe("eraseFile", () => {
     expect(() => eraseFile(path)).toThrow(/hard link|other names|links/i);
     expect(readFileSync(path, "utf8")).toBe("secret-bytes");
     expect(readFileSync(other, "utf8")).toBe("secret-bytes");
+  });
+
+  test("the refusal for a file with another hard link says a plaintext copy may remain at the other name", () => {
+    const dir = fresh();
+    const path = join(dir, "plugins.json.corrupt");
+    writeFileSync(path, "secret-bytes");
+    linkSync(path, join(dir, "other-name"));
+    expect(() => eraseFile(path)).toThrow(/plaintext copy[^.]*may (still )?remain[^.]*another (hard )?link/i);
+  });
+
+  test("a file that is held open elsewhere is overwritten in place: the open handle reads zeros afterwards", () => {
+    const path = join(fresh(), "plugins.json.corrupt");
+    writeFileSync(path, "secret-bytes");
+    const fd = openSync(path, "r");
+    try {
+      try {
+        eraseFile(path);
+      } catch {
+        // Some platforms refuse to delete a file that is open: the overwrite is what is checked here.
+      }
+      const seen = Buffer.alloc(12);
+      readSync(fd, seen, 0, 12, 0);
+      expect(seen.every((byte) => byte === 0)).toBe(true);
+    } finally {
+      closeSync(fd);
+    }
   });
 
   test("a directory is refused and left in place", () => {
