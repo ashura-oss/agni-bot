@@ -10,10 +10,17 @@ import { useAppModel, useAppSnapshot } from "../state/use-app-model";
 
 type Field = "dayUsd" | "perBotDayUsd" | "perJobUsd";
 
-const FIELDS: Array<{ id: Field; label: string }> = [
+const FIELDS: Array<{ id: Field; label: string; hint?: string }> = [
   { id: "dayUsd", label: "Daily limit, all bots" },
   { id: "perBotDayUsd", label: "Daily limit, each bot" },
-  { id: "perJobUsd", label: "Limit per task" },
+  // The daemon caps per root job (policy/budget.ts): every background job is its own root unless
+  // it was delegated from one, so a bot delegating from a chat is capped too. Only replies in a
+  // chat (the owner's turn, and a bot stepping in inside it) are not.
+  {
+    id: "perJobUsd",
+    label: "Limit per background job",
+    hint: "Applies to each background job: scheduled jobs and work a bot delegates in the background, even from a chat. Replies in a chat count toward the daily limits only.",
+  },
 ];
 
 function show(value: number | null): string {
@@ -114,6 +121,9 @@ export function SpendingView() {
       >
         {FIELDS.map((field) => {
           const error = errors[field.id];
+          const hintID = field.hint ? `${ids}-${field.id}-hint` : null;
+          const errorID = error ? `${ids}-${field.id}-error` : null;
+          const describedBy = [hintID, errorID].filter((id): id is string => id !== null).join(" ");
           return (
             <div className="spending-field" key={field.id}>
               <label htmlFor={`${ids}-${field.id}`}>{field.label}</label>
@@ -127,7 +137,7 @@ export function SpendingView() {
                   autoComplete="off"
                   value={draft[field.id]}
                   aria-invalid={error ? true : undefined}
-                  aria-describedby={error ? `${ids}-${field.id}-error` : undefined}
+                  aria-describedby={describedBy || undefined}
                   onChange={(event) => {
                     setDraft({ ...draft, [field.id]: event.target.value });
                     setDirty(true);
@@ -135,6 +145,11 @@ export function SpendingView() {
                   }}
                 />
               </div>
+              {hintID ? (
+                <p id={hintID} className="settings-note spending-hint">
+                  {field.hint}
+                </p>
+              ) : null}
               {error ? (
                 <span id={`${ids}-${field.id}-error`} className="spending-error">
                   {error}

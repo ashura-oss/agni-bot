@@ -385,6 +385,14 @@
   font-size: var(--text-meta);
 }
 
+/* The hint says what the limit covers, so it must be readable: secondary ink (4.5:1 or more on
+   every preset's surface), not the tertiary of .settings-note. */
+.spending-hint {
+  margin: 0;
+  color: var(--ink-secondary);
+  font-size: var(--text-meta);
+}
+
 .spending-actions {
   display: flex;
   align-items: center;

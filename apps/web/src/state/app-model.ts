@@ -75,6 +75,8 @@ const TYPING_IDLE_MS = 1000;
 const OFFLINE_REFUSAL = "Not connected. Your draft was kept; send it again once you are reconnected.";
 /** The same refusal for "Hand off to AI", which has no draft to keep. */
 const HANDOFF_OFFLINE_REFUSAL = "Not connected. The task was not handed off; try again once you are reconnected.";
+/** Coming back to the page reads the pause state again at most this often (focus and visibility often fire together). */
+const PAGE_RETURN_READ_MS = 1_000;
 
 function notice(kind: NoticeKind, title: string, body: string, threadID: string | null = null): NoticeRow {
   return {
@@ -236,6 +238,8 @@ export class AppModel {
   private readonly healthFetch: (url: string) => Promise<HealthReport>;
   private readonly makeTransport: (() => FrameTransport) | undefined;
   private readonly healthPollMs: number;
+  /** Monotonic ms, for throttles a wall-clock change must not upset. */
+  private readonly clock: () => number;
 
   constructor(env: AppModelEnv = {}) {
     this.settingsStore = env.settingsStore ?? new SettingsStore();
@@ -243,12 +247,15 @@ export class AppModel {
     this.healthFetch = env.healthFetch ?? ((url) => fetchHealth(url));
     this.makeTransport = env.makeTransport;
     this.healthPollMs = env.healthPollMs ?? 20_000;
+    this.clock = env.clock ?? (() => performance.now());
     this.settings = this.settingsStore.load();
     this.applyLocationRoute(false);
     if (typeof window !== "undefined") {
       window.addEventListener("popstate", this.onLocationChange);
       window.addEventListener("pagehide", this.flushSettings);
+      window.addEventListener("focus", this.onPageReturn);
     }
+    if (typeof document !== "undefined") document.addEventListener("visibilitychange", this.onPageReturn);
     const stored = SecretStore.load();
     if (stored) {
       this.token = stored.token;
@@ -429,6 +436,26 @@ export class AppModel {
   }
 
   private onLocationChange = (): void => { this.applyLocationRoute(true); };
+
+  /** When the last page-return read went out (`clock` ms), or null before the first. */
+  private lastPageReturnRead: number | null = null;
+
+  /**
+   * The owner came back to this page: the window took focus, or the tab is shown again. Read the
+   * pause state again, because `agni pause` in a terminal changes it in the database and the
+   * daemon does not yet tell an open page (Sprint 5 item 0c). Only the pause state: a spend read
+   * here would clear a save error the owner has not dealt with. At most once per
+   * `PAGE_RETURN_READ_MS` on the monotonic clock, never while hidden, and only while connected; a
+   * return that finds no connection does not count (the read on reconnect covers it).
+   */
+  private onPageReturn = (): void => {
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+    if (!this.connection || !isReady(this.connectionState)) return;
+    const now = this.clock();
+    if (this.lastPageReturnRead !== null && now - this.lastPageReturnRead < PAGE_RETURN_READ_MS) return;
+    this.lastPageReturnRead = now;
+    this.sendPolicy({ type: "policy.pause" }, true);
+  };
 
   /** Read the address bar: back, forward, a reload, or a link opened in this tab. */
   private applyLocationRoute(refresh: boolean): void {
