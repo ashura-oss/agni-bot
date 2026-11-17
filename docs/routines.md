@@ -4,7 +4,7 @@ A routine is a recurring background job owned by one bot. It runs on a cron
 schedule in a timezone, and before each run it checks its preflight:
 
 - `http`: fetches the URL and compares the ETag, or a hash of the body.
-- `sql`: runs one read-only `SELECT` on the Agni Bot database and hashes the rows.
+- `check`: a named, fixed question about Agni's own data, picked by name with typed values (the list is in `apps/server/src/routines/preflight-checks.ts`); the answer is hashed. A `sql` preflight is refused: nothing a model writes ever becomes SQL.
 - `mail`: one IMAP `UNSEEN` search. See Event triggers below.
 - `none`: always counts as changed.
 
@@ -35,7 +35,7 @@ A routine cannot be created from a turn that started from another bot's message.
 | `maxTokens` | 16,000 | 1 to 16,000 (the task loop's own cap) |
 | `maxExecutionMs` | 120,000 | 1 to 600,000 |
 | `allowedDomains` | empty | web tools refuse every host; `routine_create` always leaves it empty |
-| Preflight | `none` | `sql` must be one read-only `SELECT`, with no `;` and no `WITH` |
+| Preflight | `none` | `http`, `mail`, `none`, or a named `check`; `sql` is refused |
 
 A routine run can use only these tools: memory search, transcript search, links
 search, tasks list, web search and fetch, mail read, `recall_fact`, and the

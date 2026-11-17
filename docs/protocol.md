@@ -58,7 +58,7 @@ is no "any loopback" and no wildcard.
   only when `AGNI_DEV=1` and the server is bound to loopback, the Vite dev
   server at `http://127.0.0.1:5173` or `http://localhost:5173`. Any other
   origin is `403 forbidden origin`. CORS answers echo the request's own origin
-  when allowed and never `*`, except `GET /health` (below).
+  when allowed and never `*`.
 - **`AGNI_DEV`.** `1` turns on the Vite dev-server trust above and nothing
   else. It is off in a normal install, so whatever else serves port 5173 on the
   machine cannot ride the owner's session.
@@ -69,16 +69,17 @@ wildcard or non-loopback bind with neither `AGNI_PUBLIC_ORIGIN` nor
 
 ### `GET /health` tiers
 
-`/health` answers any origin so a web client can tell the daemon is up before it
-pairs, so what it returns depends on who asks.
+`/health` follows the same Host and Origin checks as every other route: a request
+with a foreign `Origin` is `403 forbidden origin`, and the response sets no CORS
+headers. A page reads it same-origin (the web app, or the Vite dev server's
+proxy); a native client sends no `Origin`. What it returns depends on who asks.
 
 - **Not paired** (no `Authorization: Bearer <device token>` and no session
   cookie, or a token that is revoked or unknown): liveness only,
   `{ok, v, serverTime, uptimeMs}`.
 - **Paired device** (bearer token or the paired browser's cookie): the same plus
-  `seq`, `providers`, `usageToday` and `modelCapacity`. The cross-origin CORS
-  headers do not allow `Authorization`, so the full report is read same-origin
-  or by a native client.
+  `seq`, `providers`, `usageToday` and `modelCapacity`. The browser's cookie
+  works same-origin; a native client sends the bearer token.
 
 `agni daemon status` sends the device token in `AGNI_TOKEN` (from the
 environment or `config.env`) when one is set, and prints "details need a paired

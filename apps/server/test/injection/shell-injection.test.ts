@@ -181,8 +181,8 @@ describe("the bash gate: only one plain read-only program runs unasked", () => {
   });
 
   // bug.md H-series follow-up, found while writing this suite. `date -s` / `date --set` change the system
-  // clock; they are not "read-only", yet every word of the command matches the plain-word allowlist.
-  test("date with a set-the-clock flag asks (product finding: today it is waved through)", () => {
+  // clock; they are not "read-only", though every word of the command matches the plain-word allowlist, so the policy asks.
+  test("date with a set-the-clock flag asks", () => {
     for (const command of ["date -s 20000101", "date --set 20000101", "date -u -s 20000101"]) {
       expect({ command, asks: asks({ command }) }).toEqual({ command, asks: true });
     }
