@@ -12,11 +12,16 @@ import { localDayBounds, spentByBotSince, spentSince, unpricedCallsSince } from 
 /** Owner decisions, 2026-11-16: $2 a day overall, $1 a day per bot, $0.50 a job. */
 export const SPEND_CAP_DEFAULTS = { dayUsd: 2, perBotDayUsd: 1, perJobUsd: 0.5 } as const;
 
-/** Owner decisions, 2026-11-16: 30 minutes per root job, 4 delegations at once, 10 self-scheduled jobs per bot. */
+/**
+ * Owner decisions, 2026-11-16: 30 minutes per root job, 4 delegations at once, 10 self-scheduled jobs per bot. Tech-lead
+ * decision, round D: at most 10 wakes per request (a wake starts a clock of its own, so a chain of delegate, wake,
+ * delegate is bounded by count, not by time).
+ */
 export const RUN_CAP_DEFAULTS = {
   rootJobWallMs: 30 * 60_000,
   maxConcurrentDelegations: 4,
   maxSelfScheduledJobsPerBot: 10,
+  maxWakesPerRequest: 10,
 } as const;
 
 /**
@@ -38,6 +43,8 @@ export interface RunCaps {
   rootJobWallMs: number;
   maxConcurrentDelegations: number;
   maxSelfScheduledJobsPerBot: number;
+  /** How many times a delegated task's result may wake the bot that delegated it, for one request (the scope the owner's refusals hold in). */
+  maxWakesPerRequest: number;
 }
 
 const KEY = {
@@ -47,6 +54,7 @@ const KEY = {
   rootJobWallMs: "run.root_job_wall_ms",
   maxConcurrentDelegations: "run.max_concurrent_delegations",
   maxSelfScheduledJobsPerBot: "run.max_self_scheduled_jobs_per_bot",
+  maxWakesPerRequest: "run.max_wakes_per_request",
 } as const;
 
 function readRaw(db: Database, key: string): { found: boolean; value: unknown } {
@@ -107,6 +115,7 @@ export function getRunCaps(db: Database): RunCaps {
     rootJobWallMs: readCount(db, KEY.rootJobWallMs, RUN_CAP_DEFAULTS.rootJobWallMs),
     maxConcurrentDelegations: readCount(db, KEY.maxConcurrentDelegations, RUN_CAP_DEFAULTS.maxConcurrentDelegations),
     maxSelfScheduledJobsPerBot: readCount(db, KEY.maxSelfScheduledJobsPerBot, RUN_CAP_DEFAULTS.maxSelfScheduledJobsPerBot),
+    maxWakesPerRequest: readCount(db, KEY.maxWakesPerRequest, RUN_CAP_DEFAULTS.maxWakesPerRequest),
   };
 }
 
@@ -121,7 +130,7 @@ export function setRunCaps(db: Database, caps: Partial<RunCaps>): RunCaps {
     throw new Error("run cap rootJobWallMs must be at most 7 days");
   }
   db.transaction(() => {
-    for (const name of ["rootJobWallMs", "maxConcurrentDelegations", "maxSelfScheduledJobsPerBot"] as const) {
+    for (const name of ["rootJobWallMs", "maxConcurrentDelegations", "maxSelfScheduledJobsPerBot", "maxWakesPerRequest"] as const) {
       const value = caps[name];
       if (value !== undefined) writeRaw(db, KEY[name], value);
     }

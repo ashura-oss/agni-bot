@@ -29,7 +29,7 @@ export function pauseReport(db: Database, paused: boolean): string {
   return paused ? "All bots paused. Nothing new will start." : "Bots resumed.";
 }
 
-/** What `agni policy caps` prints: the three run limits, in the owner's words. */
+/** What `agni policy caps` prints: the run limits, in the owner's words. */
 export function capsReport(db: Database): string[] {
   const caps = getRunCaps(db);
   const plural = (count: number, one: string, many: string): string => (count === 1 ? one : many);
@@ -37,18 +37,20 @@ export function capsReport(db: Database): string[] {
   const time = Number.isInteger(minutes) ? `${minutes} ${plural(minutes, "minute", "minutes")}` : `${Math.round(caps.rootJobWallMs / 1000)} seconds`;
   return [
     "Run limits:",
-    `  Time limit           ${time} per request (the owner's waiting time is not counted)`,
+    `  Time limit           ${time} per run (a turn or a job, and what it delegates); the owner's waiting time is not counted`,
     `  Delegations          ${caps.maxConcurrentDelegations} ${plural(caps.maxConcurrentDelegations, "delegation", "delegations")} at once under one request`,
     `  Self-scheduled jobs  ${caps.maxSelfScheduledJobsPerBot} ${plural(caps.maxSelfScheduledJobsPerBot, "self-scheduled job", "self-scheduled jobs")} per bot`,
+    `  Wakes                ${caps.maxWakesPerRequest} ${plural(caps.maxWakesPerRequest, "wake", "wakes")} per request (a delegated task's result waking the bot that delegated it)`,
   ];
 }
 
-const CAPS_USAGE = "usage: agni policy caps [set --wall-minutes N --delegations N --self-scheduled N]";
+const CAPS_USAGE = "usage: agni policy caps [set --wall-minutes N --delegations N --self-scheduled N --wakes N]";
 
 const CAPS_FLAGS: Record<string, { name: keyof RunCaps; scale: number }> = {
   "--wall-minutes": { name: "rootJobWallMs", scale: 60_000 },
   "--delegations": { name: "maxConcurrentDelegations", scale: 1 },
   "--self-scheduled": { name: "maxSelfScheduledJobsPerBot", scale: 1 },
+  "--wakes": { name: "maxWakesPerRequest", scale: 1 },
 };
 
 /**
@@ -70,7 +72,7 @@ export function parseCapsSet(args: string[]): { caps: Partial<RunCaps> } | { err
     if (spec.name === "rootJobWallMs" && count * spec.scale > MAX_ROOT_JOB_WALL_MS) return { error: `${flag} must be at most ${MAX_ROOT_JOB_WALL_MS / 60_000} (7 days)` };
     caps[spec.name] = count * spec.scale;
   }
-  return Object.keys(caps).length > 0 ? { caps } : { error: "give at least one of --wall-minutes, --delegations, --self-scheduled" };
+  return Object.keys(caps).length > 0 ? { caps } : { error: "give at least one of --wall-minutes, --delegations, --self-scheduled, --wakes" };
 }
 
 /** `agni policy caps set ...`: the change goes on the audit record first (a log that is down stops it), then is made. */
@@ -154,6 +156,6 @@ export const s2OpsCommands: CommandTable = {
     "  audit verify       check the audit log's hash chain (exit 1 when it was altered)",
     "  pause [--off]      pause every bot: nothing new starts, running work stops (--off resumes)",
     "  resume             resume all bots (bots turned off stay off)",
-    "  policy caps        show the run limits; policy caps set --wall-minutes N --delegations N --self-scheduled N changes them",
+    "  policy caps        show the run limits; policy caps set --wall-minutes N --delegations N --self-scheduled N --wakes N changes them",
   ],
 };

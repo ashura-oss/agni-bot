@@ -15,8 +15,8 @@ import { RUN_CAP_DEFAULTS, getRunCaps, setRunCaps } from "../src/stores/policy-s
 
 describe("parsing `policy caps set`", () => {
   test("each flag takes one positive whole number; minutes become milliseconds", () => {
-    expect(parseCapsSet(["--wall-minutes", "45", "--delegations", "3", "--self-scheduled", "12"])).toEqual({
-      caps: { rootJobWallMs: 45 * 60_000, maxConcurrentDelegations: 3, maxSelfScheduledJobsPerBot: 12 },
+    expect(parseCapsSet(["--wall-minutes", "45", "--delegations", "3", "--self-scheduled", "12", "--wakes", "7"])).toEqual({
+      caps: { rootJobWallMs: 45 * 60_000, maxConcurrentDelegations: 3, maxSelfScheduledJobsPerBot: 12, maxWakesPerRequest: 7 },
     });
     expect(parseCapsSet(["--delegations", "6"])).toEqual({ caps: { maxConcurrentDelegations: 6 } });
     expect(parseCapsSet(["--wall-minutes=90"])).toEqual({ caps: { rootJobWallMs: 90 * 60_000 } });
@@ -43,6 +43,8 @@ describe("parsing `policy caps set`", () => {
     ["a time limit longer than the week clocks are kept", ["--wall-minutes", "10081"]],
     ["an unknown flag", ["--hours", "2"]],
     ["a flag twice", ["--delegations", "2", "--delegations", "3"]],
+    ["wakes of zero", ["--wakes", "0"]],
+    ["wakes twice", ["--wakes", "2", "--wakes", "3"]],
     ["a stray word", ["--delegations", "2", "three"]],
   ])("%s is refused with a message", (_name, args) => {
     const parsed = parseCapsSet(args);
@@ -60,31 +62,35 @@ describe("the report", () => {
     expect(text).toContain("30 minutes");
     expect(text).toContain("4 delegations");
     expect(text).toContain("10 self-scheduled jobs");
-    setRunCaps(db, { rootJobWallMs: 61 * 60_000, maxConcurrentDelegations: 1, maxSelfScheduledJobsPerBot: 1 });
+    expect(text).toContain("10 wakes");
+    expect(text, "the time limit is per run, not per request").toContain("30 minutes per run (a turn or a job, and what it delegates)");
+    expect(text).not.toContain("minutes per request");
+    setRunCaps(db, { rootJobWallMs: 61 * 60_000, maxConcurrentDelegations: 1, maxSelfScheduledJobsPerBot: 1, maxWakesPerRequest: 1 });
     const changed = capsReport(db).join("\n");
     expect(changed).toContain("61 minutes");
     expect(changed).toContain("1 delegation ");
     expect(changed).toContain("1 self-scheduled job ");
+    expect(changed).toContain("1 wake ");
   });
 
   test("a good change is applied, written to the audit log first, and reported with the new numbers", () => {
-    const report = setCapsReport(db, ["--wall-minutes", "45", "--delegations", "2"]);
+    const report = setCapsReport(db, ["--wall-minutes", "45", "--delegations", "2", "--wakes", "6"]);
     expect(report.code).toBe(0);
-    expect(getRunCaps(db)).toEqual({ rootJobWallMs: 45 * 60_000, maxConcurrentDelegations: 2, maxSelfScheduledJobsPerBot: RUN_CAP_DEFAULTS.maxSelfScheduledJobsPerBot });
+    expect(getRunCaps(db)).toEqual({ rootJobWallMs: 45 * 60_000, maxConcurrentDelegations: 2, maxSelfScheduledJobsPerBot: RUN_CAP_DEFAULTS.maxSelfScheduledJobsPerBot, maxWakesPerRequest: 6 });
     expect(report.lines.join("\n")).toContain("45 minutes");
     const row = db.query<{ kind: string; actor: string; detail: string }, []>("SELECT kind, actor, detail FROM audit_events ORDER BY seq DESC LIMIT 1").get();
     expect(row?.kind).toBe("run.caps.set");
     expect(row?.actor).toBe("cli");
     expect(JSON.parse(row!.detail)).toEqual({
-      before: { rootJobWallMs: 30 * 60_000, maxConcurrentDelegations: 4, maxSelfScheduledJobsPerBot: 10 },
-      after: { rootJobWallMs: 45 * 60_000, maxConcurrentDelegations: 2, maxSelfScheduledJobsPerBot: 10 },
+      before: { rootJobWallMs: 30 * 60_000, maxConcurrentDelegations: 4, maxSelfScheduledJobsPerBot: 10, maxWakesPerRequest: 10 },
+      after: { rootJobWallMs: 45 * 60_000, maxConcurrentDelegations: 2, maxSelfScheduledJobsPerBot: 10, maxWakesPerRequest: 6 },
     });
   });
 
   test("a bad value changes nothing, records nothing and exits with an error", () => {
     const report = setCapsReport(db, ["--wall-minutes", "45", "--delegations", "0"]);
     expect(report.code).toBe(1);
-    expect(getRunCaps(db)).toEqual({ rootJobWallMs: RUN_CAP_DEFAULTS.rootJobWallMs, maxConcurrentDelegations: RUN_CAP_DEFAULTS.maxConcurrentDelegations, maxSelfScheduledJobsPerBot: RUN_CAP_DEFAULTS.maxSelfScheduledJobsPerBot });
+    expect(getRunCaps(db)).toEqual(RUN_CAP_DEFAULTS);
     expect(db.query("SELECT 1 FROM audit_events WHERE kind = 'run.caps.set'").get()).toBeNull();
     expect(report.lines.join("\n")).toContain("--delegations");
   });
@@ -137,12 +143,13 @@ describe("through the real entry point", () => {
     const before = await agni("policy", "caps");
     expect(before.code).toBe(0);
     expect(before.out).toContain("30 minutes");
-    const set = await agni("policy", "caps", "set", "--wall-minutes", "50", "--delegations", "5", "--self-scheduled", "7");
+    const set = await agni("policy", "caps", "set", "--wall-minutes", "50", "--delegations", "5", "--self-scheduled", "7", "--wakes", "3");
     expect(set.code).toBe(0);
     const after = await agni("policy", "caps");
     expect(after.out).toContain("50 minutes");
     expect(after.out).toContain("5 delegations");
     expect(after.out).toContain("7 self-scheduled jobs");
+    expect(after.out).toContain("3 wakes");
     const db = new Database(dbPath);
     expect(getRunCaps(db).rootJobWallMs).toBe(50 * 60_000);
     db.close();

@@ -44,7 +44,7 @@ function spend(costUsd: number | null, who: { agentID?: string; jobID?: string; 
 describe("policy settings", () => {
   test("the owner's decisions are the defaults", () => {
     expect(SPEND_CAP_DEFAULTS).toEqual({ dayUsd: 2, perBotDayUsd: 1, perJobUsd: 0.5 });
-    expect(RUN_CAP_DEFAULTS).toEqual({ rootJobWallMs: 30 * 60_000, maxConcurrentDelegations: 4, maxSelfScheduledJobsPerBot: 10 });
+    expect(RUN_CAP_DEFAULTS).toEqual({ rootJobWallMs: 30 * 60_000, maxConcurrentDelegations: 4, maxSelfScheduledJobsPerBot: 10, maxWakesPerRequest: 10 });
     expect(getSpendCaps(db)).toEqual(SPEND_CAP_DEFAULTS);
     expect(getRunCaps(db)).toEqual(RUN_CAP_DEFAULTS);
   });

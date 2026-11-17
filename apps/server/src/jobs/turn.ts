@@ -47,6 +47,7 @@ import { peerEnvelope } from "../agent/peer-message";
 import type { PeerIntent } from "@agni/protocol";
 import { JobGiveUp, type JobContext, type JobRunner } from "./runner";
 import { nowISO } from "../util/ids";
+import { postWakeLimitNotice, takeWakePlace, wakeLimitNotice } from "./wake-limit";
 
 /** How long a wake first waits when the parent's thread is busy; doubles per deferral. */
 const WAKE_RETRY_MS = 1_500;
@@ -158,6 +159,19 @@ export function registerTurnJob(runner: JobRunner, deps: TurnJobDeps): void {
       if (unread.length === 0) return { result: "skipped: the parent already read this result" };
       payload.results = unread;
       payload.text = buildWakeText(unread);
+      // At most so many wakes per request run a model turn (S2-09): the delegate, wake, delegate chain has no time bound of its own.
+      const place = takeWakePlace(deps.db, job, payload);
+      if (!place.ok) {
+        const bot = ctx.agentID === null ? undefined : resolvePersona(deps.db, ctx.agentID);
+        const name = bot?.name ?? payload.agentID ?? "The bot";
+        postWakeLimitNotice(deps.db, deps.emit, {
+          threadID: parentThreadID,
+          channelID: payload.channelID || (bot ? agentChannelID(deps.db, bot.id) : undefined),
+          agentID: bot?.id ?? payload.agentID ?? "ea",
+          text: wakeLimitNotice(name, place.limit, unread.map((item) => item.taskID)),
+        });
+        return { result: `not run: the request reached its wake limit of ${place.limit}` };
+      }
     }
 
     const text = payload.text?.trim();
