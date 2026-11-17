@@ -315,3 +315,36 @@ describe("group context", () => {
     expect(getChannel(database, channelID)).not.toBeNull();
   });
 });
+
+describe("a system line is the room's own", () => {
+  // A note the app wrote into the room ("a task was started", "an earlier request was interrupted"). It holds no
+  // private content, so a bot that belongs to the room reads it in full, a private one included; a bot outside the room does not.
+  const NOTE = `Task started with kid: ${"status note ".repeat(30)}NOTE-END-5521`;
+  const sys = (database: Database, channelID: string): string => appendChannelMessage(database, { channelID, fromType: "system", fromID: "lead", text: NOTE }).id;
+
+  async function expandAs(database: Database, caller: string, id: string): Promise<{ redacted: boolean; messages: Array<{ id: string; text: string }> }> {
+    const registry = new ToolRegistry();
+    registerExpandTool(registry, { db: database, currentAgentID: caller });
+    return (registry.get("expand") as unknown as Handler).handler({ kind: "messages", id }, ctx) as Promise<{ redacted: boolean; messages: Array<{ id: string; text: string }> }>;
+  }
+
+  test("expand: a member of the room reads it in full, even a private bot, and a bot outside the room gets a receipt", async () => {
+    const { database, channelID } = room();
+    const note = sys(database, channelID);
+    for (const member of ["lead", "kid"]) {
+      const view = await expandAs(database, member, note);
+      expect({ member, text: view.messages[0]?.text.includes("NOTE-END-5521") ?? false }).toEqual({ member, text: true });
+    }
+    const outside = await expandAs(database, "outsider", note);
+    expect(JSON.stringify(outside)).not.toContain("NOTE-END-5521");
+    expect(outside.redacted).toBe(true);
+  });
+
+  test("transcript search: a member of the room finds it, a bot outside the room does not", () => {
+    const { database, channelID } = room();
+    sys(database, channelID);
+    expect(JSON.stringify(searchTranscripts(database, { query: "status note", callerAgentID: "kid" }))).toContain("NOTE-END-5521");
+    expect(searchTranscripts(database, { query: "status note", callerAgentID: "outsider" })).toEqual([]);
+    expect(searchTranscripts(database, { query: "status note" })).toEqual([]);
+  });
+});

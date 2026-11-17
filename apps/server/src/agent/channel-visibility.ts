@@ -11,6 +11,8 @@
  *                                          (the group context shows a member no more, and neither may a search)
  *   a row written by the owner             in full for a bot that belongs to the channel; for any other bot,
  *                                          the strictest visibility among the channel's bots
+ *   a note the app wrote (`system`)        in full for a bot that belongs to the channel (it holds no private
+ *                                          content); a receipt for any other bot
  *   a row whose author cannot be resolved  private: a receipt
  *
  * Ids are compared canonically on both sides, and a caller that is not known is a
@@ -80,9 +82,15 @@ export function redactRowForCaller(
   text: string,
   callerAgentID: string | null | undefined,
 ): RedactedText {
-  // The owner's lines are the room's own. Another bot's line, even in a room the caller belongs to, is read through that
-  // bot's visibility, which is how the group context (`groupHistory`) shows it: no reader shows a member more than that.
-  if (row.from_type === "user" && isChannelParticipant(db, channel, callerAgentID)) return { text, redacted: false, mode: "shared" };
+  // The owner's lines and the app's own notes (`system`: a task started, a request interrupted) are the room's own: they hold no
+  // private content. Another bot's line, even in a room the caller belongs to, is read through that bot's visibility, which is
+  // how the group context (`groupHistory`) shows it: no reader shows a member more than that.
+  if ((row.from_type === "user" || row.from_type === "system") && isChannelParticipant(db, channel, callerAgentID)) return { text, redacted: false, mode: "shared" };
   const { owner, visibility } = rowAuthority(db, channel, row);
   return redactForCaller(text, owner, callerKey(callerAgentID), visibility);
+}
+
+/** Did `callerAgentID` write this row? Its own lines are in its own history already, so a reader of the room's history skips them. */
+export function isOwnRow(db: Database, channel: ChannelRow | null | undefined, row: RowAuthor, callerAgentID: string | null | undefined): boolean {
+  return rowAuthority(db, channel, row).owner === callerKey(callerAgentID);
 }

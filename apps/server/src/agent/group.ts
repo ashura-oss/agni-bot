@@ -12,8 +12,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { resolveAgentMention } from "./mentions";
-import { callerKey, isChannelParticipant, redactRowForCaller, rowAuthority } from "./channel-visibility";
-import { redactForCaller } from "./visibility";
+import { isOwnRow, redactRowForCaller } from "./channel-visibility";
 import { channelAgentIDs, getChannel, type ChannelRow } from "../stores/channels";
 import type { TaintSource } from "../policy/types";
 
@@ -50,22 +49,18 @@ export function groupHistory(db: Database, channelID: string, callerAgentID: str
     .slice(0, GROUP_HISTORY_MESSAGES)
     .reverse();
   const channel = getChannel(db, channelID);
-  const member = isChannelParticipant(db, channel, callerAgentID);
-  const caller = callerKey(callerAgentID);
   const lines: string[] = [];
   for (const row of rows) {
+    if (isOwnRow(db, channel, row, callerAgentID)) continue;
+    // Every line is read by the one rule (`redactRowForCaller`), the same one `expand` and the transcript search use.
+    const seen = redactRowForCaller(db, channel, row, row.text, callerAgentID);
+    const hidden = seen.redacted || !seen.text;
     if (row.from_type === "user") {
-      // The room's own owner line is for the room; anyone else reads it as the strictest bot in the room would let them.
-      const seen = member ? { text: row.text, redacted: false } : redactRowForCaller(db, channel, row, row.text, callerAgentID);
-      lines.push(seen.redacted || !seen.text ? "owner: (private)" : `owner: ${clip(seen.text)}`);
-      continue;
+      lines.push(hidden ? "owner: (private)" : `owner: ${clip(seen.text ?? "")}`);
+    } else {
+      const name = row.name?.trim() || row.from_id;
+      lines.push(hidden ? `${name}: (replied; private)` : `${name}: ${clip(seen.text ?? "")}`);
     }
-    const { owner, visibility } = rowAuthority(db, channel, row);
-    if (owner === caller) continue;
-    // Even inside the room, another bot's line is shown through that bot's visibility.
-    const seen = redactForCaller(row.text, owner, caller, visibility);
-    const name = row.name?.trim() || row.from_id;
-    lines.push(seen.redacted || !seen.text ? `${name}: (replied; private)` : `${name}: ${clip(seen.text)}`);
   }
   return lines;
 }
