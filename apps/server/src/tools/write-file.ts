@@ -1,10 +1,11 @@
 /**
  * File write tool. Writes content to any path, creating parent directories as
  * needed. There is no enforced sandbox here — the guard is policy, not
- * mechanism: `ApprovalBroker.requiresApproval` routes writes *outside* the
+ * mechanism: the policy engine (`policy/engine.ts`, which reads this tool's
+ * row in `policy/metadata.ts`: `assessWrite`) routes writes *outside* the
  * scratch tree through the approval card, and lets scratch writes run free
- * unless they would overwrite a file that already exists (AGENTS.md).
- * `isOutsideScratch` is the boundary check both sides share, and
+ * unless they would overwrite or append to a file that already exists
+ * (AGENTS.md). `isOutsideScratch` is the boundary check both sides share, and
  * `resolveWritePath` is the one answer to "which file does this path mean":
  * relative paths are relative to scratch, symlinks are followed.
  */
