@@ -12,7 +12,8 @@ import type { Migration } from "../migrations";
  *    again, so a retry does not get a fresh 30 minutes.
  *  - `run_clock_waits`: the times the run waited on the owner (an approval card, a question, a password
  *    prompt). The owner's time is not the run's, so it is taken off. An open wait (`ended_at` NULL) is one
- *    that has not ended, or whose process died: it counts for at most the longest wait the app allows.
+ *    that has not ended: it counts for at most the longest wait the app allows. A restart closes the ones a
+ *    dead process left open (`closeOpenWaits`), so a crash does not give a retried job that time for free.
  *
  * `turns.ended_by` marks a turn the run's time limit ended. Its `stop_reason` stays `timeout` (that is the
  * protocol's word for it), but the nightly harness review must not read it as a model that is too slow.
@@ -32,6 +33,7 @@ export const migration: Migration | null = {
       ended_at TEXT
     );
     CREATE INDEX idx_run_clock_waits_key ON run_clock_waits(clock_key);
+    CREATE INDEX idx_run_clocks_started ON run_clocks(started_at);   -- every clock start drops the ones older than a week
     ALTER TABLE turns ADD COLUMN ended_by TEXT;   -- NULL, or wall_time
   `,
 };

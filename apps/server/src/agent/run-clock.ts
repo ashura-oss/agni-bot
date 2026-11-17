@@ -90,6 +90,20 @@ export function beginOwnerWait(db: Database, key: string, nowMs: number = Date.n
   };
 }
 
+/**
+ * At boot no wait on the owner is still going (the cards and questions lived in the dead process): end every open wait
+ * at `at`. Left open, it would count for the longest a wait can last, and a job retried after a crash would get that
+ * time free. Returns how many were closed. Never throws.
+ */
+export function closeOpenWaits(db: Database, at: string = new Date().toISOString()): number {
+  try {
+    return db.run("UPDATE run_clock_waits SET ended_at = ? WHERE ended_at IS NULL", [at]).changes;
+  } catch (error) {
+    log.warn(`run clock: the waits a dead process left open could not be closed: ${error instanceof Error ? error.message : String(error)}`);
+    return 0;
+  }
+}
+
 /** Hold the turn's timer and take the wait off the run's clock until the returned function is called. */
 export function holdForOwner(db: Database, key: string, timer: { hold(): () => void }): () => void {
   const release = timer.hold();
@@ -112,6 +126,10 @@ export function readClock(db: Database, key: string, nowMs: number = Date.now())
     const clock = db.query<{ started_at: string }, [string]>("SELECT started_at FROM run_clocks WHERE clock_key = ?").get(key);
     const startedAtMs = clock ? Date.parse(clock.started_at) : Number.NaN;
     if (!Number.isFinite(startedAtMs)) return null;
+    // OPEN ITEM (security note, recorded not redesigned): waits are kept per clock, not per turn, so one member of a run
+    // (a delegated child) waiting on the owner takes that time off the clock its siblings share. The bound: each member
+    // is also held by its own turn timer (`TurnTimer`, which a hold pauses only for that turn) and the cap on delegations
+    // at once, and one wait lasts at most OPEN_WAIT_CAP_MS. Per-turn waits would need the member's id on every wait row.
     const rows = db.query<{ started_at: string; ended_at: string | null }, [string]>("SELECT started_at, ended_at FROM run_clock_waits WHERE clock_key = ?").all(key);
     const spans: Array<[number, number]> = [];
     for (const row of rows) {

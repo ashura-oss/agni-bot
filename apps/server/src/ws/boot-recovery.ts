@@ -15,6 +15,7 @@ import { log } from "../log";
 import { appendChannelMessage, ensureDMChannel } from "../stores/channels";
 import { canonicalAgentID } from "../agent/personas";
 import { closeRequest } from "../agent/closure";
+import { closeOpenWaits } from "../agent/run-clock";
 import { nowISO } from "../util/ids";
 
 export const INTERRUPTED_NOTICE = "This reply was interrupted by a restart.";
@@ -71,6 +72,8 @@ export function recoverInterruptedTurns(db: Database, emit: (body: ServerFrameBo
     // Waiters are in memory: every card still pending belongs to a dead turn.
     result.approvals = db.run("UPDATE approvals SET status = 'expired', decided_at = ? WHERE status = 'pending'", [now]).changes;
     result.forms = db.run("UPDATE forms SET status = 'expired' WHERE status = 'pending'").changes;
+    // The same cards were what the run clock's waits were on: they end here, not at the longest a wait may last.
+    closeOpenWaits(db, now);
   })();
 
   // One visible notice per conversation, however many of its blocks were running.
