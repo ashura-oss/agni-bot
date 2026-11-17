@@ -80,3 +80,12 @@ describe("colour comes from the tokens", () => {
     expect(css.match(/#[0-9a-fA-F]{3,8}\b|\brgba?\(/g) ?? []).toEqual([]);
   });
 });
+
+describe("the per-job limit's hint", () => {
+  it("is readable: secondary ink at the meta size, not the tertiary caption", () => {
+    const hint = declarations(css, ".spending-hint");
+    expect(hint.color).toBe("var(--ink-secondary)");
+    expect(hint["font-size"]).toBe("var(--text-meta)");
+    expect(hint.margin).toBe("0");
+  });
+});
