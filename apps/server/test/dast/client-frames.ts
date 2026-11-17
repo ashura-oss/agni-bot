@@ -89,6 +89,13 @@ export const FRAMES_NEEDING_AUTH: ClientFrame[] = [
   { type: "channel.create", name: "Attackers", agentIds: ["ea", "researcher"] },
   { type: "channel.list" },
   { type: "channel.history", channelId: "ch_x" },
+  // Sprint 2 (policy core): approval text, pause, bots on and off, spend caps. Each changes what runs or what it costs.
+  { type: "approval.full", requestID: "apr_x" },
+  { type: "policy.pause", paused: true },
+  { type: "agent.enabled.set", agentID: "ea", enabled: false },
+  { type: "spend.status" },
+  { type: "spend.caps.set", dayUsd: 0.01, perBotDayUsd: null, perJobUsd: 0.01 },
+  { type: "spend.continue", runKey: "run_x" },
 ];
 
 export const HELLO_FRAME_TYPE = "hello";
