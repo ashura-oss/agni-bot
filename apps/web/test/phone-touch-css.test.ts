@@ -221,6 +221,13 @@ describe("the unpin button on a pinned tile", () => {
     expect(hitTop).toBeGreaterThanOrEqual(-8);
   });
 
+  it("applies the same strip layout on a touch screen wider than a phone, and not to a desktop with hover", () => {
+    // The 22px circle over the tile corner has no 44px area on a tablet; `(hover: none)` selects those.
+    expect(pins).toMatch(/@media \(max-width: 720px\), \(hover: none\) \{/);
+    expect(pins).not.toMatch(/@media \(max-width: 720px\) \{/);
+    expect(pins).not.toMatch(/@media \(hover: hover\)/);
+  });
+
   it("leaves room above the first row on a phone so the scrolling list does not clip that area, and only there", () => {
     expect(px(declarations(phonePins, ".sidebar-grid")["padding-top"])).toBeGreaterThanOrEqual(8);
     // On a desktop the grid keeps the padding it had before the unpin button (overrides-v3.css: 0 above).

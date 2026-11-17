@@ -36,14 +36,15 @@
   border-color: var(--ink-secondary);
 }
 
-@media (max-width: 720px) {
+@media (max-width: 720px), (hover: none) {
   /* Room above the first row, so the touch area below is not clipped by the scrolling list. */
   .sidebar-grid {
     padding-top: 8px;
   }
 
-  /* A phone gets a 44px touch area, and it must not sit on the tile: a tap on the tile's top-right
-   * would unpin instead of opening the chat. So the cell keeps a strip above the tile for the button.
+  /* A phone, or any touch screen with no hover (a tablet is wider than 720px), gets a 44px touch area.
+   * It must not sit on the tile: a tap on the tile's top-right would unpin instead of opening the chat.
+   * So the cell keeps a strip above the tile for the button.
    * The circle is 22px in the strip; its touch area is the strip's full height, reaching 8px above the
    * cell (the grid's row gap, or its top padding) and 23px to the left of the circle. It stops where
    * the tile begins. The inset is from the padding box, inside the 1px border. */
