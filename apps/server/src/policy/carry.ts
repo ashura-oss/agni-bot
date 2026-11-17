@@ -287,10 +287,11 @@ export function readCarried(payload: unknown): Carried {
   let taint: TaintSource[];
   if (Array.isArray(p.taint)) taint = readTaint(p.taint);
   else if (p.taint !== undefined) taint = readTaint(undefined, "a job whose record of what it had read could not be read");
-  // No record at all. A wake is told what its tasks read by its results, and a job starts clean; a run another bot started (a delegated child,
-  // a brief), whose sender did not say what it had read, is as tainted as an unknown source.
-  else if (isWake || !(isNonEmpty(p.delegationTaskID) || (typeof p.peer === "object" && p.peer !== null))) taint = [];
-  else taint = [unknownTaint("a task whose sender did not say what it had read")];
+  // No record at all. A wake is told what its tasks read by its results, and the owner's own job (`ownerOnly`) read nothing, as the owner wrote it.
+  // Anything else, a bot's job from before taint was recorded included, has no record of what its sender had read: one unknown source. Its tools
+  // are another matter (no list is not narrowed): it runs with its bot's own, but tainted.
+  else if (isWake || ownerOnly) taint = [];
+  else taint = [unknownTaint("a job whose sender did not say what it had read")];
   return {
     taint,
     narrowed,

@@ -177,7 +177,10 @@ describe("through the real loop: a bot's follow-up chain is put to the owner at 
     expect(next!.card).not.toBeNull();
   });
 
-  scenarioTest("a job the owner made before the marker existed, or whose marker cannot be read, is not shown to be the owner's: its follow-up is asked", async () => {
+  // A job nothing proves to be the owner's is a bot's, and a bot's job with no record of what its sender read is tainted as an unknown source
+  // (round L): a tainted run may not schedule at all, so it is not asked either; the follow-up is not made. (The owner's own jobs from before the
+  // marker are stamped by migration 65.)
+  scenarioTest("a job with no marker, or whose marker cannot be read, is not shown to be the owner's: it is tainted and may not schedule a follow-up", async () => {
     const s = await scenarios.start();
     const a = await s.connect({ label: "A" });
     const owner = answerCards(a, "reject");
@@ -194,7 +197,9 @@ describe("through the real loop: a bot's follow-up chain is put to the owner at 
     for (let tick = 0; tick < 8 && !done(); tick += 1) await s.runner().tick();
     owner.stop();
     expect(allCallsTo(s, "job_schedule", a).length, "the fires never made their calls; the script is out of step").toBe(4);
-    expect(owner.cards.length, "a job with no readable marker scheduled its follow-up with no card").toBe(4);
+    expect(owner.cards.length, "a tainted run was put a card for a one-shot job").toBe(0);
+    for (const entry of allCallsTo(s, "job_schedule", a)) expect({ call: entry.callID, made: resultJson(entry).id }).toEqual({ call: entry.callID, made: undefined });
+    expect(s.all<{ payload: string }>("SELECT payload FROM jobs WHERE kind = 'turn'").filter((row) => /Follow /.test((JSON.parse(row.payload) as { text?: string }).text ?? "") && (JSON.parse(row.payload) as { scheduledBy?: string }).scheduledBy === "bot"), "a job with no readable marker scheduled its follow-up").toEqual([]);
   });
 
   scenarioTest("a pure owner chain of two links is not asked, and its stored rules apply", async () => {

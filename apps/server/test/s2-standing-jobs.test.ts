@@ -715,7 +715,7 @@ describe("a routine is a repeating job: a routine_create and routine_pause (resu
   scenarioTest("a fire of a job the owner made asks before it creates a routine", async () => {
     const s = await scenarios.start();
     const a = await s.connect({ label: "A" });
-    enqueueJob(s.db, { kind: "turn", runAt: past(), payload: { agentID: "ea", text: "Do the weekly check.", notify: false } });
+    enqueueJob(s.db, { kind: "turn", runAt: past(), payload: { agentID: "ea", text: "Do the weekly check.", notify: false, ownerOnly: true } });
     const owner = answerCards(a, "reject");
     s.model.queue(...scripted(true, [call("routine_create", create, "call_routine"), say("Tried.")]));
     await tickUntil(s, () => allCallsTo(s, "routine_create", a).some((entry) => entry.callID === "call_routine"));
