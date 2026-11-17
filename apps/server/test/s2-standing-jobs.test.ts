@@ -7,8 +7,11 @@
  * wake or resumed run, a tainted run, an origin that cannot be read) puts a card to the owner, and no job exists until
  * the owner approves. A refusal is a run denial. A card never offers "Always allow", and no stored rule approves one.
  *
- * Also here: the wake key carries the wake scope (two runs of one recurring job do not share a queued wake).
+ * Also here: the wake key carries the wake scope (two runs of one recurring job do not share a queued wake), and a task
+ * resumed after the owner's answer keeps the refusal scope of the job that delegated it.
  */
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
 import { resetS2Startup } from "../src/startup/s2";
 import { setRunCaps } from "../src/stores/policy-settings";
@@ -28,6 +31,7 @@ useWeb();
 afterEach(() => { setSystemTime(); resetS2Startup(); });
 
 const past = (): string => new Date(Date.now() - 1_000).toISOString();
+const shell = (path: string): string => path.replaceAll("\\", "/");
 
 interface JobPayload { text?: string; everyMs?: number; dailyAt?: string; scheduledBy?: string; denialRoot?: string; createdByRequest?: string; rootTurnID?: string }
 interface JobRowOf { id: string; state: string; payload: JobPayload }
@@ -419,5 +423,52 @@ describe("a repeating job the owner approved", () => {
     expect(new Set(wakes.map((wake) => wake.payload.rootTurnID)).size, "the two wakes carry the same run").toBe(2);
     expect(wakes.map((wake) => wake.result ?? ""), "a wake was held to the other fire's count").not.toContainEqual(expect.stringMatching(/wake limit/i));
     expect(s.model.overruns).toBe(0);
+  });
+});
+
+describe("a task resumed after the owner's answer keeps the refusal of the job that delegated it", () => {
+  scenarioTest("the chat refused a delete and scheduled a job; the job delegated; the resumed task may not write the file", async () => {
+    const s = await scenarios.start();
+    mkdirSync(s.scratch, { recursive: true });
+    const target = join(s.scratch, "ledger.txt");
+    writeFileSync(target, "original ledger");
+    const a = await s.connect({ label: "A" });
+
+    s.model.queue(...scripted(true, [
+      call("bash", { command: `rm ${shell(target)}` }, "call_rm"),
+      call("job_schedule", { text: "Have the coder replace the ledger.", at: past() }, "call_seed"),
+      say("Scheduled."),
+    ]));
+    const request = await playTurn(s, a, "clean up the old ledger", { answer: (card) => (card.action.includes("rm ") ? "reject" : "once") });
+    expect(request.calls.find((entry) => entry.callID === "call_seed")?.ok, "the owner's turn could not schedule the job; the script is out of step").toBe(true);
+
+    // The job delegates; the coder parks on a question.
+    s.model.queue(
+      ...scripted(true, [call("delegate_task", { toAgentID: "coder", goal: "Replace the contents of the ledger file with a fresh one." }, "call_delegate"), say("The coder is on it.")]),
+      call("request_owner_input", { question: "Which fresh contents?" }, "call_ask"),
+    );
+    const parked = (): { id: string; q: string } | null => {
+      const row = s.get<{ id: string; pending_question_id: string | null; delegate_state: string }>("SELECT id, pending_question_id, delegate_state FROM tasks WHERE owner_agent_id = 'coder'");
+      return row?.delegate_state === "needs_input" && row.pending_question_id ? { id: row.id, q: row.pending_question_id } : null;
+    };
+    await tickUntil(s, () => parked() !== null, 8);
+    const task = parked();
+    expect(task, "the coder never parked on its question; the script is out of step").not.toBeNull();
+
+    // The resumed task is a job of its own; it must carry the scope the job was handed.
+    const owner = answerCards(a, "once");
+    s.model.queue(...scripted(true, [call("write_file", { path: target, content: "overwritten after the answer" }, "call_resumed_write"), say("Tried."), say("Noted.")]));
+    a.send({ type: "task.answer", taskID: task!.id, questionID: task!.q, text: "Just empty it." });
+    await a.waitFor("task.answer.ok", { why: "the answer to be accepted" });
+    const resumed = s.all<{ payload: string }>("SELECT payload FROM jobs WHERE payload LIKE ?", `%${task!.id}%`).map((row) => JSON.parse(row.payload) as JobPayload).filter((payload) => payload.text === "Just empty it.");
+    expect(resumed[0]?.denialRoot, "the resumed task's job does not carry the refusal scope of the job that delegated it").toBe(request.turnID);
+    await tickUntil(s, () => allCallsTo(s, "write_file", a).some((entry) => entry.callID === "call_resumed_write"), 8);
+    owner.stop();
+
+    const record = allCallsTo(s, "write_file", a).find((entry) => entry.callID === "call_resumed_write");
+    expect(record, "the resumed coder never tried the write; the script is out of step").toBeDefined();
+    expect(owner.cards, "the resumed coder raised a card about a file its request was refused").toEqual([]);
+    expect(String(resultJson(record).error ?? "(no error)"), "the resumed coder was stopped by something other than the refusal").toMatch(/refus|said no|not allowed|denied/i);
+    expect(readFileSync(target, "utf8")).toBe("original ledger");
   });
 });
