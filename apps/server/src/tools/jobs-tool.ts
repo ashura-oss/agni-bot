@@ -19,6 +19,7 @@ import {
 import { canonicalAgentID } from "../agent/personas";
 import { describeSchedule, nextDailyRun, parseDay, parseWallClock } from "../jobs/schedule";
 import { isPeerPrincipal, isTainted } from "../policy/context";
+import { denialScope } from "../policy/denials";
 import { CLOSURE_WORDING_REFUSAL, closureWording } from "../agent/closure";
 import { canSelfSchedule, maxSelfScheduledJobs } from "../agent/guardrails";
 
@@ -88,10 +89,18 @@ function schedulingRefusal(ctx: ToolContext): string | null {
   return null;
 }
 
-/** The request a scheduled job stays in: the owner's refusals hold in it and its wakes are counted with the request's. */
+/** The request a scheduled job stays in: its wakes are counted with the request's. */
 export interface RequestRoot {
   rootTurnID: string;
   rootJob: string | null;
+}
+
+/** What a job a bot schedules keeps of the run that scheduled it. */
+export interface ScheduledFrom {
+  /** The scheduling run's refusal scope: what the owner refused there holds in every run of the job. Always set for a run. */
+  denialRoot?: string;
+  /** The scheduling run's request, for the job's wake count. */
+  root?: RequestRoot;
 }
 
 /**
@@ -106,7 +115,8 @@ function inheritedRoot(ctx: ToolContext): RequestRoot | undefined {
   return { rootTurnID: run.rootTurnID, rootJob: run.rootJob };
 }
 
-export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: string, root?: RequestRoot): JobScheduleResult {
+export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: string, from: ScheduledFrom = {}): JobScheduleResult {
+  const { root, denialRoot } = from;
   const requested = args.agentID?.trim();
   if (requested && canonicalAgentID(requested) !== canonicalAgentID(callerAgentID)) {
     throw new Error("an agent may only schedule jobs for itself");
@@ -133,6 +143,8 @@ export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: 
     notify: args.notify !== false,
     // Still the request it was scheduled in (a job has a clock of its own, which `clockKey` would take away).
     ...(root ? { rootTurnID: root.rootTurnID, rootJob: root.rootJob } : {}),
+    // The owner's refusals in the run that scheduled it hold in every run of this job, for good (what the run delegates, wakes and schedules too).
+    ...(denialRoot ? { denialRoot } : {}),
   };
 
   let runAt: string;
@@ -276,7 +288,7 @@ export function createJobTools(db: Database): ToolDefinition<unknown, unknown>[]
           ...(input.everyMinutes === undefined ? {} : { everyMinutes: Number(input.everyMinutes) }),
           ...(input.agent_id === undefined ? {} : { agentID: String(input.agent_id) }),
           ...(input.notify === undefined ? {} : { notify: Boolean(input.notify) }),
-        }, callerOf(ctx), inheritedRoot(ctx));
+        }, callerOf(ctx), { ...(ctx.run ? { denialRoot: denialScope(ctx.run) } : {}), root: inheritedRoot(ctx) });
       },
     } as ToolDefinition<unknown, unknown>,
     {

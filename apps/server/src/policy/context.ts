@@ -23,6 +23,8 @@ export interface RunContextInput {
   jobID?: string | null;
   rootJob?: string | null;
   rootTurnID?: string;
+  /** The refusal scope handed down from the run that scheduled this job (see `RunContext.denialRoot`). */
+  denialRoot?: string;
   /** The time limit's clock. Default: the root's own (hand-built contexts), which a real run always names. */
   clockKey?: string;
   principal: { kind: PrincipalKind; from?: string };
@@ -59,6 +61,7 @@ export function createRunContext(input: RunContextInput): RunContext {
     // A job that nobody delegated from is its own root; a delegated child shares its parent's (which may be no job at all).
     rootJob: input.rootJob !== undefined ? input.rootJob : input.jobID ?? null,
     rootTurnID: input.rootTurnID ?? input.turnID,
+    ...(input.denialRoot ? { denialRoot: input.denialRoot } : {}),
     clockKey: input.clockKey ?? input.rootTurnID ?? input.turnID,
     principal: { ...input.principal },
     effectiveCapabilities: new Set(input.capabilities),

@@ -159,6 +159,8 @@ export interface TaskTurnRun {
     /** The refusal scope (`RunContext.rootTurnID`, `rootJob`): which request's "no" still holds. Not the clock. */
     rootTurnID?: string;
     rootJob?: string | null;
+    /** The refusal scope of the run that scheduled this job, which the job keeps (`RunContext.denialRoot`). Server-set, from the job's payload. */
+    denialRoot?: string;
     /**
      * The clock of a run this one is part of (a delegated child or a handoff): it is measured on its parent's.
      * Without it the run has a clock of its own, started now: the job's, or the turn's.
@@ -561,6 +563,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
     // A delegated child shares its parent's root (which may be a chat turn, not a job); any other job is its own root.
     rootJob: run.policy?.rootTurnID ? (run.policy.rootJob ?? null) : (run.policy?.jobID ?? null),
     rootTurnID: run.policy?.rootTurnID ?? turnID,
+    ...(run.policy?.denialRoot ? { denialRoot: run.policy.denialRoot } : {}),
     clockKey,
     principal,
     capabilities: callableTools,

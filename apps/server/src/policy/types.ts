@@ -94,6 +94,12 @@ export interface RunContext {
   /** The turn at the root of the chain: the "run" a denial belongs to when no job does. */
   rootTurnID: string;
   /**
+   * The refusal scope this run was handed, when it is not its own root: a job a bot scheduled keeps the scope of the run that
+   * scheduled it (and what that run delegated, woke or resumed carries it on), so what the owner refused there holds in the job
+   * for good. Set by the server from the job's payload, never by a tool's arguments. Absent: the scope is the root's own.
+   */
+  denialRoot?: string;
+  /**
    * The time limit's clock (`agent/run-clock.ts`), which is not the same thing as the root: a wake, a resumed task and a
    * job's next run keep the refusals of their root but start a clock of their own. A delegated child shares its parent's.
    */

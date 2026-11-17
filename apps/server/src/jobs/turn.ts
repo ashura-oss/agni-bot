@@ -111,6 +111,12 @@ export interface TurnJobPayload {
   /** The request this job belongs to: set on a delegated child, a wake and a resumed task so a refusal earlier in the chain still holds. */
   rootTurnID?: string;
   rootJob?: string | null;
+  /**
+   * The refusal scope a job a bot scheduled keeps: the scope of the run that scheduled it, so what the owner refused there holds in
+   * every run of the job and in what it delegates, wakes and schedules. Written by the server (`job_schedule`, `delegate_task`),
+   * never taken from a tool's arguments.
+   */
+  denialRoot?: string;
   /** The clock a delegated child is measured on: its parent's. A job without one starts a clock of its own. */
   clockKey?: string;
   /** The run a delegation counts against (see `delegate_task`'s cap on running delegations). */
@@ -669,6 +675,7 @@ async function runTurn(
         // undefined says the sender did not say what it had read (a bot that starts from it is tainted); a list, even empty, says it did.
         ...(payload.taint !== undefined || payload.wakeKey ? { taint: [...(payload.taint !== undefined ? readTaint(payload.taint) : []), ...wakeTaint(deps.db, payload.results)] } : {}),
         ...(payload.rootTurnID ? { rootTurnID: payload.rootTurnID, rootJob: payload.rootJob ?? null } : {}),
+        ...(typeof payload.denialRoot === "string" && payload.denialRoot !== "" ? { denialRoot: payload.denialRoot } : {}),
         // A delegated child is on its parent's clock; a wake, a resumed task and any other job start their own, and a retry keeps the one its run started (`jobs.run_clock_key`).
         ...(payload.clockKey ? { clockKey: payload.clockKey } : {}),
         ...(jobSlot ? { jobSlot } : {}),

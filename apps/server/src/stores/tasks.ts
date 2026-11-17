@@ -35,6 +35,8 @@ export interface DelegationBrief {
    */
   rootTurnID?: string;
   rootJob?: string | null;
+  /** The refusal scope the delegating run was handed (`RunContext.denialRoot`), when it is not its own root; carried on to the child, the wake and a resumed run. */
+  denialRoot?: string;
   /**
    * What this delegation is for. Phase 1 stores and reports it; the value is
    * not yet used to route or gate the work.
@@ -395,12 +397,16 @@ export function briefChainID(raw: string | null): string | undefined {
 }
 
 /** The root run a delegation was started under; absent for briefs written before roots were kept. */
-export function briefRoot(raw: string | null): { rootTurnID: string; rootJob: string | null } | undefined {
+export function briefRoot(raw: string | null): { rootTurnID: string; rootJob: string | null; denialRoot?: string } | undefined {
   if (!raw) return undefined;
   try {
-    const value = JSON.parse(raw) as { rootTurnID?: unknown; rootJob?: unknown };
+    const value = JSON.parse(raw) as { rootTurnID?: unknown; rootJob?: unknown; denialRoot?: unknown };
     if (typeof value.rootTurnID !== "string" || value.rootTurnID === "") return undefined;
-    return { rootTurnID: value.rootTurnID, rootJob: typeof value.rootJob === "string" && value.rootJob !== "" ? value.rootJob : null };
+    return {
+      rootTurnID: value.rootTurnID,
+      rootJob: typeof value.rootJob === "string" && value.rootJob !== "" ? value.rootJob : null,
+      ...(typeof value.denialRoot === "string" && value.denialRoot !== "" ? { denialRoot: value.denialRoot } : {}),
+    };
   } catch { return undefined; }
 }
 

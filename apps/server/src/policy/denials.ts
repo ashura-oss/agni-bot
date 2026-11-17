@@ -39,9 +39,16 @@ export interface DenialRecord {
 export const SHELL_REFUSAL: ToolResource = { kind: "other", value: "agni:shell" };
 const isShellRefusal = (kind: ToolResource["kind"], key: string): boolean => kind === SHELL_REFUSAL.kind && key === SHELL_REFUSAL.value;
 
-/** The run a denial belongs to: the job at the root of the chain, or the chat turn that began it. */
-export function denialScope(run: Pick<RunContext, "rootJob" | "rootTurnID">): string {
-  return run.rootJob ?? run.rootTurnID;
+/** What names the run a denial belongs to. */
+export type DenialRun = Pick<RunContext, "rootJob" | "rootTurnID" | "denialRoot">;
+
+/**
+ * The run a denial belongs to: the scope a job was handed by the run that scheduled it, else the job at the root of the
+ * chain, else the chat turn that began it. A job a bot scheduled keeps the scope of the run it was scheduled from, so a
+ * "no" in a chat holds in a routine made from that chat, and in everything that routine delegates, schedules or wakes.
+ */
+export function denialScope(run: DenialRun): string {
+  return run.denialRoot ?? run.rootJob ?? run.rootTurnID;
 }
 
 const HARMFUL: ReadonlySet<Operation> = new Set(["delete", "change", "send", "run"]);
@@ -57,7 +64,7 @@ function covers(denied: Operation, attempted: Operation): boolean {
 
 export function recordDenial(
   db: Database,
-  run: Pick<RunContext, "rootJob" | "rootTurnID" | "bot">,
+  run: DenialRun & Pick<RunContext, "bot">,
   denial: { tool: string; operation: Operation; resources: ToolResource[]; cause: "denied" | "expired" },
 ): void {
   const scope = denialScope(run);
@@ -75,7 +82,7 @@ interface DenialRow {
 }
 
 /** The first refusal this run holds, whatever it was about, or null. One indexed read. */
-export function anyDenial(db: Database, run: Pick<RunContext, "rootJob" | "rootTurnID">): DenialRecord | null {
+export function anyDenial(db: Database, run: DenialRun): DenialRecord | null {
   const row = db
     .query<DenialRow, [string]>("SELECT id, resource_kind, resource_key, operation, tool_name, cause, blocked_count FROM run_denials WHERE run_key = ? ORDER BY created_at LIMIT 1")
     .get(denialScope(run));
@@ -83,7 +90,7 @@ export function anyDenial(db: Database, run: Pick<RunContext, "rootJob" | "rootT
 }
 
 /** The run-wide refusal of a shell command the owner was asked about and refused, or null. One indexed read. */
-export function shellDenial(db: Database, run: Pick<RunContext, "rootJob" | "rootTurnID">): DenialRecord | null {
+export function shellDenial(db: Database, run: DenialRun): DenialRecord | null {
   const row = db
     .query<DenialRow, [string, string, string]>("SELECT id, resource_kind, resource_key, operation, tool_name, cause, blocked_count FROM run_denials WHERE run_key = ? AND resource_kind = ? AND resource_key = ? ORDER BY created_at LIMIT 1")
     .get(denialScope(run), SHELL_REFUSAL.kind, SHELL_REFUSAL.value);
@@ -100,7 +107,7 @@ function toRecord(row: DenialRow): DenialRecord {
 /** The first earlier "no" in this run that covers any of these resources for this operation. */
 export function findDenial(
   db: Database,
-  run: Pick<RunContext, "rootJob" | "rootTurnID">,
+  run: DenialRun,
   operation: Operation,
   resources: ToolResource[],
 ): DenialRecord | null {
