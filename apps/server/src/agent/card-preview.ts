@@ -102,10 +102,30 @@ function bodyOf(toolName: string, args: Record<string, unknown>, bot: string, op
   if (toolName === "routine_create") return routineCreatePreview(args, bot);
   if (toolName === "routine_pause" && args.enabled === true) return routineResumePreview(args, bot, options);
   if (toolName === "bash") return bashPreview(args);
+  if (toolName === "web_fetch" && typeof args.url === "string") return webFetchPreview(args);
   if (toolName === "run_privileged") return privilegedPreview(args);
   if (toolName === "mail_send") return mailPreview(args);
   if (toolName === "write_file" && typeof args.path === "string") return writePreview(args, args.path);
   return fullCall(toolName, args);
+}
+
+/**
+ * An address as the server will use it (`new URL(...)`: the host in its punycode form, the path and query escaped), and the way it was
+ * written when that is not the same. A look-alike host or an unescaped character reads as what it really is.
+ */
+function addressLines(lead: string, written: string): string[] {
+  let resolved: string;
+  try {
+    resolved = new URL(written).toString();
+  } catch {
+    return [`${lead}${whole(written)} (this is not an address the server can read, so it would not be fetched)`];
+  }
+  return resolved === written ? [`${lead}${whole(resolved)}`] : [`${lead}${whole(resolved)}`, `Written as: ${whole(written)}`];
+}
+
+/** A page fetch: the address as it will be resolved, and every other argument the call was given. */
+function webFetchPreview(args: Record<string, unknown>): string {
+  return [...addressLines("Fetches: ", String(args.url)), ...alsoGiven(args, ["url"])].join("\n");
 }
 
 /** The command, quoted line by line, and where it runs. */
@@ -217,7 +237,7 @@ function jobPreview(kind: "repeating_job" | "next_job", args: Record<string, unk
 /** What a routine does before each run, in words. */
 function preflightLine(preflight: Preflight | undefined): string {
   switch (preflight?.kind) {
-    case "http": return `Before each run: it fetches ${whole(preflight.url)}`;
+    case "http": return addressLines("Before each run: it fetches ", String(preflight.url ?? "")).join("\n");
     case "sql": return `Before each run: it runs this read-only query: ${whole(preflight.query)}`;
     case "mail": return `Before each run: it checks the ${whole(preflight.account)} mailbox for new mail`;
     default: return "Before each run: nothing (it runs on every tick)";
