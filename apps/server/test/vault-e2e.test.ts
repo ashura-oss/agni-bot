@@ -11,6 +11,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { cleanChildEnv } from "./child-env";
 
 const ENTRY = resolve(import.meta.dir, "../src/index.ts");
 const CANARY = "gsk_e2e_canary_value_0123456789";
@@ -31,15 +32,6 @@ afterEach(async () => {
   roots = [];
 });
 
-function cleanEnv(extra: Record<string, string>): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [name, value] of Object.entries(process.env)) {
-    if (value === undefined || /^AGNI_|API_KEY|TOKEN|SECRET|PASSWORD|^GROQ|^CEREBRAS|^NVIDIA|^OPENROUTER/i.test(name)) continue;
-    env[name] = value;
-  }
-  return { ...env, ...extra };
-}
-
 async function freePort(): Promise<number> {
   const server = Bun.serve({ port: 0, fetch: () => new Response("") });
   const port = server.port as number;
@@ -50,7 +42,7 @@ async function freePort(): Promise<number> {
 async function agni(home: string, args: string[], extra: Record<string, string> = {}): Promise<{ code: number; out: string }> {
   const child = Bun.spawn([process.execPath, ENTRY, ...args], {
     cwd: tmpdir(),
-    env: cleanEnv({ AGNI_HOME: home, AGNI_KEYSTORE: "passphrase", AGNI_VAULT_PASSPHRASE_FILE: join(home, "..", "pp.txt"), ...extra }),
+    env: cleanChildEnv({ AGNI_HOME: home, AGNI_KEYSTORE: "passphrase", AGNI_VAULT_PASSPHRASE_FILE: join(home, "..", "pp.txt"), ...extra }),
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -66,7 +58,7 @@ async function serve(home: string, extra: Record<string, string> = {}): Promise<
   const port = await freePort();
   const child = Bun.spawn([process.execPath, ENTRY, "serve"], {
     cwd: tmpdir(),
-    env: cleanEnv({ AGNI_HOME: home, AGNI_PORT: String(port), AGNI_KEYSTORE: "passphrase", AGNI_VAULT_PASSPHRASE_FILE: join(home, "..", "pp.txt"), ...extra }),
+    env: cleanChildEnv({ AGNI_HOME: home, AGNI_PORT: String(port), AGNI_KEYSTORE: "passphrase", AGNI_VAULT_PASSPHRASE_FILE: join(home, "..", "pp.txt"), ...extra }),
     stdout: "pipe",
     stderr: "pipe",
   });

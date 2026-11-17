@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { cleanChildEnv } from "./child-env";
 import { localDeviceToken } from "../src/daemon";
 import { createMemoryKeyStore, isVaultUnlocked, lockVault, setKeyStoreOverride, unlockVault, type KeyStore } from "../src/secrets";
 import { loadVaultEnvForCli } from "../src/startup/s3-vault";
@@ -98,19 +99,10 @@ describe("agni daemon status in vault mode (real child processes)", () => {
     children.clear();
   });
 
-  function cleanEnv(extra: Record<string, string>): Record<string, string> {
-    const env: Record<string, string> = {};
-    for (const [name, value] of Object.entries(process.env)) {
-      if (value === undefined || /^AGNI_|API_KEY|TOKEN|SECRET|PASSWORD|^GROQ|^CEREBRAS|^NVIDIA|^OPENROUTER/i.test(name)) continue;
-      env[name] = value;
-    }
-    return { ...env, ...extra };
-  }
-
   async function agni(home: string, port: number, args: string[]): Promise<{ code: number; out: string }> {
     const child = Bun.spawn([process.execPath, ENTRY, ...args], {
       cwd: tmpdir(),
-      env: cleanEnv({ AGNI_HOME: home, AGNI_PORT: String(port), AGNI_KEYSTORE: "passphrase", AGNI_VAULT_PASSPHRASE_FILE: join(home, "..", "pp.txt") }),
+      env: cleanChildEnv({ AGNI_HOME: home, AGNI_PORT: String(port), AGNI_KEYSTORE: "passphrase", AGNI_VAULT_PASSPHRASE_FILE: join(home, "..", "pp.txt") }),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",

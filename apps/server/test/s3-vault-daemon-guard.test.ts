@@ -8,6 +8,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { cleanChildEnv } from "./child-env";
 import { daemonRunningRefusal } from "../src/cli/s3-vault";
 import { loadConfig } from "../src/config";
 
@@ -39,14 +40,9 @@ function writePid(home: string, pid: number): void {
 }
 
 async function runVault(home: string, parent: string, args: string[]): Promise<{ code: number; printed: string }> {
-  const env: Record<string, string> = {};
-  for (const [name, value] of Object.entries(process.env)) {
-    if (value === undefined || /^AGNI_|API_KEY|TOKEN|SECRET|PASSWORD|^GROQ|^CEREBRAS|^NVIDIA|^OPENROUTER/i.test(name)) continue;
-    env[name] = value;
-  }
   const child = Bun.spawn([process.execPath, ENTRY, "vault", ...args], {
     cwd: tmpdir(),
-    env: { ...env, AGNI_HOME: home, AGNI_KEYSTORE: "passphrase", AGNI_VAULT_PASSPHRASE_FILE: join(parent, "pp.txt") },
+    env: cleanChildEnv({ AGNI_HOME: home, AGNI_KEYSTORE: "passphrase", AGNI_VAULT_PASSPHRASE_FILE: join(parent, "pp.txt") }),
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
@@ -168,12 +164,7 @@ describe("agni vault migrate / export while a server runs that no pid file names
   }
 
   function envFor(home: string, parent: string, port: number): Record<string, string> {
-    const env: Record<string, string> = {};
-    for (const [name, value] of Object.entries(process.env)) {
-      if (value === undefined || /^AGNI_|API_KEY|TOKEN|SECRET|PASSWORD|^GROQ|^CEREBRAS|^NVIDIA|^OPENROUTER/i.test(name)) continue;
-      env[name] = value;
-    }
-    return { ...env, AGNI_HOME: home, AGNI_PORT: String(port), AGNI_KEYSTORE: "passphrase", AGNI_VAULT_PASSPHRASE_FILE: join(parent, "pp.txt") };
+    return cleanChildEnv({ AGNI_HOME: home, AGNI_PORT: String(port), AGNI_KEYSTORE: "passphrase", AGNI_VAULT_PASSPHRASE_FILE: join(parent, "pp.txt") });
   }
 
   function homeWithConfig(): { parent: string; home: string; configEnv: string } {

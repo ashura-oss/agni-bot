@@ -13,6 +13,7 @@ import { Database } from "bun:sqlite";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { cleanChildEnv } from "./child-env";
 import { openDatabase } from "../src/db";
 
 const ENTRY = resolve(import.meta.dir, "../src/index.ts");
@@ -41,15 +42,6 @@ afterEach(async () => {
   roots = [];
 });
 
-function cleanEnv(extra: Record<string, string>): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [name, value] of Object.entries(process.env)) {
-    if (value === undefined || /^AGNI_|API_KEY|TOKEN|SECRET|PASSWORD|^GROQ|^CEREBRAS|^NVIDIA|^OPENROUTER/i.test(name)) continue;
-    env[name] = value;
-  }
-  return { ...env, ...extra };
-}
-
 async function freePort(): Promise<number> {
   const server = Bun.serve({ port: 0, fetch: () => new Response("") });
   const port = server.port as number;
@@ -58,7 +50,7 @@ async function freePort(): Promise<number> {
 }
 
 function childEnv(home: string, extra: Record<string, string> = {}): Record<string, string> {
-  return cleanEnv({ AGNI_HOME: home, AGNI_KEYSTORE: "passphrase", AGNI_VAULT_PASSPHRASE_FILE: join(home, "..", "pp.txt"), ...extra });
+  return cleanChildEnv({ AGNI_HOME: home, AGNI_KEYSTORE: "passphrase", AGNI_VAULT_PASSPHRASE_FILE: join(home, "..", "pp.txt"), ...extra });
 }
 
 async function agni(home: string, args: string[]): Promise<{ code: number; out: string }> {

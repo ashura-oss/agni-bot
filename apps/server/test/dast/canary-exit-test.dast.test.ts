@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { PROTOCOL_VERSION } from "@agni/protocol";
+import { AGNI_ONLY, cleanChildEnv } from "../child-env";
 import { installFakeMailNetwork, type FakeMailNetwork } from "../injection/fake-mail-network";
 import { lockVault, unlockVault } from "../../src/secrets";
 import { startDast, type Dast } from "./dast-harness";
@@ -85,8 +86,7 @@ async function enterSecrets(server: Dast): Promise<string[]> {
 }
 
 function scan(server: Dast, extra: string[]): { code: number; out: string; err: string } {
-  const env = { ...process.env, AGNI_HOME: server.home } as Record<string, string>;
-  for (const key of Object.keys(env)) if (key.startsWith("AGNI_") && key !== "AGNI_HOME") delete env[key];
+  const env = cleanChildEnv({ AGNI_HOME: server.home }, AGNI_ONLY);
   const run = Bun.spawnSync([process.execPath, SCRIPT, "--secrets", `--canary=${PROVIDER_KEY},${PLUGIN_PASS}`, ...extra], { env, cwd: server.home });
   return { code: run.exitCode ?? -1, out: run.stdout.toString(), err: run.stderr.toString() };
 }

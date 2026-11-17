@@ -9,6 +9,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { cleanChildEnv } from "./child-env";
 import { optionalDatabase } from "../src/cli/s3-vault";
 import { DatabaseBehindError, openDatabase } from "../src/db";
 
@@ -88,14 +89,9 @@ describe("agni vault migrate against a database that is behind (real child proce
     writeFileSync(join(home, "config.env"), configEnv);
     databaseBehind(join(home, "data", "agni.sqlite"));
 
-    const env: Record<string, string> = {};
-    for (const [name, value] of Object.entries(process.env)) {
-      if (value === undefined || /^AGNI_|API_KEY|TOKEN|SECRET|PASSWORD|^GROQ|^CEREBRAS|^NVIDIA|^OPENROUTER/i.test(name)) continue;
-      env[name] = value;
-    }
     const child = Bun.spawn([process.execPath, ENTRY, "vault", "migrate"], {
       cwd: tmpdir(),
-      env: { ...env, AGNI_HOME: home, AGNI_KEYSTORE: "passphrase", AGNI_VAULT_PASSPHRASE_FILE: join(parent, "pp.txt") },
+      env: cleanChildEnv({ AGNI_HOME: home, AGNI_KEYSTORE: "passphrase", AGNI_VAULT_PASSPHRASE_FILE: join(parent, "pp.txt") }),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
@@ -130,14 +126,9 @@ describe("agni vault migrate and the database's backups (real child process)", (
     db.close();
     expect(readFileSync(oldBackup).includes(token)).toBe(true);
 
-    const env: Record<string, string> = {};
-    for (const [name, value] of Object.entries(process.env)) {
-      if (value === undefined || /^AGNI_|API_KEY|TOKEN|SECRET|PASSWORD|^GROQ|^CEREBRAS|^NVIDIA|^OPENROUTER/i.test(name)) continue;
-      env[name] = value;
-    }
     const child = Bun.spawn([process.execPath, ENTRY, "vault", "migrate"], {
       cwd: tmpdir(),
-      env: { ...env, AGNI_HOME: home, AGNI_KEYSTORE: "passphrase", AGNI_VAULT_PASSPHRASE_FILE: join(parent, "pp.txt") },
+      env: cleanChildEnv({ AGNI_HOME: home, AGNI_KEYSTORE: "passphrase", AGNI_VAULT_PASSPHRASE_FILE: join(parent, "pp.txt") }),
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",

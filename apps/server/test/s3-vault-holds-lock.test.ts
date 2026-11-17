@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { cleanChildEnv } from "./child-env";
 import { s3VaultCommands } from "../src/cli/s3-vault";
 import { lockVault } from "../src/secrets";
 import { serveLockPath, serveLockState } from "../src/startup/s3-serve-lock";
@@ -47,14 +48,9 @@ afterEach(() => {
 
 /** What a `serve` on this home printed, started at the moment `probe` is called. */
 function serveNow(): { code: number | null; printed: string } {
-  const env: Record<string, string> = {};
-  for (const [name, value] of Object.entries(process.env)) {
-    if (value === undefined || /^AGNI_|API_KEY|TOKEN|SECRET|PASSWORD|^GROQ|^CEREBRAS|^NVIDIA|^OPENROUTER/i.test(name)) continue;
-    env[name] = value;
-  }
   const result = Bun.spawnSync([process.execPath, ENTRY, "serve"], {
     cwd: tmpdir(),
-    env: { ...env, AGNI_HOME: home, AGNI_PORT: "18999", AGNI_KEYSTORE: "passphrase", AGNI_VAULT_PASSPHRASE_FILE: join(parent, "pp.txt") },
+    env: cleanChildEnv({ AGNI_HOME: home, AGNI_PORT: "18999", AGNI_KEYSTORE: "passphrase", AGNI_VAULT_PASSPHRASE_FILE: join(parent, "pp.txt") }),
     stdin: "ignore",
     timeout: 25_000,
     killSignal: "SIGKILL",

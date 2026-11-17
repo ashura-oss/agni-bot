@@ -4,6 +4,7 @@ import { createCipheriv, randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { AGNI_ONLY, cleanChildEnv } from "../child-env";
 import { scanFile, walkFiles } from "../../../../scripts/canary-scan";
 import { openDatabase } from "../../src/db";
 import { rememberFact } from "../../src/tools/facts";
@@ -67,12 +68,10 @@ interface Run {
   err: string;
 }
 
-async function scan(home: Home | null, args: string[], env: Record<string, string | undefined> = {}): Promise<Run> {
-  const clean: Record<string, string | undefined> = { ...process.env };
-  for (const key of Object.keys(clean)) if (key.startsWith("AGNI_")) delete clean[key];
+async function scan(home: Home | null, args: string[], env: Record<string, string> = {}): Promise<Run> {
   const child = Bun.spawn([process.execPath, SCRIPT, ...args], {
     cwd: home?.home ?? tmpdir(),
-    env: { ...clean, ...(home ? { AGNI_HOME: home.home } : {}), ...env } as Record<string, string>,
+    env: cleanChildEnv({ ...(home ? { AGNI_HOME: home.home } : {}), ...env }, AGNI_ONLY),
     stdout: "pipe",
     stderr: "pipe",
   });
