@@ -9,7 +9,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createMemoryKeyStore, lockVault, unlockVault } from "../src/secrets";
-import { MAX_SECRETS, redact, registerSecret, secretCount, unregisterSecret } from "../src/util/redact";
+import { MAX_SECRETS, redact, registerSecret, secretCount } from "../src/util/redact";
+import { unregisterSecret } from "../src/util/redact-core";
 
 let roots: string[] = [];
 const extra: string[] = [];

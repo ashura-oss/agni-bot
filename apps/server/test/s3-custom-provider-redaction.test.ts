@@ -7,7 +7,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { redact, unregisterSecret } from "../src/util/redact";
+import { redact } from "../src/util/redact";
+import { unregisterSecret } from "../src/util/redact-core";
 import { registerEnvSecrets } from "../src/ws/server";
 
 const values: string[] = [];

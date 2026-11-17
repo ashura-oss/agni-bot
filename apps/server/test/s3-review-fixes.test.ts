@@ -2,15 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { openDatabase } from "../src/db";
 import { clientAddress } from "../src/auth/rate-limit";
 import { mintToken, revokeDevice, verifyToken, SESSION_IDLE_MS } from "../src/auth/tokens";
-import {
-  REDACTED,
-  MAX_SECRETS,
-  redact,
-  registerSecret,
-  registerSecretsFromEnv,
-  secretCount,
-  unregisterSecret,
-} from "../src/util/redact";
+import { REDACTED, MAX_SECRETS, redact, registerSecret, registerSecretsFromEnv, secretCount } from "../src/util/redact";
+import { clearSecretsForTests, unregisterSecret } from "../src/util/redact-core";
 import { StreamRedactor } from "../src/util/redact-stream";
 import { startHarness, type Harness } from "./ws-harness";
 
@@ -220,7 +213,7 @@ describe("device tokens are registered", () => {
       const { token } = await mintToken(db, "phone");
       registered.push(token);
       expect(redact(`Authorization: Bearer ${token}`)).toBe(`Authorization: Bearer ${REDACTED}`);
-      unregisterSecret(token);
+      clearSecretsForTests(); // a restart: only the hash is in the database
       expect(redact(token)).toBe(token);
       expect(await verifyToken(db, token)).not.toBeNull();
       expect(redact(token)).toBe(REDACTED);

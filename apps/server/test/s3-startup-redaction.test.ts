@@ -14,7 +14,8 @@ import { openDatabase } from "../src/db";
 import { loadPluginsFile, savePluginsFile, type PluginsFile } from "../src/plugins/config";
 import { completeConnect, getConnectionFor, readConnectionTokens, startPending } from "../src/plugins/store";
 import { lockVault, unlockVault } from "../src/secrets";
-import { clearSecretsForTests, redact } from "../src/util/redact";
+import { redact } from "../src/util/redact";
+import { clearSecretsForTests } from "../src/util/redact-core";
 
 const masked = (value: string): boolean => redact(`before ${value} after`) === "before [redacted] after";
 

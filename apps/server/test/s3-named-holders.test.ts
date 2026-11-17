@@ -12,7 +12,8 @@ import { mintToken, verifyToken } from "../src/auth/tokens";
 import { migrateChatgptAccounts, migratePluginTokens } from "../src/credentials/migrators";
 import { openDatabase } from "../src/db";
 import { lockVault, unlockVault } from "../src/secrets";
-import { clearSecretsForTests, redact, unregisterSecret } from "../src/util/redact";
+import { redact } from "../src/util/redact";
+import { clearSecretsForTests, unregisterSecret } from "../src/util/redact-core";
 
 const heldByName = (value: string): boolean => {
   unregisterSecret(value);

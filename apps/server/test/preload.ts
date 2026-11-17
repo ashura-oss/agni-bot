@@ -1,5 +1,5 @@
 import { afterEach } from "bun:test";
-import { clearSecretsForTests } from "../src/util/redact.ts";
+import { clearSecretsForTests } from "../src/util/redact-core.ts";
 import { Router } from "../src/models/router.ts";
 import { createMemoryKeyStore, setKeyStoreOverride } from "../src/secrets";
 

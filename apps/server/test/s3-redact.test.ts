@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { redact, registerSecret, unregisterSecret, REDACTED, MIN_SECRET_LENGTH } from "../src/util/redact";
+import { redact, registerSecret, REDACTED, MIN_SECRET_LENGTH } from "../src/util/redact";
+import { unregisterSecret } from "../src/util/redact-core";
 import { log } from "../src/log";
 import { openDatabase } from "../src/db";
 import { appendMessage, createThread, titleThreadFromFirstMessage } from "../src/stores/threads";

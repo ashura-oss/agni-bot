@@ -11,7 +11,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { redact, unregisterSecret } from "../src/util/redact";
+import { redact } from "../src/util/redact";
+import { unregisterSecret } from "../src/util/redact-core";
 
 /**
  * Masked, and held by a named holder: letting go of the anonymous `registerSecret` hold (what an unnamed caller

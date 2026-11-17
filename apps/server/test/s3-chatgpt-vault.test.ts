@@ -9,7 +9,8 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { clearSecretsForTests, redact } from "../src/util/redact";
+import { redact } from "../src/util/redact";
+import { clearSecretsForTests } from "../src/util/redact-core";
 
 import { ChatGPTAuth } from "../src/models/chatgpt-auth";
 import { lockVault, unlockVault, type Vault } from "../src/secrets";
