@@ -88,7 +88,25 @@ function schedulingRefusal(ctx: ToolContext): string | null {
   return null;
 }
 
-export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: string): JobScheduleResult {
+/** The request a scheduled job stays in: the owner's refusals hold in it and its wakes are counted with the request's. */
+export interface RequestRoot {
+  rootTurnID: string;
+  rootJob: string | null;
+}
+
+/**
+ * The root a job scheduled by this call keeps, or undefined when it is its own. A run that is part of an earlier request (a
+ * wake, a delegated child, a resumed task, a job that was itself scheduled from one) has the root of that request; a chat
+ * turn, or a job on its own schedule, is its own root and starts a request of its own. Without this a bot in a wake could
+ * schedule a job to leave the request: its refusals, its wake count, its spend.
+ */
+function inheritedRoot(ctx: ToolContext): RequestRoot | undefined {
+  const run = ctx.run;
+  if (!run || run.rootTurnID === run.turnID) return undefined;
+  return { rootTurnID: run.rootTurnID, rootJob: run.rootJob };
+}
+
+export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: string, root?: RequestRoot): JobScheduleResult {
   const requested = args.agentID?.trim();
   if (requested && canonicalAgentID(requested) !== canonicalAgentID(callerAgentID)) {
     throw new Error("an agent may only schedule jobs for itself");
@@ -113,6 +131,8 @@ export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: 
     // Counted against the bot's own allowance (S2-09).
     scheduledBy: "bot",
     notify: args.notify !== false,
+    // Still the request it was scheduled in (a job has a clock of its own, which `clockKey` would take away).
+    ...(root ? { rootTurnID: root.rootTurnID, rootJob: root.rootJob } : {}),
   };
 
   let runAt: string;
@@ -256,7 +276,7 @@ export function createJobTools(db: Database): ToolDefinition<unknown, unknown>[]
           ...(input.everyMinutes === undefined ? {} : { everyMinutes: Number(input.everyMinutes) }),
           ...(input.agent_id === undefined ? {} : { agentID: String(input.agent_id) }),
           ...(input.notify === undefined ? {} : { notify: Boolean(input.notify) }),
-        }, callerOf(ctx));
+        }, callerOf(ctx), inheritedRoot(ctx));
       },
     } as ToolDefinition<unknown, unknown>,
     {
