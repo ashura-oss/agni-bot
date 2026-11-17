@@ -70,6 +70,8 @@ const TYPING_REFRESH_MS = 3000;
 const TYPING_IDLE_MS = 1000;
 /** What a send that finds no connection says, in the composer and on the failed message alike. */
 const OFFLINE_REFUSAL = "Not connected. Your draft was kept; send it again once you are reconnected.";
+/** The same refusal for "Hand off to AI", which has no draft to keep. */
+const HANDOFF_OFFLINE_REFUSAL = "Not connected. The task was not handed off; try again once you are reconnected.";
 
 function notice(kind: NoticeKind, title: string, body: string, threadID: string | null = null): NoticeRow {
   return {
@@ -809,8 +811,8 @@ export class AppModel {
     this.selectAgent(agent);
     const sent = this.send(`Please work on this task for me. Task ID: ${task.id}\nTitle: ${task.title}${task.description ? `\nDetails: ${task.description}` : ""}${task.dueAt ? `\nDue: ${task.dueAt}` : ""}${task.deadlineAt ? `\nDeadline: ${task.deadlineAt}` : ""}${task.labels?.length ? `\nLabels: ${task.labels.join(", ")}` : ""}\nUpdate the task's progressNote as you work so I can see what you are doing, add relevant labels if needed, and move its workflow status to AI review when your work is ready. Tell me what you did and what still needs my review.`);
     if (!sent) {
-      // `send` raises no notice of its own; say why here.
-      if (this.refusal) this.showToast(notice("failure", "Not sent", this.refusal));
+      // `send` raises no notice of its own; say why here. A hand-off has no draft, so its wording differs.
+      if (this.refusal) this.showToast(notice("failure", "Not sent", this.refusal === OFFLINE_REFUSAL ? HANDOFF_OFFLINE_REFUSAL : this.refusal));
       return false;
     }
     // Only a message that went makes the task "handed off".

@@ -129,5 +129,9 @@ describe("handing a task to a bot", () => {
     model.handoffTask(task as never, roster[1] as never);
     expect(sent.some((item) => item.type === "task.update")).toBe(false);
     expect(sent.some((item) => item.type === "msg.send")).toBe(false);
+    // A hand-off has no draft: the toast says the task was not handed off, not that a draft was kept.
+    const toast = model.getSnapshot().toast;
+    expect(toast?.body).toBe("Not connected. The task was not handed off; try again once you are reconnected.");
+    expect(toast?.body).not.toMatch(/draft/i);
   });
 });
