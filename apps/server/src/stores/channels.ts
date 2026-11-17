@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { newID, nowISO } from "../util/ids";
+import { redactForStorage } from "../util/redact-storage";
 
 export interface ChannelRow {
   id: string;
@@ -173,7 +174,8 @@ export function appendChannelMessage(
     from_type: input.fromType,
     from_id: input.fromID,
     to_agent_id: input.toAgentID ?? null,
-    text: input.text,
+    // Masked before the row, the search index over it, the file and its write-ahead log are written: the owner can paste a saved key, and a bot can echo it.
+    text: redactForStorage(input.text),
     internal: input.internal ? 1 : 0,
     compacted: 0,
     salience: input.salience ?? "recent_turns",
