@@ -18,7 +18,9 @@
  * The server holds the same line: it records which cards had their full text
  * answered (`markFullOpened`), and `approve.reply` refuses an allow to a
  * truncated card that was not (`mustOpenFirst`, `wasFullOpened`), so a client
- * that skips the lock cannot allow a call nobody read.
+ * that skips the lock cannot allow a call nobody read. A full text that came
+ * back `cut` is not the whole call either: the allow is refused too
+ * (`fullTextWasCut`).
  */
 import type { Database } from "bun:sqlite";
 import { escapeUnsafe } from "../agent/card-text";
@@ -26,20 +28,31 @@ import { previewIsCut, previewNeedsFullView } from "../agent/approval-broker";
 import { loadCardMeta } from "../agent/pending-cards";
 import { redact } from "../util/redact";
 
-/** The cards whose full text was answered, oldest first. Bounded: a card that is never answered would otherwise stay here for good. */
+/**
+ * The cards whose full text was answered, oldest first, each with whether that text came back cut. Bounded: a card that is never answered
+ * would otherwise stay here for good.
+ */
 const OPENED_MAX = 2_000;
-const opened = new Set<string>();
+const opened = new Map<string, boolean>();
 
-/** Note that the full text of this card was answered to a client. */
-export function markFullOpened(requestID: string): void {
+/** Note that the full text of this card was answered to a client, and whether that answer was itself cut at the size limit. */
+export function markFullOpened(requestID: string, cut = false): void {
   opened.delete(requestID);
-  opened.add(requestID);
-  while (opened.size > OPENED_MAX) opened.delete(opened.values().next().value as string);
+  opened.set(requestID, cut);
+  while (opened.size > OPENED_MAX) opened.delete(opened.keys().next().value as string);
 }
 
 /** Was this card's full text answered? */
 export function wasFullOpened(requestID: string): boolean {
   return opened.has(requestID);
+}
+
+/**
+ * Was the last full text answered for this card cut? The owner then read only the start of the call, so an allow is refused
+ * (`approval_text_cut`); Deny still works.
+ */
+export function fullTextWasCut(requestID: string): boolean {
+  return opened.get(requestID) === true;
 }
 
 /** The card is decided or gone: nothing more to remember about it. */

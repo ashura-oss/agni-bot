@@ -99,7 +99,7 @@ import { listApprovalRules, revokeApprovalRule } from "../stores/approval-rules"
 import { loadCardMeta } from "../agent/pending-cards";
 import { audit } from "../policy/audit-sink";
 import { packCarried, storedCarried, taskTaint } from "../policy/carry";
-import { forgetOpened, mustOpenFirst, wasFullOpened } from "./approval-full";
+import { forgetOpened, fullTextWasCut, mustOpenFirst, wasFullOpened } from "./approval-full";
 import { isRunPaused } from "../policy/pause";
 import { redact } from "../util/redact";
 import {
@@ -1503,24 +1503,29 @@ function handleApproveReply(
     "SELECT status, thread_id, turn_id, tool_name, action FROM approvals WHERE id = ?",
   ).get(frame.requestID);
   if (!row) {
-    sendError(deps, session, "unknown_request", `no pending approval ${frame.requestID}`);
+    sendError(deps, session, "unknown_request", `no pending approval ${frame.requestID}`, frame.requestID);
     return;
   }
   if (row.status !== "pending") {
-    sendError(deps, session, "unknown_request", CARD_EXPIRED);
+    sendError(deps, session, "unknown_request", CARD_EXPIRED, frame.requestID);
     return;
   }
   if (!cardIsLive(deps.db, row.thread_id, row.turn_id)) {
     // Pending, but the turn that asked is gone: nothing would run on an "Allow".
     deps.db.run("UPDATE approvals SET status = 'expired', decided_at = ? WHERE id = ? AND status = 'pending'", [nowISO(), frame.requestID]);
     deps.emit({ type: "approval.closed", requestID: frame.requestID, kind: "approval", reason: "expired" });
-    sendError(deps, session, "unknown_request", CARD_EXPIRED);
+    sendError(deps, session, "unknown_request", CARD_EXPIRED, frame.requestID);
     return;
   }
   // A card marked truncated hides part of the call, or is too long to take in at a glance: it is not allowed until its full text was opened
   // (the web app is to lock Allow the same way, S2-6; this is the server's own line, for any client). Deny is always possible. Fail closed.
   if (frame.decision !== "reject" && mustOpenFirst(deps.db, frame.requestID) && !wasFullOpened(frame.requestID)) {
-    sendError(deps, session, "approval_not_opened", "This card is marked as too long to read at a glance. Open its full text (approval.full) before you allow it. The card is still waiting.");
+    sendError(deps, session, "approval_not_opened", "This card is marked as too long to read at a glance. Open its full text (approval.full) before you allow it. The card is still waiting.", frame.requestID);
+    return;
+  }
+  // The full text that was opened came back cut at the size limit: the owner read the start of the call, not the call. No allow; Deny works.
+  if (frame.decision !== "reject" && fullTextWasCut(frame.requestID)) {
+    sendError(deps, session, "approval_text_cut", "The full text of this card is longer than can be shown, so it was cut and you have not seen all of it. It cannot be allowed. You can deny it, and ask for a smaller call. The card is still waiting.", frame.requestID);
     return;
   }
   // The answer goes on the audit record before it takes effect: a log that is down leaves the card waiting.
@@ -1533,7 +1538,7 @@ function handleApproveReply(
     });
   } catch (error) {
     log.error("approval answer not recorded: the audit log is down", error);
-    return sendError(deps, session, "internal", "Your answer could not be written to the audit log, so it was not applied. The card is still waiting.");
+    return sendError(deps, session, "internal", "Your answer could not be written to the audit log, so it was not applied. The card is still waiting.", frame.requestID);
   }
   deps.db.run(
     "UPDATE approvals SET status = 'decided', decision = ?, decided_at = ? WHERE id = ? AND status = 'pending'",
@@ -2055,14 +2060,14 @@ function recordConfigChange(session: Session, kind: string, detail: Record<strin
   }
 }
 
-function sendError(deps: DispatchDeps, _session: Session, code: string, message: string): void {
-  deps.send(errorFrame(deps.frameLog, code, message));
+function sendError(deps: DispatchDeps, _session: Session, code: string, message: string, requestID?: string): void {
+  deps.send(errorFrame(deps.frameLog, code, message, requestID));
   log.debug(`error frame → ${code}: ${message}`);
 }
 
-export function errorFrame(frameLog: FrameLog, code: string, message: string): ServerFrame {
+export function errorFrame(frameLog: FrameLog, code: string, message: string, requestID?: string): ServerFrame {
   // shortcut: seq 1 before any frame exists, since the schema needs a positive seq.
-  return { type: "error", code, message, seq: Math.max(1, frameLog.seq) };
+  return { type: "error", code, message, seq: Math.max(1, frameLog.seq), ...(requestID ? { requestID } : {}) };
 }
 
 /** Run a promise off the frame's path; a failure is logged and answered, never fatal. */

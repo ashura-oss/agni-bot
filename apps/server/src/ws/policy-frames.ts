@@ -233,6 +233,6 @@ export function handleApprovalFull(deps: PolicyFrameDeps, frame: Extract<ClientF
   const full = fullApprovalText(deps.db, frame.requestID);
   if (!full) return deps.error("not_found", `no waiting card ${frame.requestID} with a full text to show`);
   // The owner's client has the whole text now; the card may be allowed (`approve.reply`, `ws/dispatch.ts`).
-  markFullOpened(frame.requestID);
+  markFullOpened(frame.requestID, full.cut);
   deps.reply({ type: "approval.full.ok", requestID: frame.requestID, text: full.text, ...(full.cut ? { cut: true } : {}) });
 }

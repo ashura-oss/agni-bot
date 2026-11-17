@@ -123,7 +123,7 @@ client can show it and keep the draft.
 | `channel.history` | `{channelId, limit?}` | Phase 4. A group channel's messages, last N chronological (default 200, max 500); answered by `channel.history.ok`. |
 | `form.answer` | `{requestID, answer}` | The owner answered a question the agent asked — the option they chose, or their own words if they typed instead of choosing. The answer lands on the `forms` row and the turn waiting on it carries on with it. |
 | `msg.cancel` | `{turnID}` | Interrupts the turn: providers abort, partial output is kept. When no turn with that ID is running (it already finished, never existed, or the server restarted) the asker gets an `error` with code `not_running`; the client can treat it as "already finished". Additive in v2. |
-| `approve.reply` | `{requestID, decision}` | `decision`: `once \| always \| reject`. An allow (`once`, `always`) to a card marked `truncated` is refused with an `error` with code `approval_not_opened` until the full text was answered to some client (`approval.full.ok`); the card keeps waiting. `reject` always works. |
+| `approve.reply` | `{requestID, decision}` | `decision`: `once \| always \| reject`. An allow (`once`, `always`) to a card marked `truncated` is refused with an `error` with code `approval_not_opened` until the full text was answered to some client (`approval.full.ok`); the card keeps waiting. An allow is also refused with `approval_text_cut` when the last full text answered for the card came back `cut: true`: the owner saw only the start of the call. `reject` always works. Every `error` that answers an `approve.reply` carries the card's `requestID`. |
 | `secret.reply` | `{requestID, value}` | The owner's one-time password for a `secret.request`. Consumed server-side; never persisted, replayed, logged, or sent to the model. |
 | `secret.cancel` | `{requestID}` | Dismisses a pending secret prompt; the waiting tool fails as cancelled. |
 | `agent.select` | `{agentID}` | Sets the persona for subsequent `msg.send` on this connection. |
@@ -247,7 +247,7 @@ accountLabel?, error?, connectedAt?}`.
 | `channel.created` | `{channel: ChannelInfo}` | Phase 4. A group channel exists. `ChannelInfo` is `{id, name, type: "group", agentIds, createdAt}`; `agentIds[0]` is the primary bot. |
 | `channel.list.ok` | `{channels: ChannelInfo[]}` | Phase 4. Answer to `channel.list`. |
 | `channel.history.ok` | `{channelId, messages: MessageInfo[]}` | Phase 4. Answer to `channel.history`. |
-| `error` | `{code, message, retryAfter?}` | See codes below. |
+| `error` | `{code, message, retryAfter?, requestID?}` | See codes below. `requestID` (additive in v2) is set on the errors that answer an `approve.reply` (`unknown_request`, `approval_not_opened`, `approval_text_cut`, and `internal` when the answer was not applied): it is the card the reply was for, so a client with several cards waiting knows which one the refusal is about. A client must still cope with an error that has none. |
 
 A task turn speaks in messages, not one growing reply: each completed assistant
 message is published as its own ordinary `msg.new` after that message's `token`
@@ -272,7 +272,7 @@ bubble. A client that ignores `reset` still shows the right answer: the sealing
 `unknown_provider`, `invalid_key`, `provider_exists`, `provider_storage`, `provider_auth`,
 `unknown_plugin`, `unknown_connection`, `plugin_not_configured`, `plugin_unavailable`,
 `plugin_connect_failed`, `unknown_background`, `unknown_channel`, `invalid_attachment`,
-`invalid_domains`, `resync_gap`, `not_found`, `not_running`, `agent_off`, `paused`, `bad_cap`, `spend_unavailable`, `approval_not_opened`, `internal`.
+`invalid_domains`, `resync_gap`, `not_found`, `not_running`, `agent_off`, `paused`, `bad_cap`, `spend_unavailable`, `approval_not_opened`, `approval_text_cut`, `internal`.
 
 The four codes that answer one client frame (checked in `apps/server/src/ws/dispatch.ts`):
 
@@ -285,6 +285,7 @@ The four codes that answer one client frame (checked in `apps/server/src/ws/disp
 - `bad_cap`: `spend.caps.set` has a cap the server cannot use (a bot's daily cap above the daily cap). Nothing changed.
 - `spend_unavailable`: `spend.status` or `spend.caps.set` on a build with no spend ledger.
 - `approval_not_opened`: `approve.reply` allows (`once` or `always`) a card marked `truncated` whose full text was never answered (`approval.full`). Nothing is decided; the card keeps waiting. Deny is not affected. Additive.
+- `approval_text_cut`: `approve.reply` allows (`once` or `always`) a card whose full text was answered with `cut: true` (the call is longer than the full-text limit of 1 MB, so the owner has not seen all of it). Nothing is decided; the card keeps waiting. Deny is not affected, and the bot can be asked for a smaller call. Additive.
 
 ## Versioning
 

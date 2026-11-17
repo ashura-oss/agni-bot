@@ -1147,7 +1147,15 @@ export const ServerFrameSchema = z.discriminatedUnion("type", [
     /** What other agents may see of its work, when the change touched it. */
     visibility: z.enum(["private", "summary", "shared"]).optional(),
   }),
-  z.object({ type: z.literal("error"), seq, code: z.string(), message: z.string(), retryAfter: z.number().optional() }),
+  z.object({
+    type: z.literal("error"),
+    seq,
+    code: z.string(),
+    message: z.string(),
+    retryAfter: z.number().optional(),
+    /** The card an `approve.reply` was refused for (`approval_not_opened`, `approval_text_cut`, `unknown_request`, `internal`). Absent on every other error. Additive in v2. */
+    requestID: z.string().optional(),
+  }),
   /** Phase 2 (additive): the VAPID public key a client subscribes to Web Push with. */
   z.object({ type: z.literal("push.vapid"), seq, publicKey: z.string() }),
   /** Phase 2 (additive): a bot's proactivity settings (reply to `agent.proactivity`). */

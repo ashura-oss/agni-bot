@@ -309,6 +309,7 @@ const SERVER_FRAMES: ServerFrame[] = [
     createdAt: "2026-10-19T09:12:00.000Z",
   },
   { type: "error", seq: 58, code: "no_provider", message: "no provider in tier instant", retryAfter: 2 },
+  { type: "error", seq: 59, code: "approval_text_cut", message: "The full text of this card was cut, so it cannot be allowed.", requestID: "apr_01hq" },
   { type: "status.update", seq: 69, channelId: "ch_01hq", agentId: "agni", text: "Nachiketh is typing…", transient: true },
   {
     type: "msg.new",

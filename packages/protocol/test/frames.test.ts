@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import {
   JobInfoSchema,
   PROTOCOL_VERSION,
@@ -379,5 +380,27 @@ describe("Sprint 2 frames (additive)", () => {
     expect(parseServerFrame({ type: "spend.stopped", seq: 1, runKey: "agent:ea", scope: "week", reason: "over_cap", spentUsd: 2, capUsd: 2, message: "stopped" }).ok).toBe(false);
     expect(parseServerFrame({ type: "spend.continue.ok", seq: 1, runKey: "agent:ea", grantedUsd: 0.5 }).ok).toBe(true);
     expect(parseServerFrame({ type: "spend.continue.ok", seq: 1, runKey: "agent:ea", grantedUsd: 0 }).ok).toBe(false);
+  });
+
+  test("an error frame may name the card an approve.reply was refused for", () => {
+    const base = { type: "error", seq: 3, code: "unknown_request", message: "gone" };
+    const named = parseServerFrame({ ...base, requestID: "apr_1" });
+    expect(named.ok).toBe(true);
+    if (named.ok && named.frame.type === "error") expect(named.frame.requestID).toBe("apr_1");
+    const plain = parseServerFrame(base);
+    expect(plain.ok).toBe(true);
+    if (plain.ok && plain.frame.type === "error") expect(plain.frame.requestID).toBeUndefined();
+    expect(parseServerFrame({ ...base, requestID: 5 }).ok).toBe(false);
+  });
+
+  test("the fixtures carry an error frame with a requestID", () => {
+    const fixtures = JSON.parse(readFileSync(new URL("../fixtures/frames.json", import.meta.url), "utf8")) as { server: Array<{ type: string; requestID?: string }> };
+    const named = fixtures.server.filter((frame) => frame.type === "error" && typeof frame.requestID === "string");
+    expect(named.length).toBeGreaterThan(0);
+    for (const frame of named) {
+      const parsed = parseServerFrame(frame);
+      expect(parsed.ok).toBe(true);
+      if (parsed.ok && parsed.frame.type === "error") expect(parsed.frame.requestID).toBe(frame.requestID);
+    }
   });
 });

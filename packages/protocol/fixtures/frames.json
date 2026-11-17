@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-11-17T09:27:16.709Z",
+  "generatedAt": "2026-11-17T09:55:34.567Z",
   "protocolVersion": 2,
   "client": [
     {
@@ -816,6 +816,13 @@
       "code": "no_provider",
       "message": "no provider in tier instant",
       "retryAfter": 2
+    },
+    {
+      "type": "error",
+      "seq": 59,
+      "code": "approval_text_cut",
+      "message": "The full text of this card was cut, so it cannot be allowed.",
+      "requestID": "apr_01hq"
     },
     {
       "type": "status.update",
