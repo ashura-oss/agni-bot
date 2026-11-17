@@ -87,6 +87,8 @@ function selfScheduledCount(db: Database, callerAgentID: string): number {
  */
 function schedulingRefusal(ctx: ToolContext): string | null {
   if (!ctx.run) return ctx.peerInput ? "not done: this turn started from another agent's message" : null;
+  // A run that cannot say who started it is not the owner's (fail closed).
+  if (typeof ctx.run.principal?.kind !== "string") return "not done: I cannot tell who started this turn, so it may not schedule work. Tell the owner what you wanted to schedule and ask them to confirm it.";
   if (isPeerPrincipal(ctx.run)) return "not done: this turn started from another agent's message";
   if (isTainted(ctx.run)) return "not done: this run read outside content, so it may not schedule work. Tell the owner what you wanted to schedule and ask them to confirm it.";
   return null;
@@ -129,12 +131,13 @@ function carriedTaint(run: RunContext | undefined): TaintSource[] | undefined {
 
 /**
  * The request a one-shot job scheduled by this call stays in, or undefined when it starts one of its own. Only the owner's own
- * turn starts a request. Any other run (a wake, a delegated child, a resumed task, a job, a job scheduled from one) hands its
- * request on, so a chain of jobs, each scheduling the next, is counted as one: its wakes, its spend.
+ * chat turn starts a request: the owner as principal with no job behind it. Any other run (a wake, a delegated child, a resumed task,
+ * a job, a fire of a job the owner made, a job scheduled from one) hands its request on, so a chain of jobs, each scheduling the
+ * next, is counted as one: its wakes, its spend.
  */
 function inheritedRoot(ctx: ToolContext): RequestRoot | undefined {
   const run = ctx.run;
-  if (!run || run.principal.kind === "owner") return undefined;
+  if (!run || (run.principal?.kind === "owner" && run.jobID == null)) return undefined;
   return { rootTurnID: run.rootTurnID, rootJob: run.rootJob };
 }
 

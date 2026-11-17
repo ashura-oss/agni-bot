@@ -620,3 +620,34 @@ describe("a repeating job approved from a tainted run fires tainted", () => {
   });
 });
 
+
+describe("a one-shot job keeps the request of a run that was not the owner's own turn", () => {
+  scenarioTest("a fire of a job the owner made hands its root on to the one-shot job it schedules", async () => {
+    const s = await scenarios.start();
+    const a = await s.connect({ label: "A" });
+    const ownerJob = enqueueJob(s.db, { kind: "turn", runAt: past(), payload: { agentID: "ea", text: "Do the weekly check.", notify: false } });
+    s.model.queue(...scripted(true, [call("job_schedule", { text: "Look again later.", at: future() }, "call_later"), say("Scheduled.")]));
+    await tickUntil(s, () => allCallsTo(s, "job_schedule", a).some((entry) => entry.callID === "call_later"));
+    expect(allCallsTo(s, "job_schedule", a).find((entry) => entry.callID === "call_later")?.ok, "the owner's job could not schedule the one-shot job; the script is out of step").toBe(true);
+    const next = turnJobs(s).find((job) => job.payload.text === "Look again later.");
+    expect(next, "the one-shot job does not exist").toBeDefined();
+    expect(next!.payload.rootJob, "the one-shot job began a request of its own instead of staying in its parent job's").toBe(ownerJob.id);
+    expect(next!.payload.rootTurnID).toBeDefined();
+  });
+
+  test("a run whose principal cannot be read is answered, not thrown at", async () => {
+    const rig = policyRig();
+    try {
+      const handler = createJobTools(rig.db)[0]!.handler as unknown as (args: unknown, ctx: unknown) => Promise<{ id?: string; error?: string }>;
+      const run = { ...rig.run, principal: undefined } as unknown as RunContext;
+      const ctx = { threadID: "thr", turnID: "trn", signal: new AbortController().signal, run, chain: { depth: 1, rootAgentID: "ea", currentAgentID: "ea", handoffSummary: null } };
+      const result = await handler({ text: "do it", at: future() }, ctx);
+      expect(result.id, "a one-shot job was made by a run whose principal cannot be read").toBeUndefined();
+      expect(result.error).toBeDefined();
+      expect(rig.db.query("SELECT id FROM jobs WHERE kind = 'turn'").all()).toEqual([]);
+    } finally {
+      rig.close();
+    }
+  });
+});
+
