@@ -15,7 +15,7 @@ import { createMemoryKeyStore, lockVault, unlockVault } from "../src/secrets";
 import { secretClassifier, valueCarriesCredential } from "../src/secrets/classify";
 import { importEnvFileSecrets, plaintextSecretNames } from "../src/secrets/env";
 import { unlockVaultAtStart } from "../src/startup/s3-vault";
-import { scrubbedShellEnv } from "../src/util/scrubbed-env";
+import { childEnv } from "../src/util/child-env";
 
 let roots: string[] = [];
 const fresh = (): string => {
@@ -41,23 +41,27 @@ function homeWithCustomProvider(envKey = "MY_WEIRD_THING"): string {
 }
 
 describe("secretClassifier", () => {
-  test("every name the shell scrub removes is a secret here too", () => {
+  test("nothing the vault classifier calls a secret reaches a shell the model wrote", () => {
     const home = homeWithCustomProvider("MY_WEIRD_THING");
-    const env: Record<string, string> = { AGNI_HOME: home, AGNI_PROVIDER_CONFIG_PATH: join(home, "providers.json") };
-    const candidates = [
+    const secrets = [
       ...providerKeyEnvNames(),
       "FOO_API_KEY", "FOO_TOKEN", "FOO_SECRET", "FOO_PASSWORD", "AWS_SECRET_ACCESS_KEY", "SSH_PRIVATE_KEY",
-      "AGNI_CUSTOM_KEY_1", "AGNI_CUSTOM_KEY_3", "MY_WEIRD_THING", "gh_token", "NPM_TOKEN",
+      "AGNI_CUSTOM_KEY_1", "AGNI_CUSTOM_KEY_3", "MY_WEIRD_THING", "gh_token", "NPM_TOKEN", "UNHEARD_OF",
     ];
-    for (const name of candidates) env[name] = "sk-0123456789abcdef";
-    env.AGNI_PORT = "8787";
-    env.PATH = "/usr/bin";
-    const kept = scrubbedShellEnv(env);
-    const removed = Object.keys(env).filter((name) => !(name in kept));
-    // The scrub really removed the interesting ones (so this test cannot pass vacuously).
-    expect(removed).toEqual(expect.arrayContaining(["MY_WEIRD_THING", "AGNI_CUSTOM_KEY_3", "AWS_SECRET_ACCESS_KEY", ...providerKeyEnvNames()]));
+    const env: Record<string, string> = { AGNI_HOME: home, AGNI_PROVIDER_CONFIG_PATH: join(home, "providers.json") };
+    for (const name of secrets) env[name] = "sk-0123456789abcdef";
+    // Bystanders: settings and system names a shell may keep. (They are not tested against the classifier: it calls every name it
+    // does not know a secret, HOME and PATH included, and the shell keeps a short list of system names on purpose.)
+    Object.assign(env, { AGNI_PORT: "8787", PATH: "/usr/bin", HOME: "/home/o", TZ: "UTC" });
+    const kept = childEnv("shell", { source: env, platform: "linux", gitRoot: null });
     const isSecret = secretClassifier({ env, home });
-    for (const name of removed) expect(isSecret(name, env[name]), name).toBe(true);
+    // The classifier does call each of these a secret (so the check below cannot pass vacuously), including the custom provider's odd name.
+    for (const name of secrets) expect(isSecret(name, env[name]), name).toBe(true);
+    for (const name of secrets) expect({ name, kept: name in kept }, name).toEqual({ name, kept: false });
+    // And the shell was not simply emptied.
+    expect(kept).toMatchObject({ HOME: "/home/o", TZ: "UTC" });
+    expect(kept.PATH).toBeTruthy();
+    expect(kept.AGNI_PORT).toBeUndefined();
   });
 
   test("AGNI_CUSTOM_KEY_3, and a custom provider's own variable, are secrets", () => {
