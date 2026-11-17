@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "../src/config";
 import { openDatabase } from "../src/db";
+import { pluginAccessToken } from "../src/plugins/credentials";
 import { PluginService } from "../src/plugins/service";
 import { redact } from "../src/util/redact";
 
@@ -82,5 +83,86 @@ describe("accessTokenFor", () => {
     } finally {
       db.close();
     }
+  });
+});
+
+describe("a refresh answer without every field", () => {
+  const plugins = (auth: Record<string, unknown>): string =>
+    JSON.stringify({ version: 1, oauthClients: { google: { clientID: "cid", clientSecret: "csecret" } }, plugins: { calendar: { account: "agent", enabled: true, auth: { kind: "oauth", ...auth } } } });
+
+  test("no expires_in: a conservative one-hour expiry is stored, so the next call does not refresh again", async () => {
+    const pluginsPath = join(home, "plugins.json");
+    writeFileSync(pluginsPath, plugins({ access_token: "stored-access-A-0000000", refresh_token: "stored-refresh-R-000000", expires_at: Date.now() - 1_000 }));
+    const db = openDatabase(":memory:");
+    try {
+      const service = new PluginService({ config: { host: "127.0.0.1", port: 8787 } as Config, db, emit: () => {}, pluginsPath, now: () => Date.now() });
+      let refreshes = 0;
+      service.fetchOverride = (async () => {
+        refreshes += 1;
+        return Response.json({ access_token: "fresh-access-B-00000000" }); // no expires_in
+      }) as unknown as typeof fetch;
+      const before = Date.now();
+      expect(await service.accessTokenFor("calendar", "agent")).toBe("fresh-access-B-00000000");
+      const stored = JSON.parse(readFileSync(pluginsPath, "utf8")).plugins.calendar.auth as { expires_at?: number };
+      expect(stored.expires_at).toBeGreaterThanOrEqual(before + HOUR - 5_000);
+      expect(stored.expires_at).toBeLessThanOrEqual(Date.now() + HOUR + 5_000);
+      expect(await service.accessTokenFor("calendar", "agent")).toBe("fresh-access-B-00000000");
+      expect(refreshes).toBe(1);
+    } finally {
+      db.close();
+    }
+  });
+
+  test("a rotated refresh_token is stored, and the one it replaced stays masked", async () => {
+    const pluginsPath = join(home, "plugins.json");
+    writeFileSync(pluginsPath, plugins({ access_token: "stored-access-A-0000000", refresh_token: "stored-refresh-R-000000", expires_at: Date.now() - 1_000 }));
+    const db = openDatabase(":memory:");
+    try {
+      const service = new PluginService({ config: { host: "127.0.0.1", port: 8787 } as Config, db, emit: () => {}, pluginsPath, now: () => Date.now() });
+      service.fetchOverride = (async () => Response.json({ access_token: "fresh-access-B-00000000", expires_in: 3600, refresh_token: "rotated-refresh-R2-00000" })) as unknown as typeof fetch;
+      await service.accessTokenFor("calendar", "agent");
+      const stored = JSON.parse(readFileSync(pluginsPath, "utf8")).plugins.calendar.auth as { refresh_token?: string };
+      expect(stored.refresh_token).toBe("rotated-refresh-R2-00000");
+      expect(masked("rotated-refresh-R2-00000")).toBe(true);
+      expect(masked("stored-refresh-R-000000")).toBe(true); // retired to the queue, not released
+    } finally {
+      db.close();
+    }
+  });
+
+  test("a refresh that names no new refresh_token keeps the one it has", async () => {
+    const pluginsPath = join(home, "plugins.json");
+    writeFileSync(pluginsPath, plugins({ access_token: "stored-access-A-0000000", refresh_token: "stored-refresh-R-000000", expires_at: Date.now() - 1_000 }));
+    const db = openDatabase(":memory:");
+    try {
+      const service = new PluginService({ config: { host: "127.0.0.1", port: 8787 } as Config, db, emit: () => {}, pluginsPath, now: () => Date.now() });
+      service.fetchOverride = (async () => Response.json({ access_token: "fresh-access-B-00000000", expires_in: 3600 })) as unknown as typeof fetch;
+      await service.accessTokenFor("calendar", "agent");
+      expect((JSON.parse(readFileSync(pluginsPath, "utf8")).plugins.calendar.auth as { refresh_token?: string }).refresh_token).toBe("stored-refresh-R-000000");
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe("pluginAccessToken (the tools' path)", () => {
+  test("stores a one-hour expiry when the answer has none, and a rotated refresh_token", async () => {
+    const pluginsPath = join(home, "plugins.json");
+    writeFileSync(
+      pluginsPath,
+      JSON.stringify({ version: 1, oauthClients: { google: { clientID: "cid", clientSecret: "csecret" } }, plugins: { calendar: { account: "agent", enabled: true, auth: { kind: "oauth", access_token: "stored-access-A-0000000", refresh_token: "stored-refresh-R-000000", expires_at: Date.now() - 1_000 } } } }),
+    );
+    let refreshes = 0;
+    const answer = (async () => {
+      refreshes += 1;
+      return Response.json({ access_token: "fresh-access-B-00000000", refresh_token: "rotated-refresh-R2-00000" });
+    }) as unknown as typeof fetch;
+    const before = Date.now();
+    expect(await pluginAccessToken(pluginsPath, "calendar", answer)).toBe("fresh-access-B-00000000");
+    const stored = JSON.parse(readFileSync(pluginsPath, "utf8")).plugins.calendar.auth as { expires_at?: number; refresh_token?: string };
+    expect(stored.refresh_token).toBe("rotated-refresh-R2-00000");
+    expect(stored.expires_at).toBeGreaterThanOrEqual(before + HOUR - 5_000);
+    expect(await pluginAccessToken(pluginsPath, "calendar", answer)).toBe("fresh-access-B-00000000");
+    expect(refreshes).toBe(1);
   });
 });

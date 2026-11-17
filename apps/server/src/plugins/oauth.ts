@@ -21,6 +21,9 @@ export interface OAuthDeps {
   fetch?: typeof fetch;
 }
 
+/** How long a refreshed access token is assumed to work when the provider's answer does not say (Google's are an hour). */
+export const DEFAULT_ACCESS_TOKEN_LIFETIME_MS = 3_600_000;
+
 export interface TokenSet {
   refresh_token?: string;
   access_token?: string;
@@ -122,7 +125,11 @@ export async function refresh(
   if (!data.access_token) throw new Error("token refresh returned no access token");
   return {
     access_token: data.access_token,
-    ...(data.expires_in ? { expires_at: Date.now() + data.expires_in * 1000 } : {}),
+    // An answer that does not say how long the token lives gets a conservative lifetime. With none stored, every
+    // call would see an unknown expiry and refresh again.
+    expires_at: Date.now() + (data.expires_in ? data.expires_in * 1000 : DEFAULT_ACCESS_TOKEN_LIFETIME_MS),
+    // A provider that rotates refresh tokens names the new one; the caller must store it.
+    ...(data.refresh_token ? { refresh_token: data.refresh_token } : {}),
   };
 }
 
@@ -152,16 +159,21 @@ export async function whoami(
 /**
  * A usable access token and the time (epoch ms) it stops working, when known. A stored token that is still good is
  * returned with the expiry it was stored with; a refreshed one comes with its own, which the caller must store
- * beside it (the old expiry belongs to the token it replaced).
+ * beside it (the old expiry belongs to the token it replaced), and with the new refresh token when the provider
+ * rotated it.
  */
 export async function ensureAccessToken(
   deps: OAuthDeps,
   tokens: { access_token?: string; refresh_token?: string; expires_at?: number },
-): Promise<{ access_token: string; expires_at?: number }> {
+): Promise<{ access_token: string; expires_at?: number; refresh_token?: string }> {
   if (tokens.access_token && tokens.expires_at && tokens.expires_at - 60_000 > Date.now()) {
     return { access_token: tokens.access_token, expires_at: tokens.expires_at };
   }
   if (!tokens.refresh_token) throw new Error("no refresh token stored — reconnect the plugin");
   const fresh = await refresh(deps, tokens.refresh_token);
-  return { access_token: fresh.access_token!, ...(fresh.expires_at === undefined ? {} : { expires_at: fresh.expires_at }) };
+  return {
+    access_token: fresh.access_token!,
+    ...(fresh.expires_at === undefined ? {} : { expires_at: fresh.expires_at }),
+    ...(fresh.refresh_token ? { refresh_token: fresh.refresh_token } : {}),
+  };
 }

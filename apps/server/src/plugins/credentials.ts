@@ -70,7 +70,7 @@ export async function pluginAccessToken(pluginsPath: string, pluginID: string, f
   // refresh() only needs the client id/secret and fetch, not the daemon config.
   const deps = { clientID: client?.clientID ?? "", clientSecret: client?.clientSecret ?? "", ...(fetchImpl ? { fetch: fetchImpl } : {}) } as OAuthDeps;
   const fresh = await refresh(deps, refresh_token);
-  entry.auth = { ...entry.auth, access_token: fresh.access_token, expires_at: fresh.expires_at };
+  entry.auth = { ...entry.auth, access_token: fresh.access_token, expires_at: fresh.expires_at, ...(fresh.refresh_token ? { refresh_token: fresh.refresh_token } : {}) };
   savePluginsFile(pluginsPath, file);
   return fresh.access_token!;
 }

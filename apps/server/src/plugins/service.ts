@@ -463,7 +463,13 @@ export class PluginService {
     // token it replaces is masked until that one's expiry, not this one's.
     if (tokens.access_token !== fresh.access_token) {
       const { expires_at: _replaced, ...rest } = tokens;
-      entry.auth = { ...rest, access_token: fresh.access_token, ...(fresh.expires_at === undefined ? {} : { expires_at: fresh.expires_at }) };
+      entry.auth = {
+        ...rest,
+        access_token: fresh.access_token,
+        ...(fresh.expires_at === undefined ? {} : { expires_at: fresh.expires_at }),
+        // A provider that rotates refresh tokens: the old one is retired by the save (still masked), not released.
+        ...(fresh.refresh_token ? { refresh_token: fresh.refresh_token } : {}),
+      };
       this.save();
     }
     return fresh.access_token;
