@@ -38,6 +38,6 @@ export function selectKeyStore(options: SelectOptions = {}): KeyStore {
   }
   const kind: KeyStoreKind = asked !== "auto" ? asked : header ?? (platform === "linux" && passphraseFileExists(env) ? "passphrase" : "bun-secrets");
   return kind === "passphrase"
-    ? createPassphraseKeyStore({ passphrase: () => readPassphraseFile(env) })
+    ? createPassphraseKeyStore({ passphrase: () => readPassphraseFile(env), platform })
     : createBunSecretsKeyStore();
 }

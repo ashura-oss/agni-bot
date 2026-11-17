@@ -29,7 +29,7 @@ export interface ProbeOptions {
 
 /** Plain-words name of a backend, for the screen. */
 export function backendLabel(kind: KeyStoreKind, platform: NodeJS.Platform = process.platform): string {
-  if (kind === "passphrase") return "passphrase file (a systemd credential or AGNI_VAULT_PASSPHRASE_FILE)";
+  if (kind === "passphrase") return platform === "linux" ? "passphrase file (a systemd credential or AGNI_VAULT_PASSPHRASE_FILE)" : "passphrase file (AGNI_VAULT_PASSPHRASE_FILE)";
   if (kind === "memory") return "in-memory test keystore";
   if (platform === "win32") return "Windows Credential Manager";
   if (platform === "darwin") return "macOS Keychain";

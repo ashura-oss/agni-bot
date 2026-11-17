@@ -33,11 +33,17 @@ export interface PassphraseKeyStoreOptions {
   passphrase: () => string | undefined;
   /** Cost for a new vault. An existing vault always uses the cost in its header. */
   cost?: ScryptCost;
+  /** Whose way of giving the passphrase the messages describe. Default: this machine's. */
+  platform?: NodeJS.Platform;
 }
 
-const HOW_TO_PROVIDE =
-  "Give it through a systemd credential: add LoadCredential=agni-vault-passphrase:/path/to/passphrase-file to the service unit " +
-  "(the file must be readable only by the service user), or set AGNI_VAULT_PASSPHRASE_FILE to such a file.";
+/** How to give the vault its passphrase. A systemd credential is the way on Linux only; on Windows and macOS it is a file. */
+function howToProvide(platform: NodeJS.Platform = process.platform): string {
+  return platform === "linux"
+    ? "Give it through a systemd credential: add LoadCredential=agni-vault-passphrase:/path/to/passphrase-file to the service unit " +
+      "(the file must be readable only by the service user), or set AGNI_VAULT_PASSPHRASE_FILE to such a file."
+    : "Give it in a file that only your account can read, and set AGNI_VAULT_PASSPHRASE_FILE to that file.";
+}
 
 function validCost(cost: ScryptCost): void {
   const ok = Number.isInteger(cost.N) && cost.N >= 1024 && cost.N <= 1 << 20 && (cost.N & (cost.N - 1)) === 0 &&
@@ -54,7 +60,7 @@ export function createPassphraseKeyStore(options: PassphraseKeyStoreOptions): Ke
   const need = (): string => {
     const value = options.passphrase();
     if (value === undefined || value === "") {
-      throw new VaultError("PASSPHRASE_MISSING", `The vault needs a passphrase to unlock and none was provided. ${HOW_TO_PROVIDE}`);
+      throw new VaultError("PASSPHRASE_MISSING", `The vault needs a passphrase to unlock and none was provided. ${howToProvide(options.platform)}`);
     }
     if (value.length < MIN_PASSPHRASE_CHARS) {
       throw new VaultError("PASSPHRASE_REJECTED", `The vault passphrase must be at least ${MIN_PASSPHRASE_CHARS} characters.`);
@@ -124,7 +130,7 @@ export function assertPassphraseFilePrivate(path: string, options: PassphraseFil
     if (fixed) log.warn(`the vault passphrase file ${path} was readable by other accounts; it is now private. Change the passphrase if you cannot rule out that it was read.`);
   } catch (error) {
     const why = error instanceof Error ? error.message : String(error);
-    throw new VaultError("PASSPHRASE_REJECTED", `The vault passphrase file ${path} is not private to your account, so the vault stays locked. ${why} ${HOW_TO_PROVIDE}`, { cause: error });
+    throw new VaultError("PASSPHRASE_REJECTED", `The vault passphrase file ${path} is not private to your account, so the vault stays locked. ${why} ${howToProvide(platform)}`, { cause: error });
   }
 }
 
@@ -136,6 +142,6 @@ export function readPassphraseFile(env: Record<string, string | undefined>, opti
   try {
     return readFileSync(path, "utf8").replace(/\r?\n$/, "");
   } catch (error) {
-    throw new VaultError("PASSPHRASE_MISSING", `The vault passphrase file ${path} cannot be read (${(error as Error).message}). ${HOW_TO_PROVIDE}`, { cause: error });
+    throw new VaultError("PASSPHRASE_MISSING", `The vault passphrase file ${path} cannot be read (${(error as Error).message}). ${howToProvide(options.platform)}`, { cause: error });
   }
 }
