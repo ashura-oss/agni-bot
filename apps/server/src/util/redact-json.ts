@@ -26,9 +26,13 @@ const looksLikeJSON = (text: string): boolean => {
  * never walked, and returning the raw text "because nothing was masked" would put it on disk. Formatting of parsed
  * JSON is therefore compact; its values are the ones any JSON reader sees.
  *
- * Two kinds of input are masked as plain text instead, which covers the secret's raw form and its escaped forms
- * and changes nothing else: text that is not JSON, and JSON holding a number that would not survive the round trip
- * (an id above 2^53, a decimal with more digits than a double holds), so those digits stay exact.
+ * Text that is not JSON is masked as plain text. A number that would not survive the round trip (an id above
+ * 2^53, a decimal with more digits than a double holds) does not change any of this: its digits are swapped for a
+ * placeholder string before the parse and put back after the walk (`swapLossyNumbers`, `spliceLossyNumbers`), so
+ * the walk and the serialization see exactly what they see for any other JSON. If a placeholder does not come
+ * back exactly once and unaltered, nothing is put back and the walked value is written as it is; the number then
+ * has the value a double gives it. Masking such input as plain text would let a `\u`-escaped secret, or a secret
+ * in the first of two equal keys, through for anyone who adds a big number to force that path.
  */
 export function redactJSONText(text: string, depth = 0): string {
   if (typeof text !== "string" || text.length === 0) return text;
@@ -39,14 +43,24 @@ export function redactJSONText(text: string, depth = 0): string {
   } catch {
     return redact(text);
   }
-  if (hasLossyNumber(text)) return redact(text);
   try {
+    const swapped = swapLossyNumbers(text);
+    if (swapped.literals.length > 0) {
+      const exact = walkWithPlaceholders(swapped, depth);
+      if (exact !== null) return exact;
+    }
     const walked = walk(parsed, depth);
     return withBackstop(JSON.stringify(walked), walked);
   } catch {
     // Nested too deep to walk: mask it as plain text rather than let any of it through.
     return redact(text);
   }
+}
+
+/** The text of `swapped` parsed, walked and written again, with the digits put back; null when a placeholder did not survive. */
+function walkWithPlaceholders(swapped: SwappedNumbers, depth: number): string | null {
+  const walked = walk(JSON.parse(swapped.text), depth);
+  return spliceLossyNumbers(withBackstop(JSON.stringify(walked), walked), swapped);
 }
 
 /**
@@ -78,13 +92,32 @@ function sameShape(a: unknown, b: unknown): boolean {
   return (typeof a === "object" && a !== null) === (typeof b === "object" && b !== null);
 }
 
+/** What every placeholder starts with. A registered value equal to this alters them all, which is the fail-closed path. */
+export const LOSSY_PLACEHOLDER_PREFIX = "agni_lossy_number_";
+
+/** `text` with its lossy number literals swapped out: the literals in order, and the marker every placeholder starts with. */
+export interface SwappedNumbers {
+  /** The input with each lossy literal replaced by the string `"<marker><index>_"`. */
+  text: string;
+  /** The digits that were swapped out, in order of appearance. */
+  literals: string[];
+  /** The prefix and a nonce made for this call: `<LOSSY_PLACEHOLDER_PREFIX><32 hex digits>_`. */
+  marker: string;
+}
+
 /**
- * True when `text` (valid JSON) holds a number literal outside a string whose value is not the value it has once
- * parsed and written again: a double cannot hold it exactly, or it is out of range (`1e999` becomes `null`).
- * A literal that only changes its spelling (`1.0`, `1e2`) is not lossy.
+ * Swaps every number literal outside a string whose value is not the value it has once parsed and written again
+ * (a double cannot hold it exactly, or it is out of range: `1e999` becomes `null`) for a placeholder string. A
+ * literal that only changes its spelling (`1.0`, `1e2`) is not lossy and stays. String contents are skipped, so
+ * a digit run inside a string is never touched. `text` must be valid JSON. The marker carries a nonce made fresh
+ * for each call, so no one can write a string the walk would take for a placeholder.
  */
-function hasLossyNumber(text: string): boolean {
+export function swapLossyNumbers(text: string): SwappedNumbers {
+  const marker = `${LOSSY_PLACEHOLDER_PREFIX}${crypto.randomUUID().replaceAll("-", "")}_`;
+  const literals: string[] = [];
+  const parts: string[] = [];
   const end = text.length;
+  let copied = 0;
   let i = 0;
   while (i < end) {
     const c = text.charCodeAt(i);
@@ -98,13 +131,43 @@ function hasLossyNumber(text: string): boolean {
     } else if (c === 45 || (c >= 48 && c <= 57)) {
       let j = i + 1;
       while (j < end && isNumberChar(text.charCodeAt(j))) j += 1;
-      if (!survives(text.slice(i, j))) return true;
+      const literal = text.slice(i, j);
+      if (!survives(literal)) {
+        parts.push(text.slice(copied, i), `"${marker}${literals.length}_"`);
+        literals.push(literal);
+        copied = j;
+      }
       i = j;
     } else {
       i += 1;
     }
   }
-  return false;
+  parts.push(text.slice(copied));
+  return { text: parts.join(""), literals, marker };
+}
+
+/**
+ * `serialized` with each placeholder put back as the digits it stood for, or null when that cannot be trusted:
+ * the marker must appear exactly as many times as numbers were swapped, and each placeholder exactly once as a
+ * whole string. A placeholder that was masked, dropped (the parser keeps the last of two equal keys) or written
+ * twice makes the count wrong. A literal that is itself a registered value is masked, as a string.
+ */
+function spliceLossyNumbers(serialized: string, swapped: SwappedNumbers): string | null {
+  const { marker, literals } = swapped;
+  if (serialized.split(marker).length - 1 !== literals.length) return null;
+  const seen = new Array<number>(literals.length).fill(0);
+  let intact = true;
+  const spliced = serialized.replace(new RegExp(`"${marker}(\\d+)_"`, "g"), (whole, index: string) => {
+    const at = Number(index);
+    if (at >= literals.length || (seen[at] = (seen[at] ?? 0) + 1) > 1) {
+      intact = false;
+      return whole;
+    }
+    const literal = literals[at]!;
+    const masked = redact(literal);
+    return masked === literal ? literal : JSON.stringify(masked);
+  });
+  return intact && seen.every((count) => count === 1) ? spliced : null;
 }
 
 const isNumberChar = (c: number): boolean => (c >= 48 && c <= 57) || c === 46 || c === 43 || c === 45 || c === 69 || c === 101;
