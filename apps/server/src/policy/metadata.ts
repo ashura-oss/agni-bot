@@ -12,7 +12,7 @@
  * MCP tools (`mcp_` prefix) get one default: an untrusted reader and an
  * effector at tier 2, asked every time unless the owner trusted that tool
  * (`MCP_FREE_TOOLS`, read only, until Sprint 3 gives connector tools their own
- * `meta`). A tool definition may carry its own `meta`, which wins.
+ * `meta`). A tool definition may carry its own `meta`; it can add to what the table says and never take away from it (`policyFor`).
  */
 import { MCP_FREE_TOOLS } from "../plugins/mcp";
 import { entry } from "../agent/card-text";
@@ -249,13 +249,26 @@ export const TOOL_POLICY: Readonly<Record<string, ToolPolicy>> = {
   routine_delete: local({ protectedWrite: true }),
 };
 
-/** The policy row for a tool, or null when it is not in the table and not an MCP tool. */
+/**
+ * The policy row for a tool, or null when it is not in the table, not an MCP tool, and carries no meta of its own.
+ *
+ * A tool's own `meta` adds to what the table (or the MCP default) holds and never takes from it: every class of both is kept, the tier is the
+ * higher of the two, and the row's taint, per-call assessment, protected-write mark and the rest stay. A tool the table does not know has only
+ * its meta, and one of the `untrusted-reader` class taints the run that reads its result, as the table's own readers do.
+ */
 export function policyFor(tool: string, own?: ToolMeta): ToolPolicy | null {
-  if (own) return { ...own };
-  const row = TOOL_POLICY[tool];
-  if (row) return row;
-  if (tool.startsWith("mcp_")) return mcpPolicy(tool);
-  return null;
+  const row = TOOL_POLICY[tool] ?? (tool.startsWith("mcp_") ? mcpPolicy(tool) : null);
+  if (!own) return row;
+  const classes = [...new Set([...(row?.classes ?? []), ...own.classes])];
+  const merged: ToolPolicy = {
+    ...row,
+    ...own,
+    classes,
+    tier: Math.max(row?.tier ?? 0, own.tier) as ToolTier,
+    ...((own.resources ?? row?.resources) ? { resources: (own.resources ?? row?.resources)! } : {}),
+  };
+  if (!merged.taintedBy && classes.includes("untrusted-reader")) merged.taintedBy = { kind: "unknown", label: () => `results from ${clean(tool, 60)}` };
+  return merged;
 }
 
 /** An MCP tool: asks every time unless the owner trusted it. A trusted one still taints the run, because its result is outside text. */
