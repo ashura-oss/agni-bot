@@ -185,3 +185,15 @@ describe("staging a value before the save that will hold it", () => {
     expect(masked("access-token-one-aaaa")).toBe(true);
   });
 });
+
+describe("the retired bound is small enough for redact() to stay fast", () => {
+  test("RETIRED_MAX is 512 (redact() on a 100 KB frame cost 56 ms at 2,000), and holds at that size across slots", () => {
+    expect(RETIRED_MAX).toBe(512);
+    // 40 slots, each with a full queue of 32: 1,280 retired values would be held if the bound were 2,000.
+    const slots = 40;
+    for (let slot = 0; slot < slots; slot += 1) {
+      for (let i = 0; i <= RETIRED_PER_SLOT; i += 1) rememberSecretsAt(`conn-${slot}`, `bound-${slot}-number-${i}-zzzzzz`);
+    }
+    expect(secretCount()).toBeLessThanOrEqual(RETIRED_MAX + slots);
+  });
+});

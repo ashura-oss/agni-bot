@@ -212,11 +212,13 @@ export const RETIRED_PER_SLOT = 32;
 /**
  * How many retired values, in all slots together, stay masked: when more pile up, the oldest (by
  * when it was queued) goes, whichever slot it is in. This keeps the registry under `MAX_SECRETS`
- * however many slots there are (one per plugin, account and connection). It is a fifth of
- * `MAX_SECRETS`, so the live values of the vault, the environment and every store always fit in
- * the other four fifths.
+ * however many slots there are (one per plugin, account and connection). It is small on purpose,
+ * because every retired value adds about fifty forms that each `redact` call scans for: at 2,000 a
+ * `redact()` of a 100 KB frame measured 56 ms, so the bound is 512 (per slot
+ * 32 still covers ten refreshes, and many slots rarely all have full queues). It is about a twentieth
+ * of `MAX_SECRETS`, so the live values of the vault, the environment and every store always fit.
  */
-export const RETIRED_MAX = 2_000;
+export const RETIRED_MAX = 512;
 
 /** A value to hold for a slot, with the time (epoch ms) after which it is known to be dead, when known. */
 export type SlotSecret = string | undefined | null | { value: string | undefined | null; expiresAt?: number };
