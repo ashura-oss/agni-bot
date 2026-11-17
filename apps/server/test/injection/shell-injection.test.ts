@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { ApprovalBroker } from "../../src/agent/approval-broker";
+import { existsSync, mkdirSync, readdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { decide } from "../../src/policy/engine";
 import { buildTaskToolRegistry } from "../../src/tools/task-registry";
 import { buildAppleScript, isCompoundCommand, runPrivilegedWithOSAuth } from "../../src/tools/privileged-os";
 import { openDatabase } from "../../src/db";
+import { policyRig, type PolicyRig } from "../policy-fixture";
 import { useThrowawayHome } from "./isolated-home";
 
 /**
@@ -15,8 +15,9 @@ import { useThrowawayHome } from "./isolated-home";
  * Two questions. (1) Can text in a `bash` command talk its way past the gate
  * that lets only one plain read-only program run unasked? (2) Does text in the
  * arguments of the tools that are not shells (file, search, memory, web) ever
- * reach a shell? Each is asked of the real code: the broker's `requiresApproval`
- * for (1), the registry's tool handlers for (2).
+ * reach a shell? Each is asked of the real code: the policy engine's `decide`
+ * (the one place that says whether a call runs unasked) for (1), the registry's
+ * tool handlers for (2).
  */
 
 useThrowawayHome();
@@ -25,15 +26,14 @@ let root = "";
 let scratch = "";
 let marker = "";
 let db: Database | undefined;
-let saved: string | undefined;
+let rig: PolicyRig | undefined;
 
+// The rig makes the scratch folder (and points AGNI_SCRATCH_DIR at it) and restores the variable when it is closed.
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), "agni-shell-injection-"));
-  scratch = join(root, "scratch");
-  mkdirSync(scratch, { recursive: true });
+  rig = policyRig();
+  scratch = rig.scratch;
+  root = dirname(scratch);
   marker = join(root, "PWNED");
-  saved = process.env.AGNI_SCRATCH_DIR;
-  process.env.AGNI_SCRATCH_DIR = scratch;
   writeFileSync(join(scratch, "notes.txt"), "plain notes\n");
   mkdirSync(join(scratch, "sub"), { recursive: true });
 });
@@ -41,19 +41,22 @@ beforeEach(() => {
 afterEach(() => {
   db?.close();
   db = undefined;
-  if (saved === undefined) delete process.env.AGNI_SCRATCH_DIR;
-  else process.env.AGNI_SCRATCH_DIR = saved;
-  rmSync(root, { recursive: true, force: true });
+  rig?.close();
+  rig = undefined;
 });
 
-function broker(): ApprovalBroker {
-  return new ApprovalBroker({ db: null as unknown as Database, emit: () => undefined, waitForDecision: async () => null });
+/**
+ * Would this `bash` call stop for the owner (or be refused outright) instead of running unasked? Asked of the policy
+ * engine with the owner's own clean turn, without leaving an audit row or a blocked-attempt count.
+ */
+function asks(args: Record<string, unknown>): boolean {
+  return decide(rig!.run, { tool: "bash", args, callID: "c_inj" }, { record: false }).action !== "run";
 }
 
 describe("the bash gate: only one plain read-only program runs unasked", () => {
   test("ordinary read-only commands in scratch run free (the gate is not a blanket ask)", () => {
     for (const command of ["ls", "ls -la", "cat notes.txt", "pwd", "echo hello", "head -n 5 notes.txt", "wc -l notes.txt", "ls sub", "date"]) {
-      expect({ command, asks: broker().requiresApproval("bash", { command }) }).toEqual({ command, asks: false });
+      expect({ command, asks: asks({ command }) }).toEqual({ command, asks: false });
     }
   });
 
@@ -144,12 +147,12 @@ describe("the bash gate: only one plain read-only program runs unasked", () => {
   ];
 
   test.each(INJECTIONS.map((command) => [JSON.stringify(command).slice(0, 70), command] as const))("%s asks the owner", (_label, command) => {
-    expect({ command, asks: broker().requiresApproval("bash", { command }) }).toEqual({ command, asks: true });
+    expect({ command, asks: asks({ command }) }).toEqual({ command, asks: true });
   });
 
   test.skipIf(process.platform !== "win32")("a Windows drive path is outside scratch", () => {
-    expect(broker().requiresApproval("bash", { command: "cat C:/Windows/win.ini" })).toBe(true);
-    expect(broker().requiresApproval("bash", { command: "ls D:/" })).toBe(true);
+    expect(asks({ command: "cat C:/Windows/win.ini" })).toBe(true);
+    expect(asks({ command: "ls D:/" })).toBe(true);
   });
 
   test("a symlink inside scratch that points outside it is outside scratch", () => {
@@ -161,19 +164,19 @@ describe("the bash gate: only one plain read-only program runs unasked", () => {
       // Creating symlinks needs a privilege on some Windows setups; the rest of the suite covers the rule.
       return;
     }
-    expect(broker().requiresApproval("bash", { command: "cat link.txt" })).toBe(true);
+    expect(asks({ command: "cat link.txt" })).toBe(true);
   });
 
   test("a working directory outside scratch asks, whatever the command", () => {
     const elsewhere = join(root, "elsewhere");
     mkdirSync(elsewhere);
-    expect(broker().requiresApproval("bash", { command: "ls", cwd: elsewhere })).toBe(true);
-    expect(broker().requiresApproval("bash", { command: "ls", cwd: join(scratch, "..") })).toBe(true);
+    expect(asks({ command: "ls", cwd: elsewhere })).toBe(true);
+    expect(asks({ command: "ls", cwd: join(scratch, "..") })).toBe(true);
   });
 
   test("a non-string command or a command given in another field cannot dodge the check", () => {
     for (const args of [{ command: ["ls", "; touch PWNED"] }, { cmd: "ls" }, {}, { command: null }, { command: 5 }]) {
-      expect({ args: JSON.stringify(args), asks: broker().requiresApproval("bash", args as never) }).toEqual({ args: JSON.stringify(args), asks: true });
+      expect({ args: JSON.stringify(args), asks: asks(args as Record<string, unknown>) }).toEqual({ args: JSON.stringify(args), asks: true });
     }
   });
 
@@ -181,7 +184,7 @@ describe("the bash gate: only one plain read-only program runs unasked", () => {
   // clock; they are not "read-only", yet every word of the command matches the plain-word allowlist.
   test("date with a set-the-clock flag asks (product finding: today it is waved through)", () => {
     for (const command of ["date -s 20000101", "date --set 20000101", "date -u -s 20000101"]) {
-      expect({ command, asks: broker().requiresApproval("bash", { command }) }).toEqual({ command, asks: true });
+      expect({ command, asks: asks({ command }) }).toEqual({ command, asks: true });
     }
   });
 });
