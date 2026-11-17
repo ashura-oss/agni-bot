@@ -66,6 +66,22 @@ export function readConnectionTokens(row: PluginConnectionRow): TokenBlob {
   return blob;
 }
 
+/**
+ * Mask the tokens of every stored connection. Called once at daemon start, after the vault is open: a row is
+ * otherwise read (and its tokens masked) only when a plugin tool uses it, and until then a model that quotes a
+ * refresh token puts it raw into a card, the tool log and the message log. This is committed state, so the slot
+ * is settled (like `loadPluginsFile`), not staged. Returns how many rows held a credential.
+ */
+export function registerStoredConnectionSecrets(db: Database): number {
+  let held = 0;
+  for (const row of getConnections(db)) {
+    const blob = parseBlob(row.token_ref ? vaultForReads()?.get(row.token_ref) : row.tokens);
+    rememberSecretsAt(tokenSlot(row.id), ...tokenSecrets(blob));
+    if (holdsCredential(blob)) held++;
+  }
+  return held;
+}
+
 /** True when the blob holds a credential, as opposed to only a pending sign-in's `state`. */
 function holdsCredential(tokens: TokenBlob): boolean {
   return Boolean(tokens.access_token || tokens.refresh_token);
