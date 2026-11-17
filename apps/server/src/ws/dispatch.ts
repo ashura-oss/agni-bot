@@ -102,6 +102,7 @@ import { packCarried, storedCarried, taskTaint } from "../policy/carry";
 import { forgetOpened, fullTextWasCut, mustOpenFirst, wasFullOpened } from "./approval-full";
 import { isRunPaused } from "../policy/pause";
 import { redact } from "../util/redact";
+import { redactForStorage } from "../util/redact-storage";
 import {
   handleAgentEnabled,
   handleApprovalFull,
@@ -483,12 +484,12 @@ interface QueuedMessage {
   rowIDs: string[];
 }
 
-/** H22: write the owner's message before anything acknowledges it. */
+/** H22: write the owner's message before anything acknowledges it. A key the owner pasted is masked in what is written (words and frame). */
 function persistOwnerMessage(deps: DispatchDeps, session: Session, frame: Extract<ClientFrame, { type: "msg.send" }>, text: string): string {
   const id = newID("qmsg");
   deps.db.run(
     "INSERT INTO queued_messages (id, frame, text, device_id, device_name, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-    [id, JSON.stringify(frame), text, session.device?.id ?? "", session.device?.name ?? "You", nowISO()],
+    [id, redactForStorage(JSON.stringify(frame)), redactForStorage(text), session.device?.id ?? "", session.device?.name ?? "You", nowISO()],
   );
   return id;
 }
