@@ -69,6 +69,23 @@ export interface ScheduledJobView {
 }
 
 const MIN_EVERY_MINUTES = 5;
+const MAX_EVERY_MINUTES = 10_080;
+
+/** Why this interval can never be a schedule, or null. */
+function everyMinutesProblem(minutes: number): string | null {
+  return Number.isFinite(minutes) && minutes >= MIN_EVERY_MINUTES && minutes <= MAX_EVERY_MINUTES
+    ? null
+    : `everyMinutes must be between ${MIN_EVERY_MINUTES} and ${MAX_EVERY_MINUTES} (a week)`;
+}
+
+/** Why this bot may not keep another job of its own, or null. */
+function capProblem(db: Database, callerAgentID: string): string | null {
+  const mine = selfScheduledCount(db, callerAgentID);
+  const mostToKeep = maxSelfScheduledJobs(db);
+  return canSelfSchedule(mine, mostToKeep)
+    ? null
+    : `you already have ${mine} scheduled jobs and ${mostToKeep} is the most a bot may keep. Cancel one with job_cancel before scheduling another.`;
+}
 
 /** Jobs this bot put on its own clock that are still queued or running. Jobs the owner or a routine made are not counted. */
 function selfScheduledCount(db: Database, callerAgentID: string): number {
@@ -150,11 +167,8 @@ export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: 
   const text = args.text.trim();
   if (!text) throw new Error("a scheduled job needs something to do");
   if (closureWording(text)) throw new Error(CLOSURE_WORDING_REFUSAL);
-  const mine = selfScheduledCount(db, callerAgentID);
-  const mostToKeep = maxSelfScheduledJobs(db);
-  if (!canSelfSchedule(mine, mostToKeep)) {
-    throw new Error(`you already have ${mine} scheduled jobs and ${mostToKeep} is the most a bot may keep. Cancel one with job_cancel before scheduling another.`);
-  }
+  const full = capProblem(db, callerAgentID);
+  if (full) throw new Error(full);
   const choices = [args.at, args.dailyAt, args.everyMinutes].filter((value) => value !== undefined && value !== null);
   if (choices.length === 0) throw new Error("say when it should run: `at` (one-off), `dailyAt` (a clock time), or `everyMinutes`");
   if (choices.length > 1) throw new Error("pick one: `at`, `dailyAt` or `everyMinutes`");
@@ -193,9 +207,8 @@ export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: 
     if (createdByRequest) payload.createdByRequest = createdByRequest;
   } else {
     const minutes = Number(args.everyMinutes);
-    if (!Number.isFinite(minutes) || minutes < MIN_EVERY_MINUTES || minutes > 10_080) {
-      throw new Error(`everyMinutes must be between ${MIN_EVERY_MINUTES} and 10080 (a week)`);
-    }
+    const outOfRange = everyMinutesProblem(minutes);
+    if (outOfRange) throw new Error(outOfRange);
     const everyMs = Math.round(minutes * 60_000);
     runAt = new Date(Date.now() + everyMs).toISOString();
     recurrence = `every ${minutes} minute${minutes === 1 ? "" : "s"}`;
@@ -306,8 +319,8 @@ function callerOf(ctx: ToolContext): string {
   return id;
 }
 
-/** Why these `job_schedule` arguments can never be made into a job, or null. The same checks `scheduleJob` makes, said before the call is judged. */
-function scheduleProblem(args: Record<string, unknown>): string | null {
+/** Why these `job_schedule` arguments can never be made into a job by this bot, or null. The same checks `scheduleJob` makes, said before the call is judged. */
+function scheduleProblem(db: Database, args: Record<string, unknown>, bot: string | undefined): string | null {
   const given = (value: unknown): boolean => value !== undefined && value !== null;
   if ([args.at, args.dailyAt, args.everyMinutes].filter(given).length > 1) return "pick one: `at`, `dailyAt` or `everyMinutes`";
   try {
@@ -316,7 +329,12 @@ function scheduleProblem(args: Record<string, unknown>): string | null {
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
   }
-  return null;
+  if (given(args.everyMinutes)) {
+    const outOfRange = everyMinutesProblem(Number(args.everyMinutes));
+    if (outOfRange) return outOfRange;
+  }
+  // A bot at its cap could not keep the job, so it is told before anyone is asked about it.
+  return bot ? capProblem(db, bot) : null;
 }
 
 /**
@@ -360,7 +378,7 @@ export function createJobTools(db: Database): ToolDefinition<unknown, unknown>[]
       }, ["text"]),
       timeoutMs: 3_000,
       // What the schema cannot say: a schedule that could never be made is refused before the owner is asked about a repeating job.
-      validate: scheduleProblem,
+      validate: (args, bot) => scheduleProblem(db, args, bot),
       handler: async (args, ctx) => {
         const input = (args ?? {}) as Record<string, unknown>;
         const recurring = isRecurringSchedule(input);

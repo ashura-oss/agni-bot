@@ -31,7 +31,7 @@ export interface RunContextInput {
   /** Every tool this run may call. */
   capabilities: Iterable<string>;
   /** The registry's view of the tools of this turn. */
-  registry: { get(name: string): { meta?: ToolMeta } | undefined; validateArgs(name: string, args: Record<string, unknown>): string | null };
+  registry: { get(name: string): { meta?: ToolMeta } | undefined; validateArgs(name: string, args: Record<string, unknown>, bot?: string): string | null };
   isUnloaded?: (tool: string) => boolean;
   /** Text the owner wrote in this conversation, for the egress binding. */
   ownerText?: string[];
@@ -45,7 +45,7 @@ export function createRunContext(input: RunContextInput): RunContext {
   const { registry } = input;
   const services: RunServices = {
     db: input.db,
-    validateArgs: (tool, args) => registry.validateArgs(tool, args),
+    validateArgs: (tool, args, bot) => registry.validateArgs(tool, args, bot),
     hasTool: (tool) => registry.get(tool) !== undefined,
     metaOf: (tool) => registry.get(tool)?.meta,
     isUnloaded: input.isUnloaded ?? (() => false),

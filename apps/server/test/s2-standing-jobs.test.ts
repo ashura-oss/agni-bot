@@ -741,3 +741,50 @@ describe("a repeating job whose audit row cannot be written is not kept", () => 
   });
 });
 
+
+describe("a schedule that could never be made is refused before any card", () => {
+  const validate = (rig: PolicyRig, args: Record<string, unknown>, bot = "ea"): string | null => {
+    const tool = createJobTools(rig.db)[0]!;
+    return tool.validate ? (tool.validate as (args: Record<string, unknown>, bot: string) => string | null)(args, bot) : "(the tool has no validate)";
+  };
+
+  test("an interval outside 5 to 10080 minutes is a problem the tool names itself", () => {
+    const rig = policyRig();
+    try {
+      for (const everyMinutes of [1, 4, 10_081]) expect(String(validate(rig, { text: "x", everyMinutes })), `everyMinutes ${everyMinutes}`).toMatch(/between 5 and 10080/);
+      expect(validate(rig, { text: "x", everyMinutes: 5 })).toBeNull();
+      expect(validate(rig, { text: "x", everyMinutes: 10_080 })).toBeNull();
+    } finally {
+      rig.close();
+    }
+  });
+
+  test("a bot at its cap of self-scheduled jobs is a problem too", () => {
+    const rig = policyRig();
+    try {
+      setRunCaps(rig.db, { maxSelfScheduledJobsPerBot: 1 });
+      expect(validate(rig, { text: "x", everyMinutes: 30 })).toBeNull();
+      enqueueJob(rig.db, { kind: "turn", runAt: future(), payload: { agentID: "ea", scheduledBy: "bot", inputRole: "system", text: "already there" } });
+      expect(String(validate(rig, { text: "x", everyMinutes: 30 }))).toMatch(/most a bot may keep/);
+      expect(validate(rig, { text: "x", everyMinutes: 30 }, "researcher"), "another bot's jobs are counted against this one").toBeNull();
+    } finally {
+      rig.close();
+    }
+  });
+
+  scenarioTest("a job-fire run at its cap is told so with no card", async () => {
+    const s = await scenarios.start();
+    const a = await s.connect({ label: "A" });
+    await ownerSchedulesAJob(s, a);
+    setRunCaps(s.db, { maxSelfScheduledJobsPerBot: 1 });
+    enqueueJob(s.db, { kind: "turn", runAt: "2999-01-01T00:00:00.000Z", payload: { agentID: "ea", scheduledBy: "bot", inputRole: "system", text: "already there" } });
+    const owner = answerCards(a, "once");
+    s.model.queue(...scripted(true, [call("job_schedule", { text: "Check the inbox.", everyMinutes: 30 }, "call_recur"), say("Tried.")]));
+    await tickUntil(s, () => allCallsTo(s, "job_schedule", a).some((entry) => entry.callID === "call_recur"));
+    owner.stop();
+    const record = allCallsTo(s, "job_schedule", a).find((entry) => entry.callID === "call_recur");
+    expect(record, "the run never made the call; the script is out of step").toBeDefined();
+    expect(owner.cards, "the owner was asked about a repeating job the bot could not keep").toEqual([]);
+    expect(String(resultJson(record).error ?? "(no error)")).toMatch(/most a bot may keep/);
+  });
+});

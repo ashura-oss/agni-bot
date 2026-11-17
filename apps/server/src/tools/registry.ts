@@ -66,7 +66,7 @@ export interface ToolDefinition<Args = unknown, Result = unknown> {
    * What the schema cannot say: why these arguments can never be run (a working directory outside scratch), or
    * null. Checked with the schema before the call is judged, so a refused call never raises an approval card.
    */
-  validate?: (args: Record<string, unknown>) => string | null;
+  validate?: (args: Record<string, unknown>, bot?: string) => string | null;
   handler: (args: Args, ctx: ToolContext) => Promise<Result>;
 }
 
@@ -103,12 +103,12 @@ export class ToolRegistry {
    * Why `args` would be refused for the named tool, or null when they are
    * acceptable (or the tool is unknown: that is the caller's own check).
    */
-  validateArgs(name: string, args: unknown): string | null {
+  validateArgs(name: string, args: unknown, bot?: string): string | null {
     const tool = this.tools.get(name);
     if (!tool) return null;
     const broken = validateArgs(tool.schema, args);
     if (broken) return broken;
-    return tool.validate && typeof args === "object" && args !== null && !Array.isArray(args) ? tool.validate(args as Record<string, unknown>) : null;
+    return tool.validate && typeof args === "object" && args !== null && !Array.isArray(args) ? tool.validate(args as Record<string, unknown>, bot) : null;
   }
 
   get(name: string): ToolDefinition<never, unknown> | undefined {

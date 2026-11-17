@@ -74,7 +74,7 @@ function judge(run: RunContext, input: PolicyInput, record: boolean): Decision {
   }
 
   // 2. schema
-  const invalid = services.validateArgs(tool, args);
+  const invalid = services.validateArgs(tool, args, run.bot);
   if (invalid) return refuse("invalid_arguments", invalid, "arguments break the tool's schema");
 
   // 3. resources

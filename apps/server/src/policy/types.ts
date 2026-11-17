@@ -66,7 +66,7 @@ export interface RunBudget {
 export interface RunServices {
   db: Database;
   /** Why the arguments break the tool's schema, or null (the registry's `validateArgs`). */
-  validateArgs: (tool: string, args: Record<string, unknown>) => string | null;
+  validateArgs: (tool: string, args: Record<string, unknown>, bot?: string) => string | null;
   /** True when the tool is registered in this turn. */
   hasTool: (tool: string) => boolean;
   /** What a tool says about itself (a connector tool's own meta), when it says anything. */
