@@ -109,12 +109,13 @@ describe("the shared document is masked field by field", () => {
     expect(masked.title).toBe(doc.title);
   });
 
-  test("JSON with nothing to mask is left byte for byte as it was (formatting kept)", () => {
+  test("JSON with nothing to mask keeps its value (it is written back compact, never as the raw text)", () => {
     registerSecret(AWKWARD);
-    const pretty = JSON.stringify({ a: 1, b: ["x", { c: null }] }, null, 2);
+    const value = { a: 1, b: ["x", { c: null }] };
+    const pretty = JSON.stringify(value, null, 2);
     const masked = maskedDocument(documentOf(toolRecord({ args: pretty, result: pretty })));
-    expect(masked.records[0]!.args).toBe(pretty);
-    expect(masked.records[0]!.result).toBe(pretty);
+    expect(JSON.parse(masked.records[0]!.args!)).toEqual(value);
+    expect(JSON.parse(masked.records[0]!.result!)).toEqual(value);
   });
 
   test("JSON nested too deep to walk is masked as plain text and the export still goes through", () => {
