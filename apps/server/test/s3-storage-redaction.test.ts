@@ -70,7 +70,7 @@ describe("OAuth sign-in errors", () => {
     const db = openDatabase(":memory:");
     dbs.push(db);
     const service = new PluginService({ config: { host: "127.0.0.1", port: 8787 } as Config, db, emit: () => {}, pluginsPath });
-    service.fetchOverride = (async () => Response.json({ error: "invalid_client", error_description: `bad client_secret=${CLIENT_SECRET}` }, { status: 401 })) as typeof fetch;
+    service.fetchOverride = (async () => Response.json({ error: "invalid_client", error_description: `bad client_secret=${CLIENT_SECRET}` }, { status: 401 })) as unknown as typeof fetch;
     const state = new URL(service.connect("calendar", "agent").authorizeURL!).searchParams.get("state")!;
     const result = await service.completeSignIn(state, "code-1");
     const row = getConnectionFor(db, "calendar", "agent")!;
