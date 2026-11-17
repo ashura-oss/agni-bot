@@ -26,6 +26,7 @@ import type { ToolDefinition } from "../tools/registry";
 import type { ToolMeta } from "../policy/tool-meta";
 import { log } from "../log";
 import { redact } from "../util/redact";
+import { redactJSONText } from "../util/redact-json";
 import { modeFor } from "./credentials";
 import { approvedHashes, canonicalDefinition, hashToolDefinition, memoryPins, reconcilePins, type PinCandidate } from "./mcp-pins";
 import { checkMcpUrl, guardedFetch } from "./mcp-url";
@@ -59,6 +60,18 @@ export function mcpToolMeta(name: string): ToolMeta | undefined {
 }
 
 const MAX_RESULT_CHARS = 20_000;
+
+/** The server's input schema with every registered secret masked, each string on its own; an empty object schema when it is missing or cannot be masked as an object. */
+function maskedSchema(schema: unknown): Record<string, unknown> {
+  const empty = { type: "object", properties: {} };
+  if (!schema || typeof schema !== "object") return empty;
+  try {
+    const masked: unknown = JSON.parse(redactJSONText(JSON.stringify(schema)));
+    return masked && typeof masked === "object" && !Array.isArray(masked) ? (masked as Record<string, unknown>) : empty;
+  } catch {
+    return empty;
+  }
+}
 const safe = (s: string): string => s.toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
 
 /** What `connect` needs besides the server itself. */
@@ -142,9 +155,12 @@ export class McpHub {
         log.warn(`mcp ${pluginID}: tool ${tool.name} is new or changed since it was trusted; it stays off until \`agni mcp approve ${pluginID} ${tool.name}\``);
       }
       HINTS.set(name, { plugin: pluginID, readOnly: tool.annotations?.readOnlyHint === true });
-      const schema = tool.inputSchema && typeof tool.inputSchema === "object" ? tool.inputSchema : { type: "object", properties: {} };
-      // The description is the server's text and goes to the model: one line, cut short, labelled.
-      const blurb = (tool.description ?? tool.name).replace(/\s+/g, " ").trim().slice(0, 200);
+      // The description and the schema are the server's text and go to the model on every turn, so a server that
+      // echoes the bearer it was sent into either must not hand it on. Masked here, once per connect, not per
+      // frame. The pin hash above is over the definition as offered; only what the model is given is masked.
+      const schema = maskedSchema(tool.inputSchema);
+      // One line, cut short, labelled. Masked before the cut, so a secret the cut would split is not left half-visible.
+      const blurb = redact(tool.description ?? tool.name).replace(/\s+/g, " ").trim().slice(0, 200);
       entries.push({
         serverName: tool.name,
         hash: hashToolDefinition(definition(tool)),
