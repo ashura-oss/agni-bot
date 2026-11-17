@@ -167,6 +167,19 @@ function newMessage(partial: Partial<ChatMessage> & Pick<ChatMessage, "id" | "ro
   };
 }
 
+/** The empty reply that stands for a turn which was stopped before it wrote anything: it draws "No reply, stopped". */
+function stoppedReply(question: ChatMessage, turnID: string, reason: string): ChatMessage {
+  return newMessage({
+    id: `stopped_${turnID}`,
+    role: "assistant",
+    createdAt: question.createdAt,
+    turnID,
+    sessionID: question.sessionID,
+    state: { kind: "stopped", reason },
+    stopKnown: true,
+  });
+}
+
 export function isStreaming(message: ChatMessage): boolean {
   return message.state.kind === "streaming";
 }
@@ -556,6 +569,17 @@ export class Conversation {
           : {}),
       }),
     );
+
+    // A turn stopped before it wrote anything leaves no reply row to carry its stop reason: the owner's own row carries it
+    // (history.ts), and the empty stopped reply it stands for is put back after it, so "No reply: stopped" survives a reload.
+    for (let index = rebuilt.length - 1; index >= 0; index -= 1) {
+      const info = incoming[index];
+      const row = rebuilt[index];
+      if (!info || !row || info.role !== "user" || !info.turnID || info.stopReason === undefined) continue;
+      if (info.stopReason === "end" || info.stopReason === "needs_input") continue;
+      if (incoming.some((other) => other.role === "assistant" && other.turnID === info.turnID)) continue;
+      rebuilt.splice(index + 1, 0, stoppedReply(row, info.turnID, info.stopReason));
+    }
 
     const streaming = this.messages.filter((message) => isStreaming(message) && message.text.length > 0);
     const echoes = this.messages.filter(

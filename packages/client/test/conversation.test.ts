@@ -902,3 +902,57 @@ describe("session seams", () => {
     expect(conversation.threadID).toBe("thr_first");
   });
 });
+
+describe("the stop marker on the owner's own row (S2-6)", () => {
+  const owner = (partial: Partial<MessageInfo> = {}) =>
+    info({ id: "m1", role: "user", text: "do the big thing", turnID: "trn_1", sessionID: "thr_1", ...partial });
+
+  test("a user row that names how its turn ended gets 'No reply, stopped' after it, from history alone", () => {
+    const chat = new Conversation("ea");
+    chat.loadConversationHistory("cnv_1", "ea", [owner({ stopReason: "cancelled" })]);
+    expect(chat.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+    const marker = chat.messages[1]!;
+    expect(marker.text).toBe("");
+    expect(marker.turnID).toBe("trn_1");
+    expect(isStopped(marker, "cancelled")).toBe(true);
+    expect(stopExplanation(marker)).toBe("Stopped");
+  });
+
+  test("a spend stop reads as out of budget", () => {
+    const chat = new Conversation("ea");
+    chat.loadConversationHistory("cnv_1", "ea", [owner({ stopReason: "budget" })]);
+    expect(stopExplanation(chat.messages[1]!)).toBe("Out of budget");
+  });
+
+  test("a turn that ended well, or is waiting for the owner, adds nothing", () => {
+    for (const stopReason of ["end", "needs_input"]) {
+      const chat = new Conversation("ea");
+      chat.loadConversationHistory("cnv_1", "ea", [owner({ stopReason })]);
+      expect(chat.messages).toHaveLength(1);
+    }
+  });
+
+  test("a user row with no stopReason adds nothing", () => {
+    const chat = new Conversation("ea");
+    chat.loadConversationHistory("cnv_1", "ea", [owner()]);
+    expect(chat.messages).toHaveLength(1);
+  });
+
+  test("a turn that did write a reply gets no extra marker", () => {
+    const chat = new Conversation("ea");
+    chat.loadConversationHistory("cnv_1", "ea", [
+      owner({ stopReason: "cancelled" }),
+      info({ id: "a1", role: "assistant", text: "half an answer", turnID: "trn_1", sessionID: "thr_1", stopReason: "cancelled" }),
+    ]);
+    expect(chat.messages.map((message) => message.id)).toEqual(["m1", "a1"]);
+  });
+
+  test("the marker keeps its place when the history is loaded again", () => {
+    const chat = new Conversation("ea");
+    const history = [owner({ stopReason: "timeout" }), info({ id: "m2", role: "user", text: "next", turnID: "trn_2", sessionID: "thr_1" })];
+    chat.loadConversationHistory("cnv_1", "ea", history);
+    chat.loadConversationHistory("cnv_1", "ea", history);
+    expect(chat.messages.map((message) => message.role)).toEqual(["user", "assistant", "user"]);
+    expect(isStopped(chat.messages[1]!, "timeout")).toBe(true);
+  });
+});
