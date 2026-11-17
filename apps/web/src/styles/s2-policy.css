@@ -138,3 +138,273 @@
     flex: 1 1 auto;
   }
 }
+
+/* Header: pause all and today's spend ---------------------------------------- */
+
+.policy-pause,
+.spend-chip {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink-secondary);
+  font-size: var(--text-meta);
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.policy-pause:hover,
+.spend-chip:hover {
+  background: var(--surface-raised);
+  color: var(--ink);
+}
+
+/* Paused is said in words (the label) and drawn: the ember edge is the only colour. */
+.policy-pause.on {
+  border-color: var(--ember);
+  color: var(--ink);
+}
+
+.spend-chip {
+  font-variant-numeric: tabular-nums;
+}
+
+.spend-chip[data-level="warn"] {
+  border-color: var(--amber);
+  color: var(--ink);
+}
+
+.spend-chip[data-level="full"] {
+  border-color: var(--ember);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.spend-chip[data-level="unknown"] {
+  color: var(--ink-tertiary);
+}
+
+/* Under the header while every bot is paused; same place and look as the connection banner. */
+.pause-banner {
+  position: absolute;
+  top: 64px;
+  left: 50%;
+  z-index: 19;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: max-content;
+  max-width: calc(100% - 28px);
+  padding: 8px 12px;
+  border: 1px solid var(--ember);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--ink);
+  font-size: var(--text-meta);
+  transform: translateX(-50%);
+}
+
+.pause-banner > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.pause-banner .btn {
+  flex: 0 0 auto;
+}
+
+.pause-banner ~ .connection-banner {
+  top: 116px;
+}
+
+/* One bot on or off: the top of its profile --------------------------------- */
+
+.bot-power {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--hairline);
+  font-size: var(--text-body);
+}
+
+.sidebar-off-tag {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  color: var(--ink-secondary);
+  font-size: var(--text-caption);
+  line-height: 1.4;
+}
+
+.composer-off-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--card-radius);
+  background: var(--surface);
+  color: var(--ink-secondary);
+  font-size: var(--text-meta);
+}
+
+/* A run a spending limit stopped ---------------------------------------------- */
+
+.budget-stop-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid var(--ember);
+  border-radius: 16px;
+  background: var(--surface);
+}
+
+.budget-stop-line,
+.budget-stop-done {
+  margin: 0;
+  color: var(--ink-secondary);
+  font-size: var(--text-meta);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.budget-stop-done {
+  color: var(--ink);
+}
+
+/* Settings, Spending ------------------------------------------------------------ */
+
+.spending-bots {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.spending-bots li {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--ink-secondary);
+  font-size: var(--text-meta);
+  font-variant-numeric: tabular-nums;
+}
+
+.spending-form {
+  gap: 14px;
+}
+
+.spending-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.spending-field label {
+  font-size: var(--text-meta);
+}
+
+.spending-input {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  color: var(--ink-secondary);
+}
+
+.spending-error {
+  padding-left: 8px;
+  border-left: 3px solid var(--ember);
+  color: var(--ink);
+  font-size: var(--text-meta);
+}
+
+.spending-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.spending-saved {
+  color: var(--ink-secondary);
+  font-size: var(--text-meta);
+}
+
+/* Phone: every new control is a 44px target, and the header fits 375px ---------- */
+
+@media (max-width: 720px) {
+  .thread-header {
+    gap: 4px;
+  }
+
+  .policy-pause {
+    justify-content: center;
+    width: var(--touch-target);
+    height: var(--touch-target);
+    padding: 0;
+    border-radius: 50%;
+  }
+
+  .policy-pause-text,
+  .spend-chip-lead {
+    display: none;
+  }
+
+  .spend-chip {
+    min-width: var(--touch-target);
+    min-height: var(--touch-target);
+    max-width: 38vw;
+    padding: 0 10px;
+    justify-content: center;
+    line-height: 1.15;
+    text-align: center;
+    white-space: normal;
+  }
+
+  .pause-banner {
+    top: calc(var(--safe-top) + 60px);
+    border-radius: var(--card-radius);
+  }
+
+  .pause-banner .btn,
+  .budget-stop-card .btn,
+  .composer-off-bar .btn,
+  .bot-power .btn,
+  .spending-actions .btn {
+    min-height: var(--touch-target);
+  }
+
+  .budget-stop-card .card-actions {
+    flex-wrap: wrap;
+  }
+
+  .budget-stop-card .card-actions .btn {
+    flex: 1 1 auto;
+  }
+
+  .spending-input .text-input {
+    min-height: var(--touch-target);
+    font-size: 16px;
+  }
+
+  .bot-power {
+    min-height: var(--touch-target);
+  }
+
+  .sidebar-off-tag {
+    padding: 2px 8px;
+  }
+}

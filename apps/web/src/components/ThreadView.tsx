@@ -18,6 +18,7 @@ import { useAppModel, useAppSnapshot } from "../state/use-app-model";
 import { MessageRowView } from "./MessageRowView";
 import { ComposerView } from "./ComposerView";
 import { ApprovalCard } from "./ApprovalCardView";
+import { BudgetStopCard } from "./BudgetStopCard";
 import { copyText } from "./bits";
 
 export function ThreadView() {
@@ -248,7 +249,9 @@ function PendingInbox() {
   const approvals = snapshot.conversation.openApprovals;
   const forms = snapshot.conversation.openForms;
   const secrets = snapshot.conversation.openSecrets;
-  const empty = approvals.length === 0 && forms.length === 0 && secrets.length === 0;
+  // A run a spending limit stopped is shown where that bot talks (a notice with no bot goes to the open chat).
+  const stops = snapshot.policy.stops.filter((stop) => stop.agentID === null || stop.agentID === snapshot.conversation.agentID);
+  const empty = approvals.length === 0 && forms.length === 0 && secrets.length === 0 && stops.length === 0;
   return (
     <>
       {/* Always drawn, so a screen reader hears a card arrive. Focus is not moved: the owner may be typing. */}
@@ -257,6 +260,9 @@ function PendingInbox() {
       </span>
       {empty ? null : (
     <div className="pending-inbox" role="region" aria-label="Waiting for you">
+      {stops.map((stop) => (
+        <BudgetStopCard key={`${stop.runKey}:${stop.spentUsd}`} stop={stop} />
+      ))}
       {approvals.map((approval) => (
         <ApprovalCard
           key={approval.id}

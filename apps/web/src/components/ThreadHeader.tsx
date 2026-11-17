@@ -6,6 +6,7 @@ import { useState, type ReactNode } from "react";
 import { Bug, Menu, Monitor, MoreHorizontal } from "lucide-react";
 import { format } from "@agni/client";
 import { useAppModel, useAppSnapshot } from "../state/use-app-model";
+import { PauseButton, SpendChip } from "./PolicyControls";
 import {
   PresenceDot,
   SidebarAgentBadge,
@@ -47,6 +48,8 @@ export function ThreadHeader({ onToggleSidebar }: { onToggleSidebar?: () => void
         {working ? <span className="header-status">Writing…</span> : null}
       </button>
       <span className="thread-header-spacer" />
+      <PauseButton />
+      <SpendChip />
 
       <button type="button" className="icon-btn header-more" aria-label="Conversation options" aria-expanded={actionsOpen} onClick={() => setActionsOpen(!actionsOpen)}><MoreHorizontal size={20} /></button>
       {actionsOpen ? <>
