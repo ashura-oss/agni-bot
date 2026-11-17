@@ -70,5 +70,6 @@ export const migration: Migration | null = {
           AND NOT EXISTS (SELECT 1 FROM json_each(payload) WHERE key NOT IN ('text', 'threadID', 'agentID', 'notify', 'everyMs'))
         ) ELSE 0 END;
     CREATE INDEX idx_usage_created_kind_cost ON usage_ledger(created_at, call_kind, cost_usd);   -- the day cap's count of calls with no known cost
+    DROP INDEX IF EXISTS idx_usage_created;   -- m54's (created_at, cost_usd): the index above leads with the same column and holds the cost too, so every query that used it still reads an index, and one ledger write per model call keeps one index fewer
   `,
 };
