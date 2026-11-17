@@ -58,6 +58,10 @@ export function ownerPolicy(opts: OwnerPolicyOptions = {}): OwnerPolicy {
   const canon = (raw: string): string | null => {
     let p = raw.replaceAll("\\", "/").toLowerCase();
     if (/^\/[a-z]\//.test(p)) p = `${p[1]}:${p.slice(2)}`;
+    // A colon is only allowed as the drive of a full path (`c:/...`). `c:foo` and `c:../x` are drive-relative (Windows
+    // resolves them against that drive's current folder), and `x:name` is an NTFS stream. A `//server/x` share is absolute
+    // and outside scratch, so confinement refuses it.
+    if (p.includes(":") && !/^[a-z]:\/[^:]*$/.test(p)) return null;
     if (p.split("/").includes("..")) return null;
     if (/^[a-z]:\//.test(p) || p.startsWith("/")) return posix.normalize(p).replace(/\/+$/, "");
     return scratch ? posix.normalize(`${scratch}/${p}`).replace(/\/+$/, "") : `./${posix.normalize(p)}`;
