@@ -11,7 +11,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDatabase } from "../src/db";
@@ -57,7 +57,7 @@ const C = {
 };
 const CANARIES = Object.values(C);
 
-const ENV_KEYS = ["AGNI_HOME", "AGNI_SECRETS_MODE", "AGNI_PLUGINS_PATH", "AGNI_PROVIDER_CONFIG_PATH", "AGNI_DB_PATH", "GROQ_API_KEY", "AGNI_CUSTOM_KEY_1", "AGNI_CUSTOM_KEY_2"];
+const ENV_KEYS = ["AGNI_HOME", "AGNI_BACKUP_DIR", "AGNI_BACKUP_DIR", "AGNI_SECRETS_MODE", "AGNI_PLUGINS_PATH", "AGNI_PROVIDER_CONFIG_PATH", "AGNI_DB_PATH", "GROQ_API_KEY", "AGNI_CUSTOM_KEY_1", "AGNI_CUSTOM_KEY_2"];
 const saved: Record<string, string | undefined> = {};
 let parent = "";
 let home = "";
@@ -301,6 +301,125 @@ describe("the database's own backups", () => {
     expect(readdirSync(dir).sort()).toEqual(names);
     expect(names.map((name) => hashOf(join(dir, name)))).toEqual(before);
     expect(notes).toEqual([]);
+  });
+
+  /** Run the token migrator alone against the fixture database, with a note collector. */
+  async function migrateTokens(): Promise<{ count: number; notes: string[] }> {
+    const vault = await unlockVault({ home, create: true });
+    const notes: string[] = [];
+    const db = new Database(join(home, "data", "agni.sqlite"), { readwrite: true });
+    try {
+      const results = await runVaultMigrations(vault, { home, db, report: (message) => notes.push(message) });
+      return { count: results.find((result) => result.name === "plugin-tokens")?.count ?? -1, notes };
+    } finally {
+      db.close();
+    }
+  }
+
+  test("when the fresh backup cannot be taken, no old backup is deleted, and the output says they still hold the tokens", async () => {
+    buildHome();
+    const older = plantBackup("agni-20260101.db");
+    const newer = plantBackup("agni-20260102.db");
+    const before = [older, newer].map(hashOf);
+    // A file where the fresh backup's working folder has to be: taking it fails.
+    writeFileSync(join(home, "data", "backups", ".fresh-backup"), "in the way");
+    const { count, notes } = await migrateTokens();
+    expect(count).toBe(2); // the rows did move: that part cannot be undone
+    expect([older, newer].map(hashOf)).toEqual(before); // every old backup is where it was, untouched
+    const text = notes.join("\n");
+    expect(text).toContain("NOT deleted");
+    expect(text).toContain("agni-20260101.db");
+    expect(text).toContain("agni-20260102.db");
+  });
+
+  test("old backups are erased zero-then-delete: a second link to the file sees zeros, not the old tokens", async () => {
+    buildHome();
+    const older = plantBackup("agni-20260101.db");
+    const link = join(parent, "link-to-old-backup");
+    linkSync(older, link); // same bytes under another name: an unlink alone would leave them readable
+    expect(readFileSync(link).includes(C.dbAccess)).toBe(true);
+    await migrateTokens();
+    expect(existsSync(older)).toBe(false);
+    expect(readFileSync(link).includes(C.dbAccess)).toBe(false);
+    expect(readFileSync(link).every((byte) => byte === 0)).toBe(true);
+  });
+
+  test("a backup made today (the name the fresh backup needs) is replaced, not kept as the fresh one", async () => {
+    buildHome();
+    const today = "agni-" + new Date().toISOString().slice(0, 10).replaceAll("-", "") + ".db";
+    const same = plantBackup(today);
+    expect(readFileSync(same).includes(C.dbRefresh)).toBe(true);
+    await migrateTokens();
+    expect(existsSync(same)).toBe(true);
+    expect(readFileSync(same).includes(C.dbRefresh)).toBe(false);
+    expect(readFileSync(same).includes(C.dbAccess)).toBe(false);
+    expect(readdirSync(join(home, "data", "backups")).sort()).toEqual([today]); // no working folder left behind
+  });
+
+  test("rows an earlier build already migrated: backups that still hold their tokens are cleaned, ones that do not are left", async () => {
+    buildHome();
+    const olderCopy = join(parent, "old-backup-copy.db");
+    writer!.run("VACUUM INTO '" + olderCopy.replaceAll("'", "''") + "'"); // the tokens, in plaintext, as an old backup holds them
+    await migrateTokens(); // moves the rows and cleans the backups folder
+    // The earlier build's leftover: an old backup still holding the tokens, next to a clean one.
+    const dir = join(home, "data", "backups");
+    const leftover = join(dir, "agni-20260101.db");
+    copyFileSync(olderCopy, leftover);
+    const cleanOne = plantBackup("agni-20260103.db");
+    const cleanHash = hashOf(cleanOne);
+    expect(readFileSync(leftover).includes(C.dbAccess)).toBe(true);
+    const { count, notes } = await migrateTokens();
+    expect(count).toBe(0);
+    expect(existsSync(leftover)).toBe(false);
+    expect(hashOf(cleanOne)).toBe(cleanHash);
+    expect(plaintextHits()).toEqual([]);
+    expect(notes.join("\n")).toContain("agni-20260101.db");
+    expect(notes.join("\n")).not.toContain("agni-20260103.db");
+  });
+
+  test("a backup folder outside the home (AGNI_BACKUP_DIR) is said to be outside, and only agni-YYYYMMDD.db files in it are touched", async () => {
+    buildHome();
+    const outside = join(parent, "elsewhere");
+    mkdirSync(outside, { recursive: true });
+    process.env.AGNI_BACKUP_DIR = outside;
+    const old = join(outside, "agni-20260101.db");
+    writer!.run("VACUUM INTO '" + old.replaceAll("'", "''") + "'");
+    writeFileSync(join(outside, "agni-notes.db.txt"), "not a backup");
+    writeFileSync(join(outside, "agni-1.db"), "not a backup either: the date is missing");
+    writeFileSync(join(outside, "other.db"), "someone else's database");
+    const { notes } = await migrateTokens();
+    expect(existsSync(old)).toBe(false);
+    for (const kept of ["agni-notes.db.txt", "agni-1.db", "other.db"]) expect(existsSync(join(outside, kept))).toBe(true);
+    expect(notes.join("\n")).toMatch(/outside/i);
+    expect(notes.join("\n")).toContain(outside);
+  });
+});
+
+describe("plugins.json leftovers", () => {
+  test("a .corrupt copy and a stale temporary file are erased once plugins.json is migrated; other files are not touched", async () => {
+    buildHome();
+    const corrupt = join(home, "plugins.json.corrupt");
+    const stale = join(home, "plugins.json.4242.tmp");
+    const mine = join(home, "plugins.json.mine.bak");
+    writeFileSync(corrupt, JSON.stringify(PLUGINS_JSON));
+    writeFileSync(stale, JSON.stringify(PLUGINS_JSON));
+    writeFileSync(mine, "the owner's own note");
+    const vault = await unlockVault({ home, create: true });
+    await migrate(vault);
+    expect(existsSync(corrupt)).toBe(false);
+    expect(existsSync(stale)).toBe(false);
+    expect(readFileSync(mine, "utf8")).toBe("the owner's own note");
+    expect(plaintextHits()).toEqual([]);
+  });
+
+  test("the same when an earlier build already moved the secrets out of plugins.json", async () => {
+    buildHome();
+    const vault = await unlockVault({ home, create: true });
+    await migrate(vault);
+    const corrupt = join(home, "plugins.json.corrupt");
+    writeFileSync(corrupt, JSON.stringify(PLUGINS_JSON));
+    await migrate(vault);
+    expect(existsSync(corrupt)).toBe(false);
   });
 });
 

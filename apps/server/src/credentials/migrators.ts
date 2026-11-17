@@ -17,8 +17,9 @@
  * Each returns how many secrets (or rows, or files) it moved.
  */
 import type { Database } from "bun:sqlite";
-import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { Database as SqliteDatabase } from "bun:sqlite";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { backupDirectory, runBackup } from "../jobs/backup";
 import { log } from "../log";
 import { VaultError, type Vault, type VaultMigrationContext } from "../secrets/types";
@@ -150,10 +151,40 @@ export function migratePluginSecrets(vault: Vault, context: VaultMigrationContex
   const file = readPluginsFile(path);
   if (!file) return 0;
   const secrets = collectPluginSecrets(file);
-  if (secrets.size === 0) return 0;
   for (const [name, value] of secrets) store(vault, name, value);
-  writePluginsFileText(path, stripPluginSecrets(file));
+  if (secrets.size > 0) writePluginsFileText(path, stripPluginSecrets(file));
+  // plugins.json is clean now (or an earlier build made it so): what it left beside itself may still hold the secrets.
+  eraseStalePluginCopies(path, context);
   return secrets.size;
+}
+
+/**
+ * Copies of plugins.json that hold the secrets in the clear: `plugins.json.corrupt` (the server's copy of a file it
+ * could not read) and `plugins.json.<pid>.tmp` (a write that stopped half way). Zeroed, then deleted. Nothing else
+ * that merely starts with the same name is touched.
+ */
+function eraseStalePluginCopies(path: string, context: VaultMigrationContext): void {
+  const dir = dirname(path);
+  const base = basename(path);
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return;
+  }
+  const isStale = (entry: string): boolean =>
+    entry === `${base}.corrupt` || (entry.startsWith(`${base}.`) && /^\d+\.tmp$/.test(entry.slice(base.length + 1)));
+  const erased: string[] = [];
+  const failed: string[] = [];
+  for (const name of names.filter(isStale)) {
+    try {
+      if (eraseFile(join(dir, name))) erased.push(name);
+    } catch (error) {
+      failed.push(`${name} (${error instanceof Error ? error.message : String(error)})`);
+    }
+  }
+  if (erased.length > 0) context.report?.(`plugin-secrets: erased ${erased.join(", ")} (an old copy of plugins.json that held the secrets in plaintext).`);
+  if (failed.length > 0) context.report?.(`plugin-secrets: could not erase ${failed.join(", ")}; they hold secrets in plaintext, so delete them yourself.`);
 }
 
 /** Write every plugin secret back into plugins.json. */
@@ -236,10 +267,11 @@ export function migratePluginTokens(vault: Vault, context: VaultMigrationContext
     rememberSecrets(...blob.secrets);
     pending.push({ id: row.id, tokens: row.tokens, name });
   }
-  if (pending.length === 0) return 0;
-  // The tokens are in the vault now. The daily backups of the database were taken while they were still plaintext
-  // in the column, so they go before the rows change: a crash after this still leaves rows to migrate on the next run.
-  const deleted = deleteDatabaseBackups(db);
+  if (pending.length === 0) {
+    // An earlier build moved the rows but left the daily backups it took while they were plaintext: clean those.
+    replaceBackups(db, context, "holding-tokens");
+    return 0;
+  }
   const previous = db.query<{ secure_delete: number }, []>("PRAGMA secure_delete").get()?.secure_delete ?? 0;
   db.exec("PRAGMA secure_delete = ON");
   try {
@@ -251,35 +283,121 @@ export function migratePluginTokens(vault: Vault, context: VaultMigrationContext
     db.exec(`PRAGMA secure_delete = ${previous ? "ON" : "OFF"}`);
   }
   purgeDatabaseResidue(db);
-  retakeBackup(db, deleted, context);
+  // Only now: the daily backups were taken while the tokens were plaintext in the column. They are erased after a
+  // fresh one has been taken, so a failure anywhere above or below leaves a backup of the database in place.
+  replaceBackups(db, context, "all");
   return pending.length;
 }
 
-/** The daily backups (`agni-YYYYMMDD.db`) of this database. Anything else in the folder is not ours to touch. */
-function deleteDatabaseBackups(db: Database): string[] {
-  const dir = backupDirectory(db);
-  let names: string[];
+/** The daily backups of this database are `agni-YYYYMMDD.db` in its backup folder. Anything else in the folder is not ours to touch. */
+const BACKUP_NAME = /^agni-\d{8}\.db$/;
+
+/** Where the fresh backup is taken, inside the backup folder, so it never has the name of the backup it replaces. */
+const FRESH_FOLDER = ".fresh-backup";
+
+function listDatabaseBackups(dir: string): string[] {
   try {
-    names = readdirSync(dir).filter((name) => /^agni-\d{8}\.db$/.test(name));
+    return readdirSync(dir).filter((name) => BACKUP_NAME.test(name));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw error;
   }
-  for (const name of names) unlinkSync(join(dir, name));
-  return names;
 }
 
-/** After the compaction, so the new copy holds references and no old token bytes; one copy, so recovery is still possible. */
-function retakeBackup(db: Database, deleted: string[], context: VaultMigrationContext): void {
-  let taken: string | null = null;
+/** True when a backup still holds a connection's tokens in the clear. A backup that cannot be read is assumed to. */
+function backupHoldsTokens(path: string): boolean {
+  let backup: SqliteDatabase | undefined;
   try {
-    taken = runBackup(db);
+    backup = new SqliteDatabase(path, { readonly: true });
+    const rows = backup.query<{ tokens: string }, []>("SELECT tokens FROM plugin_connections WHERE tokens IS NOT NULL AND tokens <> ''").all();
+    return rows.some((row) => credentialBlob(row.tokens) !== undefined);
   } catch (error) {
-    log.warn(`The fresh database backup could not be taken: ${error instanceof Error ? error.message : String(error)}`);
+    return !/no such table/i.test(error instanceof Error ? error.message : String(error));
+  } finally {
+    backup?.close();
   }
-  if (deleted.length === 0 && !taken) return;
-  const removed = deleted.length > 0 ? `deleted ${deleted.length} old database backup(s) that held the plugin tokens in plaintext (${deleted.join(", ")})` : "no old database backups to delete";
-  context.report?.(`plugin-tokens: ${removed}; ${taken ? `took one fresh backup (${taken}), which holds references only` : "no fresh backup was taken (the next daily backup will make one)"}.`);
+}
+
+const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+
+/** Take today's backup into a working folder (an earlier backup of the same day must not stop it) and return its path. */
+function takeFreshBackup(db: Database, dir: string): string | null {
+  const staging = join(dir, FRESH_FOLDER);
+  // A working folder a stopped run left behind. A plain file with that name is not ours: the backup then fails, and says so.
+  if (existsSync(staging) && statSync(staging).isDirectory()) rmSync(staging, { recursive: true, force: true });
+  return runBackup(db, { dir: staging });
+}
+
+/**
+ * Replace the database backups that hold the tokens in the clear, in this order: the rows have already been moved
+ * and the database compacted, a fresh backup is taken (it holds references only), and only after that succeeds are
+ * the old backups erased (zeroed, then deleted). If the fresh backup cannot be taken, nothing is erased and the
+ * output says the old ones still hold the tokens. Every outcome is reported.
+ *   - "all": every `agni-YYYYMMDD.db` there is (they were all taken before this migration moved the rows);
+ *   - "holding-tokens": an earlier build moved the rows already, so only backups that still hold tokens.
+ * Only `agni-YYYYMMDD.db` files in this database's backup folder are ever touched; if `AGNI_BACKUP_DIR` puts that
+ * folder outside this home, the output says so.
+ */
+function replaceBackups(db: Database, context: VaultMigrationContext, which: "all" | "holding-tokens"): void {
+  const dir = backupDirectory(db);
+  let present: string[];
+  try {
+    present = listDatabaseBackups(dir);
+  } catch (error) {
+    context.report?.(`plugin-tokens: the backup folder ${dir} could not be listed (${errorText(error)}), so old database backups were not checked. They may hold the plugin tokens in plaintext.`);
+    return;
+  }
+  const old = which === "all" ? present : present.filter((name) => backupHoldsTokens(join(dir, name)));
+  if (which === "holding-tokens" && old.length === 0) return;
+  const rel = relative(resolve(context.home), resolve(dir));
+  const where = rel.startsWith("..") || isAbsolute(rel)
+    ? ` The backup folder ${dir} is outside this home (AGNI_BACKUP_DIR); only agni-YYYYMMDD.db files in it were touched.`
+    : "";
+
+  let fresh: string | null = null;
+  let failure = "";
+  try {
+    fresh = takeFreshBackup(db, dir);
+  } catch (error) {
+    failure = errorText(error);
+  }
+  if (!fresh) {
+    const why = failure ? ` (${failure})` : "";
+    if (old.length > 0) {
+      log.warn(`The fresh database backup could not be taken${why}, so ${old.length} old backup(s) that hold the plugin tokens were not deleted.`);
+      context.report?.(
+        `plugin-tokens: the fresh database backup could not be taken${why}, so the ${old.length} old backup(s) were NOT deleted and still hold the plugin tokens in plaintext: ${old.join(", ")}. ` +
+          `Fix the cause and run \`agni vault migrate\` again, or delete them yourself.${where}`,
+      );
+    } else {
+      context.report?.(`plugin-tokens: no fresh database backup was taken${why || " (the next daily backup will make one)"}.${where}`);
+    }
+    return;
+  }
+
+  const erased: string[] = [];
+  const stuck: string[] = [];
+  for (const name of old) {
+    try {
+      if (eraseFile(join(dir, name))) erased.push(name);
+    } catch (error) {
+      stuck.push(`${name} (${errorText(error)})`);
+    }
+  }
+  let placed = fresh;
+  try {
+    placed = join(dir, basename(fresh));
+    renameSync(fresh, placed);
+    rmSync(dirname(fresh), { recursive: true, force: true });
+  } catch (error) {
+    placed = fresh;
+    log.warn(`The fresh database backup was left at ${fresh}: ${errorText(error)}`);
+  }
+  const removed = erased.length > 0 ? `deleted ${erased.length} old database backup(s) that held the plugin tokens in plaintext (${erased.join(", ")}; each was overwritten with zeros first)` : "no old database backups to delete";
+  context.report?.(`plugin-tokens: ${removed}; took one fresh backup (${placed}), which holds references only.${where}`);
+  if (stuck.length > 0) {
+    context.report?.(`plugin-tokens: these old backups could not be erased and still hold the plugin tokens in plaintext: ${stuck.join(", ")}. Delete them yourself.`);
+  }
 }
 
 /** Make the database file itself free of the old column values: checkpoint the log away, then rewrite the file compactly. */
