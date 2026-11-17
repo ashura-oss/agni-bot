@@ -34,12 +34,22 @@ const ctxOf = (run: RunContext) => ({
 const schedule = (database: Database) => createJobTools(database)[0]!.handler as unknown as (args: unknown, ctx: unknown) => Promise<{ id?: string; error?: string }>;
 
 describe("job_schedule follows the taint rule", () => {
-  test("a wake or a scheduled job that read nothing outside may schedule work", async () => {
+  test("a wake that read nothing outside may schedule work, as the owner's own turn may", async () => {
     db = openDatabase(":memory:");
-    for (const principal of ["owner", "job", "wake"] as const) {
+    for (const principal of ["owner", "wake"] as const) {
       const result = await schedule(db)({ text: `Check in (${principal})`, at: tomorrow() }, ctxOf(runOf(db, principal)));
       expect({ principal, scheduled: Boolean(result.id) }).toEqual({ principal, scheduled: true });
     }
+  });
+
+  test("a fire of a job a bot made may schedule the next job only with the owner's yes to that very call", async () => {
+    db = openDatabase(":memory:");
+    const run = runOf(db, "job");
+    const asked = await schedule(db)({ text: "Check in (job)", at: tomorrow() }, ctxOf(run));
+    expect(asked.id, "a job a bot made scheduled the next one unasked").toBeUndefined();
+    expect(asked.error).toMatch(/owner/i);
+    const answered = await schedule(db)({ text: "Check in (job)", at: tomorrow() }, { ...ctxOf(run), ownerApproved: true });
+    expect(Boolean(answered.id)).toBe(true);
   });
 
   test("once the run read outside text it may not, whoever started it", async () => {

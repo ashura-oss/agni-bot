@@ -28,6 +28,17 @@ export function isRecurringSchedule(args: Record<string, unknown>): boolean {
   return isGiven(args.dailyAt) || isGiven(args.everyMinutes);
 }
 
+/**
+ * Is this `job_schedule` call a standing rule? A repeating job always is. A one-shot job is too when it is made by a fire of
+ * a job a bot made: a chain of one-shot jobs, each telling its run to schedule the next, is a repeating job by another route.
+ * The owner's own turn, a wake and a fire of a job the owner made are not the start of a chain. A run that read outside text is
+ * not asked about a one-shot job at all: it is refused (a protected write), as before.
+ */
+export function isStandingSchedule(args: Record<string, unknown>, run: RunContext | undefined): boolean {
+  if (isRecurringSchedule(args)) return true;
+  return run?.principal?.kind === "job" && !isTainted(run);
+}
+
 const PRINCIPAL_LINE: Record<string, string> = {
   job: "This task was started by a scheduled job, not by you.",
   wake: "This task was started by a finished task reporting back, not by you.",
@@ -60,6 +71,7 @@ export function standingRuleOrigin(run: RunContext | undefined): string | null {
 
 /** The schedule of a `job_schedule` call in plain words, from the arguments as the model wrote them. Never throws. */
 export function describeRecurring(args: Record<string, unknown>): string {
+  if (isGiven(args.at) && !isRecurringSchedule(args)) return `once, at ${entry(args.at, 40)}`;
   try {
     if (isGiven(args.dailyAt)) {
       const clock = parseWallClock(String(args.dailyAt));

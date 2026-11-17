@@ -250,7 +250,7 @@ function cardLead(card: ApprovalCard, bot: string): string {
   }
   if (newest) lines.push("\"Always allow\" is off: this task used outside content.");
   if (card.refusedRun) lines.push("\"Always allow\" is off: you refused something in this task.");
-  if (card.standingRule) lines.push("\"Always allow\" is off: a repeating job is always put to you.");
+  if (card.standingRule) lines.push("\"Always allow\" is off: work that starts again on its own is always put to you.");
   return `${lines.join("\n")}\n\n`;
 }
 

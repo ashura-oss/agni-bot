@@ -312,7 +312,7 @@ function refuseStandingJob(ctx: ToolContext, input: Record<string, unknown>, why
   } catch {
     // The refusal stands without its row.
   }
-  return { error: `not done: a repeating job is a standing rule, and only your owner's own turn may start one without asking. ${why} Tell the owner what you wanted to schedule and ask them to confirm it.` };
+  return { error: `not done: work that starts again on its own (a repeating job, or a job that schedules the next one) is a standing rule, and only your owner's own turn may start it without asking. ${why} Tell the owner what you wanted to schedule and ask them to confirm it.` };
 }
 
 /** The scheduling tools, as the task lane sees them. */
@@ -349,6 +349,8 @@ export function createJobTools(db: Database): ToolDefinition<unknown, unknown>[]
         } else {
           const refusal = schedulingRefusal(ctx);
           if (refusal) return { error: refusal };
+          // A fire of a job a bot made may not schedule the next one unasked: a chain of one-shot jobs is a repeating job (policy/standing-rules.ts).
+          if (ctx.ownerApproved !== true && ctx.run?.principal?.kind === "job") return refuseStandingJob(ctx, input, "This task was started by a scheduled job, not by you.");
         }
         return scheduleJob(db, {
           text: String(input.text ?? ""),

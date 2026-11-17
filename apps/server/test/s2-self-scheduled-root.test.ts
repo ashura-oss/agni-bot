@@ -165,7 +165,8 @@ describe("a refusal in the owner's turn holds in a job the bot schedules from it
 
     expect(allCallsTo(s, "job_schedule", a).find((entry) => entry.callID === "call_chain")?.ok, "the first job could not schedule the second; the script is out of step").toBe(true);
     expectRefused(allCallsTo(s, "write_file", a).find((entry) => entry.callID === "call_job2_write"), "the second job");
-    expect(owner.cards, "a job raised a card").toEqual([]);
+    // The first job's own scheduling of the second is the one card: a job a bot made may not make the next one unasked. The file write raised none.
+    expect(owner.cards.map((card) => card.action), "a job raised a card other than for the job it scheduled").toEqual([expect.stringContaining("job_schedule")]);
     expect(readFileSync(target, "utf8")).toBe("original ledger");
   });
 });

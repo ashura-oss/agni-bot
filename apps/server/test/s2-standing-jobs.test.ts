@@ -21,6 +21,9 @@ import { createJobTools } from "../src/tools/jobs-tool";
 import { resolvePersona } from "../src/agent/personas";
 import { decide } from "../src/policy/engine";
 import { addTaint } from "../src/policy/context";
+import { assessCall, policyFor } from "../src/policy/metadata";
+import { recordDenial } from "../src/policy/denials";
+import { STANDING_JOB_RESOURCE } from "../src/policy/standing-rules";
 import type { Decision, RunContext } from "../src/policy/types";
 import { scenarioTest, useScenarios, say, type Scenario, type ScenarioClient } from "./scenarios/harness";
 import { HOSTILE_URL, allCallsTo, answerCards, call, later, minutes, playTurn, resultJson, scripted, useWeb, type Answer, type TurnReport } from "./invariants/support";
@@ -31,9 +34,10 @@ useWeb();
 afterEach(() => { setSystemTime(); resetS2Startup(); });
 
 const past = (): string => new Date(Date.now() - 1_000).toISOString();
+const future = (): string => new Date(Date.now() + 3_600_000).toISOString();
 const shell = (path: string): string => path.replaceAll("\\", "/");
 
-interface JobPayload { text?: string; everyMs?: number; dailyAt?: string; scheduledBy?: string; denialRoot?: string; createdByRequest?: string; rootTurnID?: string }
+interface JobPayload { text?: string; everyMs?: number; dailyAt?: string; scheduledBy?: string; denialRoot?: string; createdByRequest?: string; rootTurnID?: string; rootJob?: string | null; taint?: Array<{ kind: string; label: string }> }
 interface JobRowOf { id: string; state: string; payload: JobPayload }
 
 const turnJobs = (s: Scenario): JobRowOf[] =>
@@ -233,9 +237,10 @@ describe("an origin that cannot be read is asked about", () => {
     const tainted = rig.another();
     addTaint(tainted, { kind: "web", label: "evil.example/page", tool: "web_fetch", at: "2026-11-16T10:00:00Z" });
     expect(decide(tainted, { tool: "job_schedule", args: recur, callID: "call_1" }).action).toBe("ask");
-    // A one-shot job is not a standing rule: a clean run of any kind may make one, a tainted run may not.
+    // A one-shot job from a clean run that no bot-made job is behind is not a standing rule; a tainted run may not make one.
     const once = { text: "do it", at: new Date(Date.now() + 3_600_000).toISOString() };
-    expect(decide(rig.another({ principal: { kind: "job" } }), { tool: "job_schedule", args: once, callID: "call_1" }).action).toBe("run");
+    expect(decide(rig.run, { tool: "job_schedule", args: once, callID: "call_1" }).action).toBe("run");
+    expect(decide(rig.another({ principal: { kind: "wake" } }), { tool: "job_schedule", args: once, callID: "call_1" }).action).toBe("run");
     expect(decide(tainted, { tool: "job_schedule", args: once, callID: "call_1" })).toMatchObject({ action: "refuse", code: "protected_write" });
   });
 
@@ -298,11 +303,12 @@ describe("a refusal of a repeating job is a run denial", () => {
     const a = await s.connect({ label: "A" });
     await ownerSchedulesAJob(s, a);
 
-    const owner = answerCards(a, "reject");
+    // A one-shot job from a job a bot made is a card of its own (it is a link in a chain); the owner allows that one and refuses the repeating job.
+    const owner = answerCards(a, (card) => (/repeating job/i.test(card.action) ? "reject" : "once"));
     s.model.queue(
       ...scripted(true, [
-        call("job_schedule", { text: "Check the inbox.", everyMinutes: 30 }, "call_first"),
         call("job_schedule", { text: "Try again from a job.", at: past() }, "call_chain"),
+        call("job_schedule", { text: "Check the inbox.", everyMinutes: 30 }, "call_first"),
         say("Handed on."),
       ]),
       ...scripted(true, [call("job_schedule", { text: "Check the inbox.", everyMinutes: 45 }, "call_from_chain"), say("Tried.")]),
@@ -313,7 +319,7 @@ describe("a refusal of a repeating job is a run denial", () => {
     expect(allCallsTo(s, "job_schedule", a).find((entry) => entry.callID === "call_chain")?.ok, "the first run could not schedule the one-shot job; the script is out of step").toBe(true);
     const later = allCallsTo(s, "job_schedule", a).find((entry) => entry.callID === "call_from_chain");
     expect(later, "the second job never made the call; the script is out of step").toBeDefined();
-    expect(owner.cards.length, "the job the refused run scheduled asked the owner again").toBe(1);
+    expect(owner.cards.length, "the job the refused run scheduled asked the owner again (or the one-shot link was not asked about)").toBe(2);
     expect(String(resultJson(later).error ?? "(no error)")).toMatch(/said no|refus/i);
     expect(recurringJobs(s)).toEqual([]);
   });
@@ -472,3 +478,92 @@ describe("a task resumed after the owner's answer keeps the refusal of the job t
     expect(readFileSync(target, "utf8")).toBe("original ledger");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Fix round H
+// ---------------------------------------------------------------------------
+
+describe("every job_schedule call names the standing-job resource", () => {
+  let rig: PolicyRig | undefined;
+  afterEach(() => { rig?.close(); rig = undefined; });
+  const once = (): Record<string, unknown> => ({ text: "do it", at: future() });
+
+  test("a one-shot call names it, as a repeating one does", () => {
+    for (const args of [once(), { text: "do it", everyMinutes: 30 }, { text: "do it", dailyAt: "09:05" }]) {
+      expect(assessCall(policyFor("job_schedule"), args).resources).toEqual([STANDING_JOB_RESOURCE]);
+    }
+  });
+
+  test("a recorded refusal of repeating jobs refuses a one-shot job in that scope, and only in that scope", () => {
+    rig = policyRig();
+    recordDenial(rig.db, rig.run, { tool: "job_schedule", operation: "change", resources: [STANDING_JOB_RESOURCE], cause: "denied" });
+    expect(decide(rig.run, { tool: "job_schedule", args: once(), callID: "call_1" })).toMatchObject({ action: "refuse", code: "denied_resource" });
+    expect(decide(rig.another({ turnID: "trn_other" }), { tool: "job_schedule", args: once(), callID: "call_1" }).action).toBe("run");
+  });
+
+  test("a one-shot job from a run of a job a bot made is put to the owner; one from the owner's own job, or from a tainted run, is not", () => {
+    rig = policyRig();
+    const asked = decide(rig.another({ principal: { kind: "job" }, jobID: "job_bot" }), { tool: "job_schedule", args: once(), callID: "call_1" });
+    expect(asked.action).toBe("ask");
+    if (asked.action === "ask") {
+      expect(asked.card.canRemember).toBe(false);
+      expect(asked.card.standingRule).toBeDefined();
+    }
+    expect(decide(rig.another({ principal: { kind: "owner" }, jobID: "job_owner" }), { tool: "job_schedule", args: once(), callID: "call_1" }).action).toBe("run");
+    const tainted = rig.another({ principal: { kind: "job" }, jobID: "job_bot" });
+    addTaint(tainted, { kind: "web", label: "evil.example/page", tool: "web_fetch", at: "2026-11-16T10:00:00Z" });
+    expect(decide(tainted, { tool: "job_schedule", args: once(), callID: "call_1" })).toMatchObject({ action: "refuse", code: "protected_write" });
+  });
+});
+
+describe("after the owner refuses a repeating job, the bot cannot keep the work going with one-shot jobs", () => {
+  scenarioTest("a one-shot job that tells each run to schedule the next is refused with no card", async () => {
+    const s = await scenarios.start();
+    const a = await s.connect({ label: "A" });
+    await ownerSchedulesAJob(s, a);
+    const owner = answerCards(a, "reject");
+    s.model.queue(...scripted(true, [
+      call("job_schedule", { text: "Check the inbox.", everyMinutes: 30 }, "call_first"),
+      call("job_schedule", { text: "Check the inbox, then schedule this same check again for an hour later.", at: future() }, "call_once"),
+      say("Tried."),
+    ]));
+    await tickUntil(s, () => allCallsTo(s, "job_schedule", a).some((entry) => entry.callID === "call_once"));
+    owner.stop();
+    const once = allCallsTo(s, "job_schedule", a).find((entry) => entry.callID === "call_once");
+    expect(once, "the run never made the one-shot call; the script is out of step").toBeDefined();
+    expect(owner.cards.length, "the one-shot job raised a card after the owner said no (or the first call was not asked)").toBe(1);
+    expect(String(resultJson(once).error ?? "(no error)"), "the one-shot job was not stopped by the owner's no").toMatch(/said no|refus/i);
+    expect(turnJobs(s).filter((job) => job.payload.text?.includes("schedule this same check")), "a one-shot job exists after the owner said no to repeating work").toEqual([]);
+  });
+
+  scenarioTest("a one-shot job from a job a bot made is a card of its own, with no Always allow; the owner's no creates nothing", async () => {
+    const s = await scenarios.start();
+    const a = await s.connect({ label: "A" });
+    await ownerSchedulesAJob(s, a);
+    const owner = answerCards(a, "reject");
+    s.model.queue(...scripted(true, [call("job_schedule", { text: "Do the next round.", at: future() }, "call_next"), say("Tried.")]));
+    await tickUntil(s, () => allCallsTo(s, "job_schedule", a).some((entry) => entry.callID === "call_next"));
+    owner.stop();
+    expect(allCallsTo(s, "job_schedule", a).some((entry) => entry.callID === "call_next"), "the job never made the call; the script is out of step").toBe(true);
+    expect(owner.cards.length, "a job a bot made scheduled the next one with no card").toBe(1);
+    expect(owner.cards[0]!.buttons, "the card offers Always allow").toEqual(["once", "reject"]);
+    expect(turnJobs(s).filter((job) => job.payload.text === "Do the next round."), "the job exists though the owner refused").toEqual([]);
+  });
+
+  scenarioTest("when the owner allows that one link it exists, and its own next link asks again", async () => {
+    const s = await scenarios.start();
+    const a = await s.connect({ label: "A" });
+    await ownerSchedulesAJob(s, a);
+    const owner = answerCards(a, "once");
+    s.model.queue(
+      ...scripted(true, [call("job_schedule", { text: "Do the next round.", at: past() }, "call_next"), say("Handed on.")]),
+      ...scripted(true, [call("job_schedule", { text: "Do the round after.", at: future() }, "call_after"), say("Handed on again.")]),
+    );
+    await tickUntil(s, () => allCallsTo(s, "job_schedule", a).some((entry) => entry.callID === "call_after"), 10);
+    owner.stop();
+    expect(allCallsTo(s, "job_schedule", a).find((entry) => entry.callID === "call_next")?.ok, "the allowed link was not made").toBe(true);
+    expect(allCallsTo(s, "job_schedule", a).some((entry) => entry.callID === "call_after"), "the second link never made the call; the script is out of step").toBe(true);
+    expect(owner.cards.length, "each link of the chain must ask on its own").toBe(2);
+  });
+});
+

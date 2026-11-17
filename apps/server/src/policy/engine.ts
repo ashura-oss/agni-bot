@@ -32,7 +32,7 @@ import { REFUSALS_BEFORE_STOP, anyDenial, findDenial, isShellDenial, noteBlocked
 import { unnamedDestinations } from "./egress";
 import { policyHooks } from "./hooks";
 import { assessCall, policyFor } from "./metadata";
-import { standingRuleOrigin } from "./standing-rules";
+import { isRecurringSchedule, standingRuleOrigin } from "./standing-rules";
 import type {
   ApprovalCard, CallAssessment, Decision, Operation, PolicyInput, RefusalCode, RunContext, ToolTier,
 } from "./types";
@@ -92,7 +92,7 @@ function judge(run: RunContext, input: PolicyInput, record: boolean): Decision {
   // boundary there.)
   const refusedRun = refusalOnCard(run, tool, assessment);
   // A repeating job is a standing rule (policy/standing-rules.ts): why the owner must be asked, or null when this is the owner's own clean turn.
-  const standing = policy?.standingWrite?.(args) ? standingRuleOrigin(run) : null;
+  const standing = policy?.standingWrite?.(args, run) ? standingLine(tool, args, standingRuleOrigin(run)) : null;
 
   // 4. budget
   const budget = policyHooks.checkBudget(run);
@@ -128,7 +128,7 @@ function judge(run: RunContext, input: PolicyInput, record: boolean): Decision {
   if (standing !== null) {
     asks = true;
     tier = Math.max(tier, 2) as ToolTier;
-    why = "a repeating job from a run that is not the owner's own untainted turn";
+    why = "work that starts again on its own, from a run that is not the owner's own untainted turn";
   }
   if (!asks) return { action: "run", via: "free", reason: why, assessment };
 
@@ -157,6 +157,12 @@ function judge(run: RunContext, input: PolicyInput, record: boolean): Decision {
     ...(standing !== null ? { standingRule: standing } : {}),
   };
   return { action: "ask", reason: why, assessment: { ...assessment, tier }, card };
+}
+
+/** The card's sentence for a standing rule: why the owner is asked, and for a one-shot job, why that is a standing rule at all. */
+function standingLine(tool: string, args: Record<string, unknown>, origin: string | null): string | null {
+  if (origin === null || tool !== "job_schedule" || isRecurringSchedule(args)) return origin;
+  return `${origin} A job that schedules the next job keeps the work going by itself.`;
 }
 
 /** A routine runs with a list of domains; web tools stay inside it. */
@@ -269,7 +275,7 @@ export function verbFor(tool: string, args: Record<string, unknown>, assessment:
     }
     case "web_fetch": return "open a web page";
     case "share_thread": return "share this conversation";
-    case "job_schedule": return "start a repeating job";
+    case "job_schedule": return isRecurringSchedule(args) ? "start a repeating job" : "schedule the next job";
     default:
       return tool.startsWith("mcp_") ? `use ${entry(tool.replace(/^mcp_/, ""), 60)}` : `use ${entry(tool, 60)}`;
   }
