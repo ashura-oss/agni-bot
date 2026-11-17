@@ -301,19 +301,22 @@ function settleSlot(name: string, slot: Slot, candidates: Iterable<string>): voi
   trimRetired();
 }
 
-/** Keep the retired values of all slots together within `RETIRED_MAX`: the oldest queued goes first, whichever slot it is in. */
+/**
+ * Keep the retired values of all slots together within `RETIRED_MAX`: the oldest queued goes first, whichever slot it is
+ * in. Staged values count toward the total but are never evicted here: a staged value is the newest token a store has
+ * seen and has not yet had a save settle it, so it is still in use, and unmasking it because other slots rotated would
+ * leak a live credential. Staged stays bounded by `RETIRED_PER_SLOT` per slot (`settleSlot`).
+ */
 function trimRetired(): void {
   let total = 0;
   for (const slot of slots.values()) total += slot.queue.length + slot.staged.length;
   while (total > RETIRED_MAX) {
-    let oldest: { name: string; slot: Slot; list: Queued[] } | undefined;
+    let oldest: { name: string; slot: Slot } | undefined;
     for (const [name, slot] of slots) {
-      for (const list of [slot.queue, slot.staged]) {
-        if (list.length > 0 && (!oldest || list[0]!.seq < oldest.list[0]!.seq)) oldest = { name, slot, list };
-      }
+      if (slot.queue.length > 0 && (!oldest || slot.queue[0]!.seq < oldest.slot.queue[0]!.seq)) oldest = { name, slot };
     }
-    if (!oldest) return;
-    const { value } = oldest.list.shift()!;
+    if (!oldest) return; // only staged values are left: none of them is evicted
+    const { value } = oldest.slot.queue.shift()!;
     total -= 1;
     if (!holds(oldest.slot, value)) releaseSecretFor(slotHolder(oldest.name), value);
     if (oldest.slot.live.size === 0 && oldest.slot.queue.length === 0 && oldest.slot.staged.length === 0) slots.delete(oldest.name);
