@@ -4,11 +4,14 @@
  * A run reads the thread's stored history. If the run before it (a fire of the same recurring job, the turn a wake reports into, the
  * first try of a job that failed) had read outside text, the history holds words that run wrote under that text's influence, and the
  * next run started clean. A run that is not the owner's own chat turn now starts with a `history` source when the thread's last session
- * is marked, or its mark cannot be read. The owner's own chat turn is exempt: the owner is there to see what is said. A task keeps what any
- * of its tries read, and a retry starts with it.
+ * is marked, or its mark cannot be read. The owner's own chat turn is exempt: the owner is there to see what is said. A fire of a job the
+ * owner made is not: the owner is not there when it fires. The exempt turn still leaves the mark in the session's record, so one clean
+ * chat turn does not wash it off before the next fire. A task keeps what any of its tries read, and a retry starts with it.
  */
 import type { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
+import { runTaskTurn } from "../src/agent/task-loop";
+import { resolvePersona } from "../src/agent/personas";
 import { openDatabase } from "../src/db";
 import { JobRunner } from "../src/jobs/runner";
 import { registerTurnJob } from "../src/jobs/turn";
@@ -146,6 +149,74 @@ describe("the next fire of a recurring job", () => {
     const second = watch();
     await fire(db, callThenAnswer);
     expect(second.length).toBeGreaterThan(0);
+    expect(kinds(second[0])).toEqual([]);
+  });
+});
+
+describe("an owner's chat turn between two fires", () => {
+  const ownerJob = (threadID: string) => ({ agentID: "ea", threadID, text: "check the inbox", notify: false, ownerOnly: true, everyMs: 3_600_000 });
+  /** The owner says something in the thread, to the end; what the turn's first tool call saw is returned. */
+  async function ownerSays(database: Database, threadID: string, text: string, read?: (run: RunContext) => void): Promise<Seen[]> {
+    const seen = watch(read);
+    await runTaskTurn(database, routerOf(callThenAnswer), settings, { threadID, text, persona: resolvePersona(database, "ea")!, emit: () => undefined, signal: new AbortController().signal });
+    return seen;
+  }
+  const savedTaint = (database: Database, threadID: string): string | null =>
+    database.query<{ taint: string | null }, [string]>("SELECT taint FROM agent_sessions WHERE thread_id = ?").get(threadID)!.taint;
+
+  test("does not clear the mark a tainted fire left: the next fire is still tainted", async () => {
+    db = openDatabase(":memory:");
+    const thread = createThread(db, "ea");
+    enqueueJob(db, { kind: "turn", payload: ownerJob(thread.id) });
+    watch(READS_A_PAGE);
+    await fire(db, callThenAnswer);
+    const chat = await ownerSays(db, thread.id, "thanks");
+    expect(chat[0]?.principal, "the chat turn did not run as the owner; the test is out of step").toBe("owner");
+    expect(kinds(chat[0]), "the owner's own turn was marked: it is exempt").toEqual([]);
+    expect(savedTaint(db, thread.id), "the owner's turn wrote a clean record over a tainted history").not.toBe("[]");
+    makeDue(db);
+    const second = watch();
+    await fire(db, callThenAnswer);
+    expect(second.length, "fire 2 never made a call").toBeGreaterThan(0);
+    expect(kinds(second[0]), "one clean owner turn washed the history mark off").toContain("history");
+  });
+
+  test("does the same when the earlier record could not be read", async () => {
+    db = openDatabase(":memory:");
+    const thread = createThread(db, "ea");
+    db.run(
+      "INSERT INTO agent_sessions (thread_id, turn_id, state, message_log, step_count, token_count, max_steps, max_tokens, created_at, updated_at, taint) VALUES (?, 'trn_before', 'done', '[]', 0, 0, 0, 0, datetime('now'), datetime('now'), 'not json')",
+      [thread.id],
+    );
+    const chat = await ownerSays(db, thread.id, "thanks");
+    expect(kinds(chat[0])).toEqual([]);
+    expect(JSON.parse(savedTaint(db, thread.id)!).map((source: { kind: string }) => source.kind)).toEqual(["history"]);
+  });
+
+  test("keeps the mark across a second owner turn, and the record also holds what that turn read", async () => {
+    db = openDatabase(":memory:");
+    const thread = createThread(db, "ea");
+    enqueueJob(db, { kind: "turn", payload: ownerJob(thread.id) });
+    watch(READS_A_PAGE);
+    await fire(db, callThenAnswer);
+    await ownerSays(db, thread.id, "thanks");
+    await ownerSays(db, thread.id, "and again");
+    expect(JSON.parse(savedTaint(db, thread.id)!).map((source: { kind: string }) => source.kind)).toEqual(["history"]);
+    await ownerSays(db, thread.id, "look it up", READS_A_PAGE);
+    expect(JSON.parse(savedTaint(db, thread.id)!).map((source: { kind: string }) => source.kind).sort()).toEqual(["history", "web"]);
+  });
+
+  test("leaves a clean history clean", async () => {
+    db = openDatabase(":memory:");
+    const thread = createThread(db, "ea");
+    enqueueJob(db, { kind: "turn", payload: ownerJob(thread.id) });
+    watch();
+    await fire(db, callThenAnswer);
+    await ownerSays(db, thread.id, "thanks");
+    expect(savedTaint(db, thread.id)).toBe("[]");
+    makeDue(db);
+    const second = watch();
+    await fire(db, callThenAnswer);
     expect(kinds(second[0])).toEqual([]);
   });
 });

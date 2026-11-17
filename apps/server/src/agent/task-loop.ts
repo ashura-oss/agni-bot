@@ -590,9 +590,13 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
     ],
   });
   // What this run reads is saved with its session (and its task) the moment it is read: a restart or a crash cannot lose it.
+  // The owner's own chat turn is not marked by the history, but the record it leaves is: the words that made it tainted are still in the
+  // thread, and the next run that is not the owner's own turn (a job's fire) reads this record. A clean turn must not wash it off.
+  const carriedHistory = ownersChatTurn && !recovering ? historyTaint(existing) : [];
   const saveTaint = (sources: readonly TaintSource[]): void => {
     try {
-      db.run("UPDATE agent_sessions SET taint = ? WHERE thread_id = ? AND turn_id = ?", [JSON.stringify(sources), threadID, turnID]);
+      const record = carriedHistory.length > 0 && !sources.some((source) => source.kind === "history") ? [...sources, ...carriedHistory] : sources;
+      db.run("UPDATE agent_sessions SET taint = ? WHERE thread_id = ? AND turn_id = ?", [JSON.stringify(record), threadID, turnID]);
       if (run.delegation?.taskID) saveTaskTaint(db, run.delegation.taskID, sources);
     } catch (error) {
       log.warn(`turn ${turnID}: could not save what the run has read: ${error instanceof Error ? error.message : String(error)}`);
