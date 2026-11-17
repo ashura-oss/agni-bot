@@ -18,6 +18,7 @@ import type { Database } from "bun:sqlite";
 import { clip, entry, escapeUnsafe, quotedWhole, whole } from "./card-text";
 import type { ApprovalCard, StandingKind } from "../policy/types";
 import { describeRecurring, isRecurringSchedule, oneShotTime } from "../policy/standing-rules";
+import { parseCheckPreflight } from "../routines/preflight-checks";
 import { ROUTINE_DEFAULTS } from "../routines/types";
 import type { Preflight } from "../routines/types";
 import { getRoutine } from "../stores/routines";
@@ -230,11 +231,23 @@ function jobPreview(kind: "repeating_job" | "next_job", args: Record<string, unk
   return lines.join("\n");
 }
 
+/** A named check as it will run: its name and its values, with the defaults filled in. What the model gave, if it is not a check the server knows. */
+function checkWords(preflight: Preflight): string {
+  try {
+    const check = parseCheckPreflight(preflight);
+    return Object.keys(check.params).length === 0 ? whole(check.name) : `${whole(check.name)} ${whole(check.params)}`;
+  } catch {
+    return whole(preflight);
+  }
+}
+
 /** What a routine does before each run, in words. */
 function preflightLine(preflight: Preflight | undefined): string {
   switch (preflight?.kind) {
     case "http": return addressLines("Before each run: it fetches ", String(preflight.url ?? "")).join("\n");
-    case "sql": return `Before each run: it runs this read-only query: ${whole(preflight.query)}`;
+    case "check": return `Before each run: it runs the check ${checkWords(preflight)}`;
+    // Retired: a model-written query is never run (an old stored row only), so the card says what really happens.
+    case "sql": return "Before each run: a model-written query, which no longer runs (the routine fails until it is given a named check)";
     case "mail": return `Before each run: it checks the ${whole(preflight.account)} mailbox for new mail`;
     default: return "Before each run: nothing (it runs on every tick)";
   }

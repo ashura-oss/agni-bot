@@ -100,7 +100,8 @@ describe("a routine that could never be made is refused before any card", () => 
       ["a cron that is not one", { ...create, cron: "every morning" }, /cron|field|invalid/i],
       ["a timezone that does not exist", { ...create, timezone: "Mars/Olympus" }, /timezone/i],
       ["a preflight of an unknown kind", { ...create, preflight: { kind: "http" } }, /preflight/i],
-      ["a preflight query that is not read-only", { ...create, preflight: { kind: "sql", query: "DELETE FROM jobs" } }, /select|read/i],
+      ["a preflight written as SQL", { ...create, preflight: { kind: "sql", query: "DELETE FROM jobs" } }, /one of: http, check, mail, none/],
+      ["a named check that does not exist", { ...create, preflight: { kind: "check", name: "drop_everything" } }, /pending_approvals/],
     ];
     for (const [what, args, words] of cases) {
       const decision = ask(rig, run, "routine_create", args);

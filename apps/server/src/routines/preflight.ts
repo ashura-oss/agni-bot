@@ -1,13 +1,12 @@
 import type { Database } from "bun:sqlite";
 import type { Preflight } from "./types";
-import { findCheck, parseCheckPreflight, type CheckPreflight } from "./preflight-checks";
+import { findCheck, parseCheckPreflight } from "./preflight-checks";
 import { isIP } from "node:net";
 import { requestPinned, resolvePublicHost } from "../tools/fetch-url";
 import { ImapClient } from "../mail/imap";
 import { resolveMailConfig } from "../tools/mail";
 import type { MailAccountResolver } from "../plugins/credentials";
 
-const SQL_FORBIDDEN = /\b(PRAGMA|ATTACH|DETACH|INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|REPLACE|VACUUM)\b/i;
 const MAX_BODY_BYTES = 1_000_000;
 const MAX_REDIRECTS = 5;
 
@@ -15,26 +14,12 @@ const MAX_REDIRECTS = 5;
 export const SQL_PREFLIGHT_RETIRED =
   "Model-written SQL pre-checks were removed for safety. Use a named check instead (for example pending_approvals, thread_activity or open_tasks), or no pre-check.";
 
-/**
- * Check that creation-time text is one read-only SELECT.
- * @deprecated Only the routine tool still calls this, to refuse unsafe text early. The query is never run any
- * more (see `SQL_PREFLIGHT_RETIRED`); the tool should create `{ kind: "check" }` pre-checks (`parseCheckPreflight`).
- */
-export function assertReadOnlySelect(query: string): void {
-  const normalized = query.trim();
-  // shortcut: WITH is refused so a recursive CTE cannot block the daemon; allow it again only with a row or time bound.
-  if (/\bWITH\b/i.test(normalized)) throw new Error("preflight SQL may not use WITH");
-  if (!/^SELECT\b/i.test(normalized) || normalized.includes(";") || SQL_FORBIDDEN.test(normalized)) {
-    throw new Error("preflight SQL must be a single read-only SELECT");
-  }
-}
-
 function sha256(value: string | Uint8Array): string {
   return new Bun.CryptoHasher("sha256").update(value).digest("hex");
 }
 
 export async function runPreflight(
-  p: Preflight | CheckPreflight,
+  p: Preflight,
   db: Database,
   lastHash: string | null,
   mailAccounts?: MailAccountResolver,

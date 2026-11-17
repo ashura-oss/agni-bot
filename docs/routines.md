@@ -16,7 +16,10 @@ Five failures in a row pause the routine and notify the owner.
 ## Tools
 
 - `routine_create`: name, prompt, cron, timezone, optional preflight, misfire,
-  maxTokens, maxExecutionMs.
+  maxTokens, maxExecutionMs. The preflight is `http`, `mail`, `none`, or a
+  named check (`{kind:"check", name, params}`, from the fixed list in
+  `apps/server/src/routines/preflight-checks.ts`). A bot cannot write SQL:
+  `{kind:"sql"}` is refused.
 - `routine_list`: this bot's routines, next run, last outcome.
 - `routine_pause`: pause or resume one routine.
 - `routine_delete`: delete one routine and its run history.
@@ -45,7 +48,7 @@ The allowlist is `ROUTINE_TOOL_ALLOWLIST` in `apps/server/src/routines/run.ts`.
 
 ## Known limits
 
-- The SQL preflight rejects `WITH`, so it cannot run recursive queries.
+- A named check is a fixed question about Agni's own data, picked by name with typed values. There is no model-written SQL. A routine that held one before the change was paused (migration 63); ask the bot to recreate it with a named check.
 - A bot may hold at most 20 routines.
 - A state block over 4,096 characters is refused. The prior state is kept and the run records a warning.
 - An `http` preflight checks every redirect hop: http or https only, and a public host. It follows at most 5 redirects.

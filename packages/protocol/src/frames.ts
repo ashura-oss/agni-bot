@@ -206,7 +206,8 @@ export const RoutineInfoSchema = z.object({
   cron: z.string(),
   timezone: z.string(),
   misfire: z.enum(["skip", "run_once"]),
-  preflight: z.enum(["http", "sql", "mail", "none"]),
+  // "check" (a named pre-check) is additive in v2; "sql" is retired but may still be on an old stored row.
+  preflight: z.enum(["http", "check", "sql", "mail", "none"]),
   maxTokens: z.number().int().positive(),
   maxExecutionMs: z.number().int().positive(),
   allowedDomains: z.array(z.string()),

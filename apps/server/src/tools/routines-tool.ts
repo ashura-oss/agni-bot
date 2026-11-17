@@ -2,7 +2,8 @@ import type { Database } from "bun:sqlite";
 import type { ToolDefinition } from "./registry";
 import { deleteJob, enqueueJob, getJob, setJobEnabled } from "../stores/jobs";
 import { deleteRoutineByJobID, getRoutine, insertRoutine, listRoutines, listRuns, updateRoutineState } from "../stores/routines";
-import { assertReadOnlySelect } from "../routines/preflight";
+import { SQL_PREFLIGHT_RETIRED } from "../routines/preflight";
+import { describeChecks, parseCheckPreflight } from "../routines/preflight-checks";
 import { nextRun, validateCron } from "../routines/cron";
 import { ROUTINE_DEFAULTS } from "../routines/types";
 import type { Preflight, Routine } from "../routines/types";
@@ -61,17 +62,18 @@ function checkRoutine(db: Database, args: Record<string, unknown>, agentID: stri
     try { url = new URL(String(preflightInput.url ?? "")); } catch { throw new Error("preflight URL is invalid"); }
     if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("preflight URL must use http or https");
     preflight = { kind: "http", url: url.toString() };
+  } else if (preflightInput.kind === "check") {
+    // A named question from the fixed list (routines/preflight-checks.ts): what the model chooses is a name and typed values, never SQL.
+    preflight = parseCheckPreflight(preflightInput);
   } else if (preflightInput.kind === "sql") {
-    const query = String(preflightInput.query ?? "").trim();
-    assertReadOnlySelect(query);
-    preflight = { kind: "sql", query };
+    throw new Error(SQL_PREFLIGHT_RETIRED);
   } else if (preflightInput.kind === "mail") {
     // New-mail trigger: pair with a short cron (5 min minimum); the model only runs when new mail arrived.
     if (preflightInput.account !== "agent" && preflightInput.account !== "owner") throw new Error('mail preflight needs account "agent" or "owner"');
     preflight = { kind: "mail", account: preflightInput.account };
   } else if (preflightInput.kind === "none") {
     preflight = { kind: "none" };
-  } else throw new Error("preflight kind must be http, sql, mail, or none");
+  } else throw new Error("preflight kind must be http, check, mail, or none");
 
   const maxTokens = args.maxTokens === undefined ? ROUTINE_DEFAULTS.maxTokens : Number(args.maxTokens);
   const maxExecutionMs = args.maxExecutionMs === undefined ? ROUTINE_DEFAULTS.maxExecutionMs : Number(args.maxExecutionMs);
@@ -120,7 +122,18 @@ export function createRoutineTools(db: Database): ToolDefinition<unknown, unknow
       schema: objectSchema({
         name: { type: "string", minLength: 1, maxLength: 120 }, prompt: { type: "string", minLength: 1, maxLength: 4000 },
         cron: stringProp, timezone: stringProp,
-        preflight: { type: "object", properties: { kind: { type: "string", enum: ["http", "sql", "mail", "none"] }, url: { type: "string" }, query: { type: "string" }, account: { type: "string", enum: ["agent", "owner"] } }, required: ["kind"], additionalProperties: false },
+        preflight: {
+          type: "object",
+          properties: {
+            kind: { type: "string", enum: ["http", "check", "mail", "none"] },
+            url: { type: "string" },
+            // kind "check": one of the fixed named questions, with the values it takes (`describeChecks` says which).
+            name: { type: "string", enum: describeChecks().map((check) => check.name) },
+            params: { type: "object" },
+            account: { type: "string", enum: ["agent", "owner"] },
+          },
+          required: ["kind"], additionalProperties: false,
+        },
         misfire: { type: "string", enum: ["skip", "run_once"] },
         maxTokens: { type: "integer", minimum: 1, maximum: 16000 }, maxExecutionMs: { type: "integer", minimum: 1, maximum: 600000 },
       }, ["name", "prompt", "cron", "timezone"]), timeoutMs: 5_000,

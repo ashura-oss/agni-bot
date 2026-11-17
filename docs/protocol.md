@@ -390,7 +390,7 @@ and the assets are never sent to a model. Theme JSON exports omit image bytes.
 
 A `routine`-kind job in `job.list.ok` may carry an optional `routine` object
 on its `JobInfo`: `{name, cron, timezone, misfire: "skip"|"run_once",
-preflight: "http"|"sql"|"none", maxTokens, maxExecutionMs, allowedDomains,
+preflight: "http"|"check"|"mail"|"none" (`"sql"` is retired and appears only on an old stored row), maxTokens, maxExecutionMs, allowedDomains,
 successStreak, failureStreak, recentRuns}`, where `recentRuns` holds at most
 the last five runs (`{at, outcome, tokens, summary?}`, `outcome`:
 `ran | skipped_no_delta | failed | timed_out | budget_exceeded`). This is an
