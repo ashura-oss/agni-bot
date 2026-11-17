@@ -203,3 +203,58 @@ describe("a job approved from a run whose tools were narrowed fires with the too
     expect(Object.hasOwn(resultJson(plain), "error"), "a job with no stored tools was cut down").toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 3. a routine from a run its own tool refuses is refused before any card
+// ---------------------------------------------------------------------------
+
+describe("a routine's creation or resumption from a run that the routine tools refuse raises no card", () => {
+  let rig: PolicyRig | undefined;
+  afterEach(() => { rig?.close(); rig = undefined; });
+  const create = { name: "Inbox", prompt: "Check the inbox.", cron: "0 9 * * *", timezone: "UTC" };
+  const routineHandler = (r: PolicyRig, at: number): Handler => createRoutineTools(r.db)[at]!.handler as unknown as Handler;
+
+  test("a job, a wake, a brief from a bot and a routine are refused (the tool would refuse them after the owner said yes); the owner's own turn and a job the owner made are not", async () => {
+    rig = policyRig();
+    const made = await routineHandler(rig, 0)(create, ctxOf(rig.run)) as unknown as { id: string };
+    const resume = { id: made.id, enabled: true };
+    for (const [tool, args] of [["routine_create", create], ["routine_pause", resume]] as const) {
+      for (const [what, run] of [
+        ["a job a bot made", rig.another({ principal: { kind: "job" }, jobID: "job_bot" })],
+        ["a wake", rig.another({ principal: { kind: "wake" } })],
+        ["a brief from a bot that read nothing outside", rig.another({ principal: { kind: "peer", from: "boss" }, taint: [] })],
+      ] as const) {
+        expect({ tool, what, decision: decide(run, { tool, args, callID: "call_1" }) }).toMatchObject({ tool, what, decision: { action: "refuse", code: "protected_write" } });
+      }
+      // The owner's own turn runs it; a job the owner made (it runs as the owner) is still asked, as before.
+      expect({ tool, own: decide(rig.run, { tool, args, callID: "call_1" }).action }).toEqual({ tool, own: "run" });
+      expect({ tool, ownersJob: decide(rig.another({ principal: { kind: "owner" }, jobID: "job_owner" }), { tool, args, callID: "call_1" }).action }).toEqual({ tool, ownersJob: "ask" });
+    }
+    // Pausing is not a standing rule and is not refused here.
+    expect(decide(rig.another({ principal: { kind: "job" }, jobID: "job_bot" }), { tool: "routine_pause", args: { id: made.id, enabled: false }, callID: "call_1" }).action).toBe("run");
+  });
+
+  test("the refusal says why and is not recorded as the owner's no", () => {
+    rig = policyRig();
+    const decision = decide(rig.another({ principal: { kind: "job" }, jobID: "job_bot" }), { tool: "routine_create", args: create, callID: "call_1" });
+    expect(decision.action).toBe("refuse");
+    if (decision.action === "refuse") expect(decision.error).toMatch(/routine/i);
+    expect(rig.db.query("SELECT id FROM run_denials").all(), "a refusal the owner never made was recorded as a denial").toEqual([]);
+  });
+
+  scenarioTest("through the real loop: a fire of a job a bot made is told no and the owner is never asked", async () => {
+    const s = await scenarios.start();
+    const a = await s.connect({ label: "A" });
+    s.model.queue(...scripted(true, [call("job_schedule", { text: "Make a routine.", at: past() }, "call_seed"), say("Scheduled.")]));
+    await playTurn(s, a, "set up a job", { answer: () => "once" });
+    const owner = answerCards(a, "once");
+    s.model.queue(...scripted(true, [call("routine_create", create, "call_routine"), say("Tried.")]));
+    for (let tick = 0; tick < 6 && !allCallsTo(s, "routine_create", a).some((entry) => entry.callID === "call_routine"); tick += 1) await s.runner().tick();
+    owner.stop();
+    const record = allCallsTo(s, "routine_create", a).find((entry) => entry.callID === "call_routine");
+    expect(record, "the job never made the call; the script is out of step").toBeDefined();
+    expect(owner.cards, "the owner was asked about a routine the tool would refuse anyway").toEqual([]);
+    expect(String(resultJson(record).error ?? "(no error)")).toMatch(/routine/i);
+    expect(s.all("SELECT id FROM routines")).toEqual([]);
+  });
+});

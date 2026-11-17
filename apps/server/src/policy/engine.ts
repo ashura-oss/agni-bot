@@ -83,6 +83,10 @@ function judge(run: RunContext, input: PolicyInput, record: boolean): Decision {
   if (domain) return domain;
   const policy = policyFor(tool, services.metaOf?.(tool));
   const assessment = assessCall(policy, args);
+  // A call the tool would refuse from this origin whatever the owner says is refused here, before any card: the owner is not asked to
+  // approve what cannot run. It is no one's "no", so it leaves no denial.
+  const impossible = policy?.originRefusal?.(args, run) ?? null;
+  if (impossible !== null) return { ...refuse("protected_write", impossible, "a call this origin may never make"), preview: "not allowed from this task" };
   const denied = deniedEarlier(run, tool, args, assessment, record);
   if (denied) return denied;
   // A shell command the server cannot prove to be one plain allowlisted command (policy/shell-proof.ts) names no file, so no

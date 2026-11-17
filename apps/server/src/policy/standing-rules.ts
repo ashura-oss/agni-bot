@@ -79,6 +79,22 @@ export function standingRoutineKind(args: Record<string, unknown>, run: RunConte
   return tool === "routine_create" ? "routine_create" : "routine_resume";
 }
 
+/**
+ * Why this run may not make or resume a routine at all, or null. The routine tools refuse a run that was started by another bot, a job's
+ * saved text, a wake or a routine's saved state, whatever the owner says (`tools/routines-tool.ts`), so the owner is not asked about one.
+ * Only the owner's own turn, and a fire of a job the owner made (it runs as the owner), reach a card. A run whose principal cannot be read
+ * is asked (the card is the owner's own look at it).
+ */
+export function routineOriginRefusal(args: Record<string, unknown>, run: RunContext | undefined, tool: "routine_create" | "routine_pause"): string | null {
+  if (tool === "routine_pause" && args.enabled !== true) return null;
+  // A run that read outside text (a routine's own run always has) is refused by the protected-write rule with its own words, not asked.
+  if (run === undefined || isTainted(run)) return null;
+  const kind = run.principal?.kind;
+  if (kind !== "job" && kind !== "wake" && kind !== "peer" && kind !== "routine") return null;
+  const what = tool === "routine_create" ? "made" : "resumed";
+  return `Not done: ${PRINCIPAL_LINE[kind]} A routine can only be ${what} from a turn you started yourself. Tell the owner what you wanted and ask them to do it.`;
+}
+
 /** The refusal a routine's creation or resumption is recorded under: the same one a repeating job has. */
 export function standingRoutineResources(args: Record<string, unknown>, tool: "routine_create" | "routine_pause"): ToolResource[] {
   return tool === "routine_pause" && args.enabled !== true ? [] : [STANDING_JOB_RESOURCE];

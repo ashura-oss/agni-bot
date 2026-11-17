@@ -667,7 +667,7 @@ describe("a one-shot job keeps the request of a run that was not the owner's own
 });
 
 
-describe("a routine is a repeating job: a job run's routine_create and routine_pause (resume) are put to the owner", () => {
+describe("a routine is a repeating job: a routine_create and routine_pause (resume) from a fire of a job the owner made are put to the owner", () => {
   let rig: PolicyRig | undefined;
   afterEach(() => { rig?.close(); rig = undefined; });
   const create = { name: "Inbox", prompt: "Check the inbox.", cron: "0 9 * * *", timezone: "UTC" };
@@ -680,10 +680,9 @@ describe("a routine is a repeating job: a job run's routine_create and routine_p
     const made = await (createRoutineTools(rig.db)[0]!.handler as unknown as (args: unknown, ctx: unknown) => Promise<{ id: string }>)(create, { threadID: "thr", turnID: "trn", signal: new AbortController().signal, chain: { depth: 1, rootAgentID: "ea", currentAgentID: "ea", handoffSummary: null } });
     for (const [tool, args] of [["routine_create", create], ["routine_pause", { id: made.id, enabled: true }]] as const) {
       expect({ tool, own: decide(rig.run, { tool, args, callID: "call_1" }).action }).toEqual({ tool, own: "run" });
+      // A job a bot made and a wake are refused before any card (the routine tools refuse them whatever the owner says): test/s2-standing-chain.test.ts.
       for (const [what, run] of [
-        ["a job a bot made", rig.another({ principal: { kind: "job" }, jobID: "job_bot" })],
         ["a job the owner made", rig.another({ principal: { kind: "owner" }, jobID: "job_owner" })],
-        ["a wake", rig.another({ principal: { kind: "wake" } })],
       ] as const) {
         const decision = decide(run, { tool, args, callID: "call_1" });
         expect({ tool, what, action: decision.action }).toEqual({ tool, what, action: "ask" });
@@ -704,7 +703,7 @@ describe("a routine is a repeating job: a job run's routine_create and routine_p
 
   test("the owner's no to a routine is the same refusal as to a repeating job", () => {
     rig = policyRig();
-    const job = rig.another({ principal: { kind: "job" }, jobID: "job_bot" });
+    const job = rig.another({ principal: { kind: "owner" }, jobID: "job_owner" });
     recordDenial(rig.db, job, { tool: "routine_create", operation: "change", resources: assessCall(policyFor("routine_create"), create).resources, cause: "denied" });
     expect(decide(job, { tool: "job_schedule", args: { text: "x", everyMinutes: 30 }, callID: "call_1" })).toMatchObject({ action: "refuse", code: "denied_resource" });
     expect(decide(job, { tool: "routine_pause", args: resume, callID: "call_1" })).toMatchObject({ action: "refuse", code: "denied_resource" });

@@ -21,7 +21,7 @@ import { isOutsideScratch, scratchDir, writeTargetExists } from "../tools/write-
 import type { CallAssessment, RiskKind, RunContext, StandingKind, TaintKind, TaintSource } from "./types";
 import type { ToolClass, ToolMeta, ToolResource, ToolTier } from "./tool-meta";
 import { hostResource, pathResource, recipientResources, shellFacts, shellWorkingDir } from "./resources";
-import { STANDING_JOB_RESOURCE, standingRoutineKind, standingRoutineResources, standingScheduleKind } from "./standing-rules";
+import { STANDING_JOB_RESOURCE, routineOriginRefusal, standingRoutineKind, standingRoutineResources, standingScheduleKind } from "./standing-rules";
 
 type Args = Record<string, unknown>;
 
@@ -46,6 +46,11 @@ export interface ToolPolicy extends ToolMeta {
    * the same call is a standing rule from one run and not from another. The card carries the kind, and the preview is drawn from it.
    */
   standingKind?: (args: Args, run: RunContext) => StandingKind | null;
+  /**
+   * Why a call from this run can never be made, whatever the owner says, or null: the tool itself refuses that origin. The engine refuses
+   * the call before any card is raised, so the owner is not asked to approve what cannot run. The words are for the model.
+   */
+  originRefusal?: (args: Args, run: RunContext) => string | null;
   /** This tool's result is outsider text: it taints the run that reads it. */
   taintedBy?: TaintedBy;
   /** What this particular call is, when that differs from the tool's defaults. */
@@ -232,11 +237,13 @@ export const TOOL_POLICY: Readonly<Record<string, ToolPolicy>> = {
   routine_create: local({
     protectedWrite: true,
     standingKind: (args, run) => standingRoutineKind(args, run, "routine_create"),
+    originRefusal: (args, run) => routineOriginRefusal(args, run, "routine_create"),
     resources: (args) => standingRoutineResources(args, "routine_create"),
   }),
   routine_pause: local({
     protectedWrite: true,
     standingKind: (args, run) => standingRoutineKind(args, run, "routine_pause"),
+    originRefusal: (args, run) => routineOriginRefusal(args, run, "routine_pause"),
     resources: (args) => standingRoutineResources(args, "routine_pause"),
   }),
   routine_delete: local({ protectedWrite: true }),
