@@ -6,6 +6,8 @@
  * be created directly only by the owner's own untainted turn. Any other origin (a job-fire run, a bot-to-bot, delegated,
  * wake or resumed run, a tainted run, an origin that cannot be read) puts a card to the owner, and no job exists until
  * the owner approves. A refusal is a run denial. A card never offers "Always allow", and no stored rule approves one.
+ *
+ * Also here: the wake key carries the wake scope (two runs of one recurring job do not share a queued wake).
  */
 import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
 import { resetS2Startup } from "../src/startup/s2";
@@ -390,5 +392,32 @@ describe("a repeating job the owner approved", () => {
     }
     owner.stop();
     expect(s.model.overruns, "a wake of a repeating job's fire was not run").toBe(0);
+  });
+
+  scenarioTest("two fires of one job do not share a queued wake", async () => {
+    const s = await scenarios.start();
+    setRunCaps(s.db, { maxWakesPerRequest: 1 });
+    const a = await s.connect({ label: "A" });
+    const { owner } = await approvedRecurringJob(s, a);
+
+    // The delegated tasks are held until both fires have run, so both wakes are queued at once.
+    s.db.run("CREATE TRIGGER hold_tasks AFTER INSERT ON jobs WHEN NEW.payload LIKE '%delegationTaskID%' BEGIN UPDATE jobs SET run_at = '2999-01-01T00:00:00.000Z' WHERE id = NEW.id; END");
+    for (let run = 1; run <= 2; run += 1) {
+      later(minutes(6));
+      s.model.queue(...scripted(true, [call("delegate_task", { toAgentID: "researcher", goal: `Count the pallets, run ${run}.` }, `call_run_${run}`), say("The researcher is counting.")]));
+      await tickUntil(s, () => allCallsTo(s, "delegate_task", a).some((entry) => entry.callID === `call_run_${run}`));
+    }
+    expect(allCallsTo(s, "delegate_task", a).length, "the two fires did not both delegate; the script is out of step").toBe(2);
+    s.db.run("DROP TRIGGER hold_tasks");
+    s.db.run("UPDATE jobs SET run_at = ? WHERE run_at = '2999-01-01T00:00:00.000Z'", [new Date().toISOString()]);
+    s.model.queue(say("There are 41 pallets."), say("There are 42 pallets."), say("Noted."), say("Noted again."));
+    await tickUntil(s, () => wakeJobs(s).length >= 1 && settled(wakeJobs(s)) && s.all("SELECT id FROM jobs WHERE state = 'queued' AND payload LIKE '%delegationTaskID%'").length === 0, 12);
+    owner.stop();
+
+    const wakes = wakeJobs(s);
+    expect(wakes.length, "the two fires' tasks were reported in one shared wake").toBe(2);
+    expect(new Set(wakes.map((wake) => wake.payload.rootTurnID)).size, "the two wakes carry the same run").toBe(2);
+    expect(wakes.map((wake) => wake.result ?? ""), "a wake was held to the other fire's count").not.toContainEqual(expect.stringMatching(/wake limit/i));
+    expect(s.model.overruns).toBe(0);
   });
 });

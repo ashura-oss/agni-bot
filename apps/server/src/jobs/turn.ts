@@ -47,7 +47,7 @@ import { peerEnvelope } from "../agent/peer-message";
 import type { PeerIntent } from "@agni/protocol";
 import { JobGiveUp, type JobContext, type JobRunner } from "./runner";
 import { nowISO } from "../util/ids";
-import { postWakeLimitNotice, takeWakePlace, wakeLimitNotice } from "./wake-limit";
+import { postWakeLimitNotice, takeWakePlace, wakeLimitNotice, wakeScope } from "./wake-limit";
 
 /** How long a wake first waits when the parent's thread is busy; doubles per deferral. */
 const WAKE_RETRY_MS = 1_500;
@@ -587,10 +587,12 @@ function wakeParent(deps: TurnJobDeps, taskID: string, summary: string, parentDe
   const owner = task.owner_agent_id ?? "";
   const visibility = owner ? resolvePersona(deps.db, owner)?.visibility ?? MISSING_AGENT_VISIBILITY : DEFAULT_VISIBILITY;
   const visible = redactResultForCaller(summary, owner, parentAgentID, visibility);
-  // One wake per parent thread and per request: results of different requests never share a wake, so a wake belongs
-  // to one root (what was refused there holds in it) and has the one clock of its own.
+  // One wake per parent thread and per run: results of different requests never share a wake, so a wake belongs
+  // to one root (what was refused there holds in it) and has the one clock of its own. The refusal scope alone is not the
+  // run: every fire of a recurring job holds the same one, and its wakes would coalesce into one counted under the first
+  // fire's wake scope. The wake scope (`wake-limit.ts`) names the run, so it is part of the key.
   const root = briefRoot(task.brief);
-  const wakeKey = `wake:${parentThreadID}:${root ? denialScope(root) : "unrooted"}`;
+  const wakeKey = `wake:${parentThreadID}:${root ? denialScope(root) : "unrooted"}:${wakeScope({ ...root, threadID: parentThreadID })}`;
   const item = {
     taskID: task.id,
     agentID: owner,
