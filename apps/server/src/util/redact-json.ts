@@ -205,7 +205,8 @@ function walk(value: unknown, depth: number): unknown {
   }
   if (Array.isArray(value)) return value.map((item) => walk(item, depth));
   if (typeof value === "object" && value !== null) {
-    // `fromEntries` defines own properties, so a key named `__proto__` stays a key.
+    // `fromEntries` defines own properties, so a key named `__proto__` stays a key. Two different keys that both
+    // hold a registered value become the same `[redacted]` key, and the later one wins: that loses data, not secrets.
     return Object.fromEntries(Object.entries(value).map(([key, item]): [string, unknown] => [redact(key), walk(item, depth)]));
   }
   return value;

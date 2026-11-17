@@ -118,12 +118,12 @@ describe("the shared document is masked field by field", () => {
     expect(JSON.parse(masked.records[0]!.result!)).toEqual(value);
   });
 
-  test("JSON nested too deep to walk is masked as plain text and the export still goes through", () => {
+  test("JSON nested too deep to walk is withheld whole (the mask) and the export still goes through", () => {
     registerSecret(AWKWARD);
     const depth = 50_000;
     const deep = `${"[".repeat(depth)}${JSON.stringify(AWKWARD)}${"]".repeat(depth)}`;
     const masked = maskedDocument(documentOf(toolRecord({ result: deep })));
-    expect(masked.records[0]!.result).not.toContain("Zk93");
+    expect(masked.records[0]!.result).toBe(REDACTED);
   });
 
   test("a key named __proto__ stays an own key of the masked args", () => {
