@@ -9,6 +9,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eraseFile } from "../src/credentials/vault-mode";
 
+/** Whether this machine lets the test make a symlink (Windows needs developer mode or elevation). Decided once, at load. */
+const canSymlink = ((): boolean => {
+  const dir = mkdtempSync(join(tmpdir(), "agni-erase-probe-"));
+  try {
+    writeFileSync(join(dir, "target"), "x");
+    symlinkSync(join(dir, "target"), join(dir, "link"), "file");
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+})();
+
 let roots: string[] = [];
 const fresh = (): string => {
   const dir = mkdtempSync(join(tmpdir(), "agni-erase-"));
@@ -51,18 +65,12 @@ describe("eraseFile", () => {
     expect(existsSync(join(path, "inside"))).toBe(true);
   });
 
-  test("a symlink is refused, and what it points to is not written to", () => {
+  test.skipIf(!canSymlink)("a symlink is refused, and what it points to is not written to", () => {
     const dir = fresh();
     const target = join(dir, "precious");
     const link = join(dir, "plugins.json.corrupt");
     writeFileSync(target, "precious-bytes");
-    try {
-      symlinkSync(target, link, "file");
-    } catch (error) {
-      // Windows without developer mode or elevation cannot make a symlink: nothing to check on this machine.
-      if ((error as NodeJS.ErrnoException).code === "EPERM") return;
-      throw error;
-    }
+    symlinkSync(target, link, "file");
     expect(() => eraseFile(link)).toThrow(/regular file/i);
     expect(readFileSync(target, "utf8")).toBe("precious-bytes");
   });
