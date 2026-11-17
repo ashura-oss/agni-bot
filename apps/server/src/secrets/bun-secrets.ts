@@ -34,8 +34,19 @@ function unavailable(error: unknown, platform = process.platform): VaultError {
   return new VaultError("KEYSTORE_UNAVAILABLE", `The operating system's credential store could not be used (${why}).${hint}`, { cause: error });
 }
 
+/**
+ * Under a test run (`NODE_ENV=test`, which `bun test` sets and a child process a test starts inherits) the
+ * product's own entry in the real credential store is off limits: a test that forgot the in-memory override
+ * would create or read the owner's vault key. A test that really needs the store names a service of its own.
+ */
+function refuseInTestRun(service: string): void {
+  if (process.env.NODE_ENV !== "test" || service !== DEFAULT_KEYSTORE_SERVICE) return;
+  throw new VaultError("KEYSTORE_UNAVAILABLE", "The operating system's credential store is not available to a test run (NODE_ENV=test). Install a test keystore with setKeyStoreOverride, or pass a service name of your own.");
+}
+
 export function createBunSecretsKeyStore(options: { service?: string } = {}): KeyStore {
   const service = options.service ?? DEFAULT_KEYSTORE_SERVICE;
+  refuseInTestRun(service);
   const nameOf = (context: KeyStoreContext): string => `vault-key:${context.vaultId}`;
   return {
     kind: "bun-secrets",

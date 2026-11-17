@@ -341,15 +341,22 @@ describe("keystore selection", () => {
   test("the override wins, then the vault header's kind, then the platform", () => {
     expect(selectKeyStore({ env: {}, platform: "win32" }).kind).toBe("memory");
     setKeyStoreOverride(null);
+    // Choosing the OS keystore is refused under NODE_ENV=test (s3-keystore-test-guard.test.ts). Building one touches
+    // nothing until it is used, so the platform rules can be checked with the guard lifted for these lines only.
+    const nodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
     try {
       expect(selectKeyStore({ env: {}, platform: "win32" }).kind).toBe("bun-secrets");
       expect(selectKeyStore({ env: {}, platform: "darwin" }).kind).toBe("bun-secrets");
       expect(selectKeyStore({ env: {}, platform: "linux" }).kind).toBe("bun-secrets");
+      process.env.NODE_ENV = nodeEnv;
       expect(selectKeyStore({ env: { AGNI_KEYSTORE: "passphrase" }, platform: "win32" }).kind).toBe("passphrase");
       expect(selectKeyStore({ env: {}, platform: "linux", headerKind: "passphrase" }).kind).toBe("passphrase");
       expect(() => selectKeyStore({ env: { AGNI_KEYSTORE: "bun-secrets" }, platform: "linux", headerKind: "passphrase" })).toThrow(VaultError);
       expect(() => selectKeyStore({ env: { AGNI_KEYSTORE: "memory" }, platform: "linux" })).toThrow(VaultError);
     } finally {
+      if (nodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = nodeEnv;
       setKeyStoreOverride(createMemoryKeyStore());
     }
   });
