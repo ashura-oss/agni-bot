@@ -15,6 +15,8 @@ export interface RecordedMode {
   mode: SecretsMode;
   /** The process environment (the shell, or the service unit), or `config.env` in the home. */
   source: "environment" | "config.env";
+  /** Only with `source: "environment"`: the mode `config.env` holds when it disagrees with the environment. A service has no shell, so it would use this one. */
+  fileMode?: SecretsMode;
 }
 
 const asMode = (value: string): SecretsMode => (value.trim().toLowerCase() === "vault" ? "vault" : "file");
@@ -31,7 +33,8 @@ export function recordedSecretsMode(home: string, env: Env = process.env): Recor
   const fromEnv = env.AGNI_SECRETS_MODE?.trim();
   if (fromEnv) {
     const same = inFile !== undefined && inFile !== "" && asMode(inFile) === asMode(fromEnv);
-    return { mode: asMode(fromEnv), source: same ? "config.env" : "environment" };
+    if (same) return { mode: asMode(fromEnv), source: "config.env" };
+    return inFile ? { mode: asMode(fromEnv), source: "environment", fileMode: asMode(inFile) } : { mode: asMode(fromEnv), source: "environment" };
   }
   return inFile ? { mode: asMode(inFile), source: "config.env" } : undefined;
 }

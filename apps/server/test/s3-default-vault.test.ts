@@ -89,7 +89,9 @@ describe("homeIsFresh and recordedSecretsMode", () => {
     expect(recordedSecretsMode(home, {})).toBeUndefined();
     writeFileSync(join(home, "config.env"), "AGNI_SECRETS_MODE=file\n");
     expect(recordedSecretsMode(home, {})).toEqual({ mode: "file", source: "config.env" });
-    expect(recordedSecretsMode(home, { AGNI_SECRETS_MODE: "vault" })).toEqual({ mode: "vault", source: "environment" });
+    // The file says file and the shell says vault: the shell wins here, and the disagreement is reported.
+    expect(recordedSecretsMode(home, { AGNI_SECRETS_MODE: "vault" })).toEqual({ mode: "vault", source: "environment", fileMode: "file" });
+    expect(recordedSecretsMode(fresh(), { AGNI_SECRETS_MODE: "vault" })).toEqual({ mode: "vault", source: "environment" });
   });
 });
 
@@ -181,12 +183,42 @@ describe("chooseSecretsMode: a home that already has a mode or data", () => {
     expect(configOf(home)).toBe("AGNI_SECRETS_MODE=vault\n");
   });
 
-  test("a mode set in the environment is kept, and nothing is written", async () => {
+  test("a file mode set only in the environment is written into config.env, which is what the service reads", async () => {
     const home = fresh();
     const result = await chooseSecretsMode({ home, env: { AGNI_SECRETS_MODE: "file" }, keystore: forbiddenKeyStore() });
     expect(result.mode).toBe("file");
     expect(result.reason).toBe("recorded");
-    expect(existsSync(join(home, "config.env"))).toBe(false);
+    expect(hasLine(configOf(home), "AGNI_SECRETS_MODE=file")).toBe(true);
+    expect(vaultExists({ home })).toBe(false);
+    expect(result.message).toContain("recorded in config.env");
+    expect(isOwnerOnlyFile(join(home, "config.env"))).toBe(true);
+  });
+
+  test("a vault mode set only in the environment makes the vault and is written into config.env", async () => {
+    const home = fresh();
+    const result = await chooseSecretsMode({ home, env: { AGNI_SECRETS_MODE: "vault" } });
+    expect(result.mode).toBe("vault");
+    expect(vaultExists({ home })).toBe(true);
+    expect(hasLine(configOf(home), "AGNI_SECRETS_MODE=vault")).toBe(true);
+    expect(result.message).toContain("recorded in config.env");
+    // A server started the way the service starts it (the home only) now finds vault mode.
+    expect(recordedSecretsMode(home, {})).toEqual({ mode: "vault", source: "config.env" });
+  });
+
+  test("a vault mode asked for in the environment with no usable keystore is an error, not a file-mode downgrade", async () => {
+    const home = fresh();
+    await expect(chooseSecretsMode({ home, env: { AGNI_SECRETS_MODE: "vault" }, keystore: unavailableKeyStore() })).rejects.toThrow("Secret Service");
+    expect(existsSync(join(home, "config.env")) ? hasLine(configOf(home), "AGNI_SECRETS_MODE=file") : false).toBe(false);
+    expect(vaultExists({ home })).toBe(false);
+  });
+
+  test("an environment mode that disagrees with config.env leaves config.env alone and says what the service will use", async () => {
+    const home = fresh();
+    writeFileSync(join(home, "config.env"), "AGNI_SECRETS_MODE=file\n");
+    const result = await chooseSecretsMode({ home, env: { AGNI_SECRETS_MODE: "vault" }, keystore: forbiddenKeyStore() });
+    expect(configOf(home)).toBe("AGNI_SECRETS_MODE=file\n");
+    expect(result.message).toContain("config.env says file");
+    expect(vaultExists({ home })).toBe(false);
   });
 
   test("an install that predates the vault (plaintext keys, no mode recorded) stays in file mode, byte for byte", async () => {

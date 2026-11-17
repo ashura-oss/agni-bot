@@ -72,11 +72,48 @@ function recordMode(envFile: string, mode: SecretsMode, note?: string): void {
   writePrivateFileSync(envFile, text.replace(/^AGNI_SECRETS_MODE=.*$/m, (line) => `# ${note}\n${line}`));
 }
 
-function recordedMessage(mode: SecretsMode, source: "environment" | "config.env"): string {
-  const where = source === "environment" ? "set in the environment" : "recorded in config.env";
+function recordedMessage(mode: SecretsMode, where: string): string {
   return mode === "vault"
     ? `secrets mode: vault (${where})`
     : `secrets mode: file (${where})\n  Credentials stay in config.env. Run ${MIGRATE} to move them into the encrypted vault.`;
+}
+
+/**
+ * A mode that only the shell named (`AGNI_SECRETS_MODE=vault agni setup`). The service gets just `AGNI_HOME`, so a mode
+ * kept only in the shell would be gone when it starts and the server would run in file mode while setup said vault.
+ * Write it into `config.env`, and for `vault` make the vault now, so the shell and the service agree. A `config.env`
+ * that already holds another mode is left alone: the owner wrote it, and the message says which one the service uses.
+ */
+async function recordShellMode(options: ChooseOptions, mode: SecretsMode, fileMode: SecretsMode | undefined): Promise<SecretsChoice> {
+  const { home } = options;
+  const env = options.env ?? process.env;
+  const platform = options.platform ?? process.platform;
+  if (fileMode !== undefined && fileMode !== mode) {
+    return {
+      mode,
+      reason: "recorded",
+      message:
+        `${recordedMessage(mode, "set in the environment")}\n  warning: config.env says ${fileMode}, and a service started by \`agni service install\` reads config.env, ` +
+        `so it will run in ${fileMode} mode. Change AGNI_SECRETS_MODE in config.env to ${mode} if that is not what you want.`,
+    };
+  }
+  const envFile = join(home, "config.env");
+  if (mode === "file") {
+    recordMode(envFile, "file");
+    return { mode, reason: "recorded", message: recordedMessage(mode, "set in the environment; now recorded in config.env") };
+  }
+  validateKeystoreName(env);
+  try {
+    const vault = await unlockVault({ home, env, create: true, keystore: options.keystore });
+    recordMode(envFile, "vault");
+    return {
+      mode,
+      reason: "recorded",
+      message: `secrets mode: vault (set in the environment; now recorded in config.env)\n  Credentials are encrypted in ${vault.path}; the key is kept by ${backendLabel(vault.keystoreKind, platform)}.`,
+    };
+  } finally {
+    lockVault();
+  }
 }
 
 /**
@@ -89,7 +126,8 @@ export async function chooseSecretsMode(options: ChooseOptions): Promise<Secrets
   const env = options.env ?? process.env;
   const platform = options.platform ?? process.platform;
   const recorded = recordedSecretsMode(home, env);
-  if (recorded) return { mode: recorded.mode, reason: "recorded", message: recordedMessage(recorded.mode, recorded.source) };
+  if (recorded?.source === "environment") return recordShellMode(options, recorded.mode, recorded.fileMode);
+  if (recorded) return { mode: recorded.mode, reason: "recorded", message: recordedMessage(recorded.mode, "recorded in config.env") };
   if (!homeIsFresh(home, env)) {
     return {
       mode: "file",
