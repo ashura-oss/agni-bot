@@ -1,5 +1,5 @@
 import { AttachmentInfoSchema, type AttachmentInfo } from "@agni/client";
-import { AppearanceProfileSchema, type AppearanceProfile } from "@agni/protocol";
+import { AppearanceProfileSchema, type AppearanceProfile, type ChannelInfo } from "@agni/protocol";
 /**
  * The app model: pairing, the connection, the open transcript, the roster, the
  * daemon's health, and every user intent the views need. Views call methods
@@ -53,144 +53,25 @@ import {
   savePreferences,
   type Preferences,
 } from "./preferences";
-import { loadStops, rememberStop } from "./stops";
+import { insertStoppedTurns, loadStops, rememberStop } from "./stops";
+import { agentForRoute, agentPath, isSettingsSection, parseRoute, resolveRoute, routePath, type Route, type RouteResolution, type SettingsSection } from "./router";
 import { APPEARANCE_PENDING_KEY, cacheAppearance, defaultAppearance, loadCachedAppearance, loadPendingAppearance } from "../appearance";
 
-export type AppScreen = "pairing" | "chat";
+import type { AppModelEnv, AppScreen, AppSnapshot, ExportLink } from "./snapshot";
+import { NEW_AGENT_PROMPT, nextNewAgent, seedAgents } from "./roster";
 
-export interface ExportLink {
-  url: string;
-  token: string;
-  records: number;
-}
+export type { AppModelEnv, AppScreen, AppSnapshot, ExportLink };
+export { isPrimaryAgent, nextNewAgent } from "./roster";
 
-export interface AppSnapshot {
-  screen: AppScreen;
-  connectionState: ConnectionState;
-  settings: ServerSettings;
-  secretKind: SecretStoreKind | null;
-  tokenIsStored: boolean;
-  /** Paired by the daemon's HttpOnly session cookie, not a stored token. */
-  cookieSession: boolean;
-  isCheckingServer: boolean;
-  isPairing: boolean;
-  pairingError: string | null;
-
-  conversation: Conversation;
-  threads: ThreadInfo[];
-  agents: AgentInfo[];
-  /** Full roster for `@mention` and handoff links, including hidden agents. */
-  mentionAgents: AgentInfo[];
-  unread: ReadonlySet<string>;
-  /** What each agent is doing: idle, working, waiting, blocked. */
-  agentStates: Readonly<Record<string, "idle" | "working" | "waiting" | "blocked">>;
-  /** What the agent can remember, filtered the way retrieval filters it. */
-  memories: MemoryItem[];
-
-  health: HealthReport | null;
-  healthError: string | null;
-  configuredProviders: ProviderStatus[];
-  plugins: PluginInfo[];
-  jobs: JobInfo[];
-  tasks: TaskInfo[];
-  taskLists: TaskListInfo[];
-  taskActivity: { taskID: string; entries: TaskActivityInfo[] } | null;
-  taskView: { kind: "today" | "inbox" | "upcoming" | "calendar" | "completed" | "list"; listID?: string };
-
-  isAddingProvider: boolean;
-  providerAddError: string | null;
-  providerAddSuccess: string | null;
-  providerModels: string[];
-  providerModelsError: string | null;
-  chatgpt: ChatGPTConnection | null;
-  chatgptLogin: { loginID: string; authorizeURL: string; expiresAt: string } | null;
-  chatgptBusy: boolean;
-  chatgptError: string | null;
-
-  isExporting: boolean;
-  exportedLink: ExportLink | null;
-  exportError: string | null;
-
-  isInspectorPresented: boolean;
-  /** The full-screen bot debugger is open. */
-  isDebugPresented: boolean;
-  /** The left pane is showing the task/reminder list instead of the roster. */
-  isTasksPresented: boolean;
-  isSettingsPresented: boolean;
-  isAgentSwitcherPresented: boolean;
-  /** The composer's "To:" list: pick who the chat is with, or make a new agent. */
-  isNewChatPresented: boolean;
-  /** Phone layout: the agent roster slides in over the conversation. */
-  isSidebarPresented: boolean;
-  /** The agent's own profile panel, opened from the header pill. */
-  isAgentProfilePresented: boolean;
-  /** Browser-local preferences: the switches in Settings. */
-  preferences: Preferences;
-  appearance: AppearanceProfile;
-  appearanceProfiles: AppearanceProfile[];
-  appearanceSaveStatus: "saved" | "saving" | "pending" | "error";
-  /** A message the transcript should scroll to (from search). */
-  focusMessageID: string | null;
-  searchText: string;
-  focusComposerToken: number;
-  statusText: string | null;
-  toast: NoticeRow | null;
-  /** The standing "Always allow" rules; null until the daemon has answered. */
-  approvalRules: ApprovalRuleInfo[] | null;
-  /** Counts the daemon's "already running" refusals of Run now, so a button can stand down. */
-  runRefusals: number;
-  /** A message the daemon refused as too long: its text goes back to the composer. */
-  rejectedDraft: { token: number; text: string; message: string } | null;
-}
-
-export interface AppModelEnv {
-  settingsStore?: SettingsStore;
-  makeTransport?: () => FrameTransport;
-  healthFetch?: (url: string) => Promise<HealthReport>;
-  notifier?: NotificationBridge;
-  healthPollMs?: number;
-}
-
-const PRIMARY_AGENTS = new Set(["ea", "agni"]);
 /** The product's own name: the tab title before the roster is known. Never a bot's name. */
 const APP_TITLE = "Agni";
-
-export function isPrimaryAgent(agent: AgentInfo | null | undefined): boolean {
-  return !agent || PRIMARY_AGENTS.has(agent.id);
-}
-
-function seedAgents(): AgentInfo[] {
-  return [{ id: "ea", name: "New Bot", color: "#f0b95a", tools: [] }];
-}
-
-/** What the "+" button makes: an agent with a placeholder name, not a form. */
-const NEW_AGENT_NAME = "New bot";
-const NEW_AGENT_PROMPT = `You are {name}, an agent {user} just created in the app. You have no job description yet.
-
-Open with one short line, then ask what you should do for them.
-You cannot rename yourself. If they want to call you something else, tell them to change your name in your profile (the name at the top of this chat) and carry on.
-When they describe your job, call update_agent with a short role and a prompt written as instructions to yourself.
-Until then, answer what is asked, briefly.`;
-
-/** The slug the daemon derives from a name, so both sides land on one id. */
-function agentSlug(name: string): string {
-  return name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40) || "agent";
-}
-
-/**
- * The name and id for the next placeholder bot: "New bot", then "New bot 2",
- * and so on past any the roster already has — including ones renamed since,
- * whose id still holds the slot.
- */
-export function nextNewAgent(known: readonly AgentInfo[]): { id: string; name: string } {
-  const takenIDs = new Set(known.map((agent) => agent.id));
-  const takenNames = new Set(known.map((agent) => agent.name.trim().toLowerCase()));
-  let name = NEW_AGENT_NAME;
-  for (let n = 2; takenIDs.has(agentSlug(name)) || takenNames.has(name.toLowerCase()); n += 1) {
-    name = `${NEW_AGENT_NAME} ${n}`;
-  }
-  return { id: agentSlug(name), name };
-}
+/** Typing frames: `true` at most this often while typing goes on; `false` after this much quiet. */
+const TYPING_REFRESH_MS = 3000;
+const TYPING_IDLE_MS = 1000;
+/** What a send that finds no connection says, in the composer and on the failed message alike. */
+const OFFLINE_REFUSAL = "Not connected. Your draft was kept; send it again once you are reconnected.";
+/** The same refusal for "Hand off to AI", which has no draft to keep. */
+const HANDOFF_OFFLINE_REFUSAL = "Not connected. The task was not handed off; try again once you are reconnected.";
 
 function notice(kind: NoticeKind, title: string, body: string, threadID: string | null = null): NoticeRow {
   return {
@@ -222,6 +103,7 @@ export class AppModel {
   private agents: AgentInfo[] = seedAgents();
   /** The daemon has sent the real roster; until then the seed row is only a stand-in. */
   private rosterKnown = false;
+  private refusal: string | null = null;
   /** Hidden specialists are absent from the sidebar but still addressable. */
   private mentionAgents: AgentInfo[] = seedAgents();
   /** The channel this client is bound to, when it bound itself to an agent. */
@@ -240,6 +122,14 @@ export class AppModel {
   private taskActivity: AppSnapshot["taskActivity"] = null;
   private taskView: AppSnapshot["taskView"] = { kind: "today" };
   private pendingAgentRoute: string | null = null;
+  /** Where Settings was opened from, so closing it goes back there. */
+  private settingsReturn: Route | null = null;
+  /** Where the address bar is, as a route. */
+  private route: Route = { kind: "root" };
+  private settingsSection: SettingsSection | null = null;
+  private groups: ChannelInfo[] | null = null;
+  /** The daemon has answered `task.list`, so a task it does not list does not exist. */
+  private tasksKnown = false;
 
   private isAddingProvider = false;
   private providerAddError: string | null = null;
@@ -312,6 +202,9 @@ export class AppModel {
   private healthTimer: ReturnType<typeof setInterval> | null = null;
   private toastTimer: ReturnType<typeof setTimeout> | null = null;
   private typingTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The channel the last `user.typing: true` went to, until `false` is sent; and when. */
+  private typingChannel: string | null = null;
+  private typingSentAt = 0;
   private started = false;
 
   private readonly settingsStore: SettingsStore;
@@ -399,6 +292,12 @@ export class AppModel {
       isDebugPresented: this.isDebugPresented,
       isTasksPresented: this.isTasksPresented,
       isSettingsPresented: this.isSettingsPresented,
+      settingsSection: this.settingsSection,
+      route: this.route,
+      notFound: this.notFound(),
+      routePending: this.routePending(),
+      groups: this.groups,
+      routeTaskID: this.route.kind === "task" ? this.route.id : null,
       isAgentSwitcherPresented: this.isAgentSwitcherPresented,
       isNewChatPresented: this.isNewChatPresented,
       isSidebarPresented: this.isSidebarPresented,
@@ -423,7 +322,8 @@ export class AppModel {
     for (const listener of this.listeners) listener();
     if (typeof document !== "undefined") {
       // The seed bot's placeholder name must not flash in the tab before the roster arrives.
-      document.title = this.rosterKnown ? (this.agent?.name ?? APP_TITLE) : APP_TITLE;
+      const groupName = this.route.kind === "group" ? this.groups?.find((group) => group.id === (this.route as { id: string }).id)?.name : undefined;
+      document.title = this.notFound() ? `Not found · ${APP_TITLE}` : this.route.kind === "group" ? (groupName ?? APP_TITLE) : this.rosterKnown ? (this.agent?.name ?? APP_TITLE) : APP_TITLE;
     }
   }
 
@@ -438,7 +338,7 @@ export class AppModel {
       return;
     }
     this.screen = this.canConnect ? "chat" : "pairing";
-    if (this.canConnect && typeof window !== "undefined" && window.location.pathname === "/") this.navigatePath(agentPath(this.agent));
+    if (this.canConnect && typeof window !== "undefined" && window.location.pathname === "/") this.goTo({ kind: "agent", id: this.agent?.id ?? "ea" }, "replace");
     this.publish();
     if (this.canConnect) this.connect();
   }
@@ -484,7 +384,7 @@ export class AppModel {
     this.settings = { ...this.settings, url: pageOrigin() ?? this.settings.url };
     this.settingsStore.save(this.settings);
     this.screen = "chat";
-    if (typeof window !== "undefined" && window.location.pathname === "/") this.navigatePath(agentPath(this.agent));
+    if (typeof window !== "undefined" && window.location.pathname === "/") this.goTo({ kind: "agent", id: this.agent?.id ?? "ea" }, "replace");
     this.connect();
   }
 
@@ -510,22 +410,57 @@ export class AppModel {
 
   private onLocationChange = (): void => { this.applyLocationRoute(true); };
 
+  /** Read the address bar: back, forward, a reload, or a link opened in this tab. */
   private applyLocationRoute(refresh: boolean): void {
     if (typeof window === "undefined") return;
-    const parts = decodeURIComponent(window.location.pathname).split("/").filter(Boolean);
-    if (parts[0] === "tasks") {
-      this.isTasksPresented = true;
-      const kind = parts[1];
-      this.taskView = kind === "inbox" ? { kind: "inbox" } : kind === "upcoming" ? { kind: "upcoming" } : kind === "calendar" ? { kind: "calendar" } : kind === "completed" ? { kind: "completed" } : kind === "collection" && parts[2] ? { kind: "list", listID: parts[2] } : { kind: "today" };
-      this.pendingAgentRoute = null;
+    const route = parseRoute(window.location.pathname);
+    this.route = route;
+    this.isTasksPresented = route.kind === "tasks" || route.kind === "task";
+    this.isSettingsPresented = route.kind === "settings";
+    this.settingsSection = route.kind === "settings" ? route.section : null;
+    this.pendingAgentRoute = route.kind === "agent" ? route.id : null;
+    // A task address says nothing about the list behind it: keep the view the owner was on.
+    if (route.kind === "tasks") this.taskView = route.view;
+    else if (route.kind !== "task") this.taskView = { kind: "today" };
+    if (route.kind === "tasks" || route.kind === "task") {
       if (refresh) this.refreshTasks();
-    } else {
-      this.isTasksPresented = false;
-      this.taskView = { kind: "today" };
-      this.pendingAgentRoute = parts[0] === "agent" ? parts[1] ?? null : null;
-      if (this.pendingAgentRoute) this.syncAgentRoute();
+    } else if (route.kind === "group") {
+      if (refresh) this.refreshGroups();
+    } else if (this.pendingAgentRoute) {
+      this.syncAgentRoute();
     }
     this.publish();
+  }
+
+  /** Does the address name something that exists? Says so once the daemon could have said otherwise. */
+  private resolution(): RouteResolution {
+    return resolveRoute(this.route, {
+      rosterKnown: this.rosterKnown,
+      agents: [...this.mentionAgents, ...this.agents],
+      groups: this.groups,
+      tasks: this.tasks,
+      tasksKnown: this.tasksKnown,
+    });
+  }
+
+  private notFound(): AppSnapshot["notFound"] {
+    const found = this.resolution();
+    return found.kind === "missing" ? { what: found.what, path: found.path } : null;
+  }
+
+  /**
+   * A bot address the held roster cannot place yet (a fresh load, or a browser that was away past the
+   * replay window) shows loading. Falling back to the seed bot's thread would put a message in the wrong chat.
+   */
+  private routePending(): boolean {
+    return this.screen === "chat" && this.route.kind === "agent" && this.resolution().kind === "pending";
+  }
+
+  /** Is the open conversation the bot the address names? A message must only go where the address points. */
+  private conversationMatchesAddress(): boolean {
+    if (this.route.kind !== "agent") return true;
+    const named = agentForRoute(this.route.id, [...this.mentionAgents, ...this.agents]);
+    return named !== null && named.id === this.conversation.agentID;
   }
 
   private syncAgentRoute(): void {
@@ -536,9 +471,19 @@ export class AppModel {
     this.selectAgent(agent, false);
   }
 
-  private navigatePath(path: string): void {
+  /** Move the address bar: a new history entry by default, or replace the current one. */
+  private navigatePath(path: string, mode: "push" | "replace" = "push", state: Record<string, unknown> = {}): void {
     if (typeof window === "undefined" || window.location.pathname === path) return;
-    window.history.pushState({}, "", path);
+    if (mode === "replace") window.history.replaceState(state, "", path);
+    else window.history.pushState(state, "", path);
+  }
+
+  /** Go to a screen: the address and the route move together. */
+  private goTo(route: Route, mode: "push" | "replace" = "push", state: Record<string, unknown> = {}): void {
+    this.route = route;
+    // An address the owner has since left must not pull the page back when a bot of that name appears.
+    this.pendingAgentRoute = null;
+    this.navigatePath(routePath(route), mode, state);
   }
 
   get canConnect(): boolean {
@@ -651,6 +596,8 @@ export class AppModel {
     this.configuredProviders = [];
     this.jobs = [];
     this.tasks = [];
+    this.tasksKnown = false;
+    this.groups = null;
     this.plugins = [];
     this.settings = { ...this.settings, lastSeq: 0 };
     this.settingsStore.save(this.settings);
@@ -741,7 +688,7 @@ export class AppModel {
   selectTaskView(view: AppSnapshot["taskView"]): void {
     this.taskView = view;
     this.isTasksPresented = true;
-    this.navigatePath(view.kind === "list" ? `/tasks/collection/${encodeURIComponent(view.listID ?? "lst_inbox")}` : view.kind === "today" ? "/tasks" : `/tasks/${view.kind}`);
+    this.goTo({ kind: "tasks", view });
     if (view.kind === "today" || view.kind === "inbox" || view.kind === "list") this.refreshTasks();
     this.publish();
   }
@@ -860,10 +807,17 @@ export class AppModel {
     void connection.send({ type: "task.update", taskID: task.id, action: "edit", ...rest, ...(dueAt !== undefined ? { dueAt: dueAt?.toISOString() ?? null } : {}), ...(reminderAt !== undefined ? { reminderAt: reminderAt?.toISOString() ?? null } : {}), ...(deadlineAt !== undefined ? { deadlineAt: deadlineAt?.toISOString() ?? null } : {}) }).catch(() => undefined);
   }
 
-  handoffTask(task: TaskInfo, agent: AgentInfo): void {
-    this.editTask(task, { workflowStatus: "in_progress", progressNote: `Handed off to ${agent.name}` });
+  handoffTask(task: TaskInfo, agent: AgentInfo): boolean {
     this.selectAgent(agent);
-    this.send(`Please work on this task for me. Task ID: ${task.id}\nTitle: ${task.title}${task.description ? `\nDetails: ${task.description}` : ""}${task.dueAt ? `\nDue: ${task.dueAt}` : ""}${task.deadlineAt ? `\nDeadline: ${task.deadlineAt}` : ""}${task.labels?.length ? `\nLabels: ${task.labels.join(", ")}` : ""}\nUpdate the task's progressNote as you work so I can see what you are doing, add relevant labels if needed, and move its workflow status to AI review when your work is ready. Tell me what you did and what still needs my review.`);
+    const sent = this.send(`Please work on this task for me. Task ID: ${task.id}\nTitle: ${task.title}${task.description ? `\nDetails: ${task.description}` : ""}${task.dueAt ? `\nDue: ${task.dueAt}` : ""}${task.deadlineAt ? `\nDeadline: ${task.deadlineAt}` : ""}${task.labels?.length ? `\nLabels: ${task.labels.join(", ")}` : ""}\nUpdate the task's progressNote as you work so I can see what you are doing, add relevant labels if needed, and move its workflow status to AI review when your work is ready. Tell me what you did and what still needs my review.`);
+    if (!sent) {
+      // `send` raises no notice of its own; say why here. A hand-off has no draft, so its wording differs.
+      if (this.refusal) this.showToast(notice("failure", "Not sent", this.refusal === OFFLINE_REFUSAL ? HANDOFF_OFFLINE_REFUSAL : this.refusal));
+      return false;
+    }
+    // Only a message that went makes the task "handed off".
+    this.editTask(task, { workflowStatus: "in_progress", progressNote: `Handed off to ${agent.name}` });
+    return true;
   }
 
   /**
@@ -916,7 +870,22 @@ export class AppModel {
     return null;
   }
 
+  /**
+   * Why the last `send` answered false, in words for the owner. Whoever called `send` shows it once, where
+   * the owner is looking; `send` raises no toast of its own. `null`: the last send went, or there was
+   * nothing to send.
+   */
+  sendRefusal(): string | null {
+    return this.refusal;
+  }
+
   send(text: string, attachments: AttachmentInfo[] = []): boolean {
+    this.refusal = null;
+    if (!this.conversationMatchesAddress()) {
+      // No toast: whoever called `send` shows this once, where the owner is looking (see `sendRefusal`).
+      this.refusal = "This chat is still loading. Your draft was kept; send it again in a moment.";
+      return false;
+    }
     const content = text.trim() ? text : (attachments.length ? "Please review the attached files." : "");
     const trimmed = content.trim();
     if (trimmed.length === 0) return false;
@@ -927,16 +896,19 @@ export class AppModel {
     const mention = this.resolveMention(trimmed);
     if (mention && mention.agent.id !== this.conversation.agentID) this.selectAgent(mention.agent);
     const outgoing = mention ? mention.text : content;
-    if (outgoing.length === 0) return false;
+    if (outgoing.length === 0) {
+      // Only an address: the chat is open, there is nothing to say yet.
+      this.refusal = `Add a message after @${mention?.agent.name ?? "the name"}. Your draft was kept.`;
+      return false;
+    }
     const localID = this.conversation.appendLocalUserMessage(outgoing, new Date(), attachments);
     this.lastSent = { localID, text: content };
     this.publish();
     const connection = this.connection;
     if (!connection || !isReady(this.connectionState)) {
-      this.conversation.markLocalFailure(localID, "Not connected — this message was not sent.");
-      this.showToast(
-        notice("failure", "Not connected", "Reconnecting. Your message was kept in the list but was not sent."),
-      );
+      // One wording, shown by the caller (the composer, or the hand-off toast) and on the failed echo.
+      this.refusal = OFFLINE_REFUSAL;
+      this.conversation.markLocalFailure(localID, OFFLINE_REFUSAL);
       this.publish();
       return false;
     }
@@ -1022,7 +994,7 @@ export class AppModel {
       body: JSON.stringify({ ids: attachments.map((file) => file.id) }),
     });
     if (expectedAgentID && this.conversation.agentID !== expectedAgentID) throw new Error("The selected agent changed. Review your draft and send it again.");
-    if (!this.send(text, attachments)) throw new Error("Not connected. Your draft has been kept; try again after reconnecting.");
+    if (!this.send(text, attachments)) throw new Error(this.refusal ?? OFFLINE_REFUSAL);
   }
 
   renameAgent(name: string, agentID = "ea"): void {
@@ -1041,17 +1013,37 @@ export class AppModel {
     void connection.send({ type: "agent.profile", agentId: agentID, ...changes }).catch(() => undefined);
   }
 
+  /**
+   * Tell the server the owner is typing. Called on every keystroke, so it speaks only when something
+   * changes: `true` when typing starts and again at most every 3 s while it goes on, `false` once when
+   * it stops (a second of quiet, a cleared field, a send) and never twice in a row.
+   */
   updateTypingState(isTyping: boolean): void {
     if (this.typingTimer !== null) clearTimeout(this.typingTimer);
     this.typingTimer = null;
     const connection = this.connection;
+    if (!isTyping) {
+      const channelID = this.typingChannel;
+      this.typingChannel = null;
+      // Said `true` to a channel: say `false` to that same channel, even if the bot has changed since.
+      if (channelID === null || !connection || !isReady(this.connectionState)) return;
+      void connection.send({ type: "user.typing", channelId: channelID, isTyping: false }).catch(() => undefined);
+      return;
+    }
     if (!connection || !isReady(this.connectionState)) return;
     // The browser-local preference decides whether we tell the server at all.
-    if (isTyping && !this.preferences.typingIndicator) return;
+    if (!this.preferences.typingIndicator) return;
     const channelID = this.conversation.agentID === "ea" ? "main" : `dm:${this.conversation.agentID}`;
-    void connection.send({ type: "user.typing", channelId: channelID, isTyping }).catch(() => undefined);
-    if (!isTyping) return;
-    this.typingTimer = setTimeout(() => this.updateTypingState(false), 1000);
+    const now = Date.now();
+    if (this.typingChannel !== channelID || now - this.typingSentAt >= TYPING_REFRESH_MS) {
+      if (this.typingChannel !== null && this.typingChannel !== channelID) {
+        void connection.send({ type: "user.typing", channelId: this.typingChannel, isTyping: false }).catch(() => undefined);
+      }
+      this.typingChannel = channelID;
+      this.typingSentAt = now;
+      void connection.send({ type: "user.typing", channelId: channelID, isTyping: true }).catch(() => undefined);
+    }
+    this.typingTimer = setTimeout(() => this.updateTypingState(false), TYPING_IDLE_MS);
   }
 
   stopTurn(): void {
@@ -1133,13 +1125,20 @@ export class AppModel {
     // Picking an agent from anywhere — the roster, the switcher, the new-chat
     // field — means the conversation is the surface again.
     this.closeSidebar();
+    const leavingSettings = this.isSettingsPresented;
     this.isTasksPresented = false;
-    if (updateRoute) this.navigatePath(agentPath(agent));
+    this.isSettingsPresented = false;
+    this.settingsSection = null;
+    this.settingsReturn = null;
+    // Settings is its own history entry: the bot takes its place, so Back does not reopen Settings.
+    if (updateRoute) this.goTo({ kind: "agent", id: agent.id }, leavingSettings ? "replace" : "push");
     this.isNewChatPresented = false;
     if (agent.id === this.conversation.agentID && this.conversation.conversationID !== null) {
       this.reloadConversation();
       return;
     }
+    // The channel the daemon bound the old conversation to belongs to that bot.
+    this.boundChannelID = null;
     this.conversation = new Conversation(agent.id);
     const agentThread = this.threads.find((thread) => thread.agentID === agent.id);
     if (agentThread) this.unread.delete(agentThread.id);
@@ -1398,9 +1397,9 @@ export class AppModel {
     if (this.isTasksPresented) {
       this.isSidebarPresented = false;
       this.refreshTasks();
-      this.navigatePath("/tasks");
+      this.goTo({ kind: "tasks", view: this.taskView });
     } else {
-      this.navigatePath(agentPath(this.agent));
+      this.goTo({ kind: "agent", id: this.agent?.id ?? "ea" });
     }
     this.publish();
   }
@@ -1408,17 +1407,78 @@ export class AppModel {
   closeTasks(): void {
     if (!this.isTasksPresented) return;
     this.isTasksPresented = false;
-    this.navigatePath(agentPath(this.agent));
+    this.goTo({ kind: "agent", id: this.agent?.id ?? "ea" });
     this.publish();
   }
 
-  openSettings(): void {
+  /**
+   * The Tasks screen opened a task (`id`) or went back to its list (`null`): the address follows.
+   * A task opened inside the app adds a marked history entry, and closing it steps back over that
+   * entry, so Back never reopens a task that was just closed. A task that came from a link has no
+   * such entry behind it: closing replaces the address instead.
+   */
+  openTaskRoute(id: string | null): void {
+    this.isTasksPresented = true;
+    if (id) {
+      this.goTo({ kind: "task", id }, "push", { agniTask: true });
+    } else if (this.route.kind === "task" && typeof window !== "undefined" && (window.history.state as { agniTask?: boolean } | null)?.agniTask === true) {
+      // We pushed this entry: step back over it, and the address bar returns to the list by itself.
+      this.route = { kind: "tasks", view: this.taskView };
+      window.history.back();
+    } else {
+      this.goTo({ kind: "tasks", view: this.taskView }, "replace");
+    }
+    this.publish();
+  }
+
+  /** Settings is one history entry: Back leaves it, however many sections were visited. */
+  openSettings(section: SettingsSection | null = null): void {
+    this.settingsReturn = this.route.kind === "settings" || this.route.kind === "not-found" ? null : this.route;
     this.isSettingsPresented = true;
+    this.settingsSection = section;
+    this.goTo({ kind: "settings", section }, "push", { agniOverlay: "settings" });
+    this.publish();
+  }
+
+  /** Change section in place; the address changes, the history does not grow. */
+  selectSettingsSection(section: SettingsSection): void {
+    if (!isSettingsSection(section)) return;
+    this.settingsSection = section;
+    this.goTo({ kind: "settings", section }, "replace", typeof window !== "undefined" ? (window.history.state ?? {}) : {});
     this.publish();
   }
 
   closeSettings(): void {
+    if (!this.isSettingsPresented) return;
     this.isSettingsPresented = false;
+    this.settingsSection = null;
+    const cameFrom = this.settingsReturn ?? { kind: "agent" as const, id: this.agent?.id ?? "ea" };
+    this.settingsReturn = null;
+    if (typeof window !== "undefined" && (window.history.state as { agniOverlay?: string } | null)?.agniOverlay === "settings") {
+      // We pushed the Settings entry: step back over it, and the address bar returns by itself.
+      this.route = cameFrom;
+      window.history.back();
+    } else {
+      this.goTo(cameFrom, "replace");
+    }
+    this.publish();
+  }
+
+  /** Ask the daemon for its group channels (answered by `channel.list.ok`). */
+  refreshGroups(): void {
+    const connection = this.connection;
+    if (!connection || !isReady(this.connectionState)) return;
+    void connection.send({ type: "channel.list" }).catch(() => undefined);
+  }
+
+  /** Open a group channel's page. */
+  openGroup(id: string): void {
+    this.closeSidebar();
+    this.isTasksPresented = false;
+    this.isSettingsPresented = false;
+    this.isNewChatPresented = false;
+    this.goTo({ kind: "group", id });
+    this.refreshGroups();
     this.publish();
   }
 
@@ -1599,6 +1659,7 @@ export class AppModel {
             this.refreshThreadList();
             this.refreshJobs();
             this.refreshTasks();
+            this.refreshGroups();
             this.refreshPlugins();
             this.refreshAppearance();
             if (this.preferences.push) this.syncPush();
@@ -1641,6 +1702,9 @@ export class AppModel {
         return;
 
       case "durableReloadRequired": {
+        // The roster is not forgotten here. The daemon releases its held frames (the fresh `agents.update`
+        // among them) after a 1 s timer, which can be before this event's error frame arrives, and nothing
+        // sends the roster twice. A browser that never had one still waits for it: `rosterKnown` is false.
         // The daemon could not replay. Only a restart kills what it was running; a replay log that
         // merely moved on while this browser slept leaves the running turn alive and streaming.
         const deadTurn = this.conversation.inFlightTurnID;
@@ -1861,7 +1925,10 @@ export class AppModel {
         (frame as { runningTurn?: { turnID: string; threadID: string; agentID: string } }).runningTurn ?? null,
       );
       // History does not say how a turn ended; put back the "didn't finish" marks this browser saw.
-      this.conversation.restoreStops(loadStops());
+      const stops = loadStops();
+      this.conversation.restoreStops(stops);
+      // A reply stopped before any text has no history row to re-mark: put its marker back.
+      this.conversation.messages = insertStoppedTurns(this.conversation.messages, stops);
       if (this.conversation.threadID === null && this.openAskedFor !== frame.conversationID) {
         const connection = this.connection;
         if (connection && isReady(this.connectionState)) {
@@ -1897,7 +1964,20 @@ export class AppModel {
       return;
     }
 
+    if (frame.type === "channel.list.ok") {
+      this.groups = frame.channels;
+      this.publish();
+      return;
+    }
+
+    if (frame.type === "channel.created") {
+      this.groups = [...(this.groups ?? []).filter((group) => group.id !== frame.channel.id), frame.channel];
+      this.publish();
+      return;
+    }
+
     if (frame.type === "task.list.ok") {
+      this.tasksKnown = true;
       this.tasks = frame.tasks;
       this.taskLists = frame.lists ?? this.taskLists;
       this.publish();
@@ -2358,21 +2438,4 @@ export class AppModel {
 
 export type { ChatMessage };
 
-/**
- * A bot's address is its id: it never changes when the bot is renamed, and no
- * two bots share one. (Names change and can collide, which left `/agent/new-bot`
- * pointing at the wrong bot after a rename or a second "New bot".)
- */
-export function agentPath(agent: AgentInfo | null): string {
-  return `/agent/${encodeURIComponent(agent?.id ?? "ea")}`;
-}
-
-/** The bot a `/agent/<key>` address names: by id, else by a name nobody else shares (old links). */
-export function agentForRoute(key: string, roster: readonly AgentInfo[]): AgentInfo | null {
-  const wanted = key.toLowerCase();
-  const byID = roster.find((agent) => agent.id.toLowerCase() === wanted);
-  if (byID) return byID;
-  const slug = (name: string) => name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-  const byName = roster.filter((agent) => slug(agent.name) === wanted);
-  return byName.length === 1 ? (byName[0] ?? null) : null;
-}
+export { agentForRoute, agentPath };

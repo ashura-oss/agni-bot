@@ -56,6 +56,7 @@ afterEach(() => {
   cleanup();
   localStorage.clear();
   SecretStore.memoryToken = null;
+  window.history.replaceState({}, "", "/");
   vi.restoreAllMocks();
 });
 

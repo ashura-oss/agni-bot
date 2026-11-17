@@ -1,0 +1,354 @@
+/* Pairing --------------------------------------------------------------- */
+
+.pairing {
+  display: grid;
+  flex: 1;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  overflow-y: auto;
+  padding: 28px;
+  background: var(--canvas);
+}
+
+.pairing-card {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  width: min(560px, 100%);
+  margin: auto;
+  padding: 24px;
+  border: 1px solid var(--hairline);
+  border-radius: 18px;
+  background: var(--surface);
+}
+
+.pairing-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.pairing-heading-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.pairing-heading h1 {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 600;
+}
+
+.pairing-heading p {
+  margin: 0;
+  color: var(--ink-secondary);
+  font-size: var(--text-body);
+}
+
+.pairing-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.pairing-step {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.step-heading {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: var(--text-row-title);
+  font-weight: 500;
+}
+
+.step-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: rgb(255 49 70 / 12%);
+  color: var(--ember);
+  font-family: var(--font-mono);
+  font-size: var(--text-machine);
+}
+
+.pairing-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  color: var(--ink-secondary);
+  font-size: var(--text-meta);
+  line-height: 1.45;
+}
+
+/* The icon keeps its size when the text beside it wraps. */
+.pairing-hint > svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.pairing-command {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: var(--canvas);
+}
+
+.pairing-command code {
+  flex: 1;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: var(--text-code);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pairing-command .btn {
+  border: none;
+  background: transparent;
+  color: var(--ink-secondary);
+}
+
+.pairing-note {
+  color: var(--ink-tertiary);
+  font-size: var(--text-caption);
+  line-height: 1.45;
+}
+
+.pairing-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: #f0a04b;
+  font-size: var(--text-meta);
+  line-height: 1.45;
+}
+
+.pairing-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-secondary);
+  font-size: var(--text-meta);
+}
+
+.pairing-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.pairing-actions .spacer {
+  flex: 1;
+}
+
+/* Dialogs --------------------------------------------------------------- */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(0 0 0 / 55%);
+  backdrop-filter: blur(3px);
+}
+
+.dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: min(380px, 100%);
+  padding: 20px;
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--shadow-card);
+}
+
+.dialog.wide {
+  width: min(440px, 100%);
+}
+
+.dialog h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.dialog p {
+  margin: 0;
+  color: var(--ink-secondary);
+  font-size: var(--text-meta);
+  line-height: 1.45;
+}
+
+.dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.dialog-head h2 {
+  font-size: 16px;
+}
+
+.dialog-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.dialog-actions .spacer {
+  flex: 1;
+}
+
+.switcher-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0 -8px;
+}
+
+.switcher-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 16px;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+}
+
+.switcher-row:hover {
+  background: rgb(255 255 255 / 5%);
+}
+
+.switcher-row-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.switcher-name {
+  font-size: var(--text-row-title);
+  font-weight: 500;
+}
+
+.switcher-model {
+  color: var(--ink-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--text-machine);
+}
+
+.switcher-check {
+  color: var(--ember);
+}
+
+/* Toast ----------------------------------------------------------------- */
+
+.toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  z-index: 90;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: min(420px, calc(100vw - 32px));
+  padding: 12px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--card-radius);
+  background: var(--surface-raised);
+  box-shadow: 0 18px 40px rgb(0 0 0 / 35%);
+  transform: translateX(-50%);
+  animation: toast-in 220ms cubic-bezier(0.2, 0.9, 0.3, 1);
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 12px);
+  }
+}
+
+.toast-icon {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.toast-icon.failure {
+  color: #f0a04b;
+}
+
+.toast-icon.info {
+  color: var(--ember);
+}
+
+.toast-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.toast-title {
+  font-size: var(--text-row-title);
+  font-weight: 500;
+}
+
+.toast-body {
+  color: var(--ink-secondary);
+  font-size: var(--text-meta);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.toast-close {
+  width: 20px;
+  height: 20px;
+}
+
+/* Reduced motion --------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .assistant-bubble {
+    animation: none;
+  }
+}
+
+/* Narrow windows -------------------------------------------------------- */
+
+@media (max-width: 900px) {
+  :root {
+    --sidebar-width: 220px;
+    --inspector-width: 280px;
+  }
+}
+
+@media (max-width: 720px) {
+  /* The roster and the inspector become drawers; the phone layout at the end
+     of this file styles them in full. */
+  .chat-main {
+    position: relative;
+  }
+}
+

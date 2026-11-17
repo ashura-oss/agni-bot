@@ -53,8 +53,11 @@ export function PairingView() {
             <div className="step-heading">Enter the pairing code</div>
             <p className="pairing-hint">
               <Info size={13} aria-hidden="true" />
-              On the machine running Agni, run <code>agni open</code> (or <code>bun run open</code> in
-              the repo) — it opens this page already paired, or shows a code to type here.
+              {/* One flex item for the text: loose text and <code> would each be their own column. */}
+              <span>
+                On the machine running Agni, run <code>agni open</code> (or <code>bun run open</code> in
+                the repo) — it opens this page already paired, or shows a code to type here.
+              </span>
             </p>
             <input
               className="text-input"

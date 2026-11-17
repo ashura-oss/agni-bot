@@ -1,0 +1,58 @@
+/* Phone baseline (375px): the shell and the conversation. ---------------------
+ * Loaded after every other slice so it wins over the V3 desktop overrides,
+ * which set 34px buttons and 13px fields on every width. Only phone widths
+ * change; nothing here applies above 720px.
+ *
+ * Checked at 375px:
+ *  - no horizontal scroll on the page, the drawer or the transcript
+ *  - controls in the header, the roster bar and the composer have a 44px hit area
+ *  - text fields are 16px or larger, so iOS does not zoom on focus
+ */
+@media (max-width: 720px) {
+  .thread-header > .icon-btn,
+  .sidebar-bar .icon-btn,
+  .route-state-bar .icon-btn,
+  .new-chat-surface .icon-btn,
+  .sidebar-owner {
+    width: var(--touch-target);
+    height: var(--touch-target);
+  }
+
+  .connect-apps,
+  .route-state-body .btn {
+    min-height: var(--touch-target);
+  }
+
+  .sidebar-search input,
+  .new-chat-input {
+    font-size: 16px;
+  }
+
+  /* The composer's round buttons keep their look and get the full 44px hit area. */
+  .composer-row > .composer-plus,
+  .composer-send,
+  .composer-stop {
+    position: relative;
+  }
+
+  .composer-row > .composer-plus::after,
+  .composer-send::after,
+  .composer-stop::after {
+    content: "";
+    position: absolute;
+    inset: -4px;
+  }
+
+  .transcript,
+  .transcript-inner,
+  .prose {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .prose pre,
+  .prose table {
+    max-width: 100%;
+    overflow-x: auto;
+  }
+}

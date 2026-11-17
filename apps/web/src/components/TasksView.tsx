@@ -3,7 +3,30 @@ import { CalendarDays, ChevronLeft, ChevronRight, Check, Plus, RefreshCw, X, Mic
 import { format, type TaskInfo } from "@agni/client";
 import { useAppModel, useAppSnapshot } from "../state/use-app-model";
 
-export function TasksView({ onToggleSidebar, sidebarCollapsed = false }: { onToggleSidebar?: () => void; sidebarCollapsed?: boolean }) {
+/**
+ * Escape closes the sheet that is open, not the whole Tasks screen. RootView closes the screen from a
+ * window listener; this runs first, on the document, and stops the event there.
+ */
+function useEscapeClose(onClose: () => void) {
+  const latest = useRef(onClose);
+  latest.current = onClose;
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      latest.current();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, []);
+}
+
+/**
+ * `openTaskID` is the task the address names (`/task/<id>`), or null on `/tasks`. The address is the
+ * source of truth for which detail is open: opening or closing one asks the model to move the address,
+ * and Back, Forward and a reload arrive here as a new `openTaskID`.
+ */
+export function TasksView({ onToggleSidebar, sidebarCollapsed = false, openTaskID = null }: { onToggleSidebar?: () => void; sidebarCollapsed?: boolean; openTaskID?: string | null }) {
   const model = useAppModel();
   const snapshot = useAppSnapshot();
   useEffect(() => {
@@ -14,7 +37,14 @@ export function TasksView({ onToggleSidebar, sidebarCollapsed = false }: { onTog
   const [calendarDay, setCalendarDay] = useState<Date | null>(null);
   const [creatingFor, setCreatingFor] = useState<string | null | undefined>(undefined);
   const [activityTask, setActivityTask] = useState<TaskInfo | null>(null);
-  const [detailTask, setDetailTask] = useState<TaskInfo | null>(null);
+  const [detailID, setDetailID] = useState<string | null>(openTaskID);
+  // The address moved (a deep link, Back, Forward): the sheet follows it. A list refresh does not
+  // change `openTaskID`, so it never reopens a sheet the owner closed.
+  useEffect(() => { setDetailID(openTaskID); }, [openTaskID]);
+  // Looked up live, so a deep link opens as soon as the task list has the task.
+  const detailTask = detailID ? snapshot.tasks.find((task) => task.id === detailID) ?? null : null;
+  const openDetail = (task: TaskInfo) => { setDetailID(task.id); model.openTaskRoute(task.id); };
+  const closeDetail = () => { setDetailID(null); model.openTaskRoute(null); };
   const open = snapshot.tasks.filter((task) => task.status !== "done");
   const today = new Date();
   const todayTasks = open.filter((task) => taskSchedule(task) && dateKey(new Date(taskSchedule(task)!)) <= dateKey(today));
@@ -90,7 +120,7 @@ export function TasksView({ onToggleSidebar, sidebarCollapsed = false }: { onTog
             </div>
             <div className="calendar-day-tasks">
               <div className="tasks-group-heading"><h2>{calendarDay ? calendarDay.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" }) : "Tasks this month"}</h2><span>{calendarTasks.length}</span></div>
-              {calendarTasks.length ? <TaskList tasks={calendarTasks} onActivity={openActivity} onSubtask={(task) => setCreatingFor(task.id)} onOpenDetail={setDetailTask} /> : <div className="tasks-empty-inline">No tasks scheduled for this date.</div>}
+              {calendarTasks.length ? <TaskList tasks={calendarTasks} onActivity={openActivity} onSubtask={(task) => setCreatingFor(task.id)} onOpenDetail={openDetail} /> : <div className="tasks-empty-inline">No tasks scheduled for this date.</div>}
             </div>
           </section>
         ) : (
@@ -99,17 +129,17 @@ export function TasksView({ onToggleSidebar, sidebarCollapsed = false }: { onTog
             {visibleTasks.length === 0 ? (
               <div className="tasks-empty"><div className="tasks-empty-mark"><Check size={23} /></div><h2>{view === "today" ? "No tasks today" : view === "completed" ? "Nothing completed yet" : view === "upcoming" ? "Nothing scheduled" : "This list is empty"}</h2><p>{view === "completed" ? "Finished tasks will collect here." : "Add a task here or ask an agent to keep track of it."}</p>{view !== "completed" ? <button type="button" className="btn primary" onClick={() => setCreatingFor(null)}><Plus size={15} /> Add task</button> : null}</div>
             ) : view === "today" ? <>
-              {overdueTasks.length ? <TaskSection title="Overdue" tasks={overdueTasks} onActivity={openActivity} onSubtask={(task) => setCreatingFor(task.id)} onOpenDetail={setDetailTask} /> : null}
-              {dueTodayTasks.length ? <TaskSection title="Today" tasks={dueTodayTasks} onActivity={openActivity} onSubtask={(task) => setCreatingFor(task.id)} onOpenDetail={setDetailTask} /> : null}
-            </> : view === "upcoming" ? upcomingGroups.map((group) => <TaskSection key={group.key} title={format.dayTitle(new Date(`${group.key}T12:00:00`))} tasks={group.tasks} onActivity={openActivity} onSubtask={(task) => setCreatingFor(task.id)} onOpenDetail={setDetailTask} />)
-              : <TaskList tasks={visibleTasks} completed={view === "completed"} onActivity={openActivity} onSubtask={(task) => setCreatingFor(task.id)} onOpenDetail={setDetailTask} />}
+              {overdueTasks.length ? <TaskSection title="Overdue" tasks={overdueTasks} onActivity={openActivity} onSubtask={(task) => setCreatingFor(task.id)} onOpenDetail={openDetail} /> : null}
+              {dueTodayTasks.length ? <TaskSection title="Today" tasks={dueTodayTasks} onActivity={openActivity} onSubtask={(task) => setCreatingFor(task.id)} onOpenDetail={openDetail} /> : null}
+            </> : view === "upcoming" ? upcomingGroups.map((group) => <TaskSection key={group.key} title={format.dayTitle(new Date(`${group.key}T12:00:00`))} tasks={group.tasks} onActivity={openActivity} onSubtask={(task) => setCreatingFor(task.id)} onOpenDetail={openDetail} />)
+              : <TaskList tasks={visibleTasks} completed={view === "completed"} onActivity={openActivity} onSubtask={(task) => setCreatingFor(task.id)} onOpenDetail={openDetail} />}
           </>
         )}
       </div>
       <button type="button" className="tasks-fab" aria-label="Create task" title="Create task" onClick={() => setCreatingFor(null)}><Plus size={22} /></button>
       {creatingFor !== undefined ? <TaskComposer parentTaskID={creatingFor} onClose={() => setCreatingFor(undefined)} /> : null}
       {activityTask ? <ActivitySheet task={activityTask} onClose={() => setActivityTask(null)} /> : null}
-      {detailTask ? <TaskDetailSheet task={detailTask} onClose={() => setDetailTask(null)} onActivity={() => { setDetailTask(null); openActivity(detailTask); }} onSubtask={() => { setCreatingFor(detailTask.id); setDetailTask(null); }} /> : null}
+      {detailTask ? <TaskDetailSheet key={detailTask.id} task={detailTask} onClose={closeDetail} onHandoff={() => setDetailID(null)} onActivity={() => { closeDetail(); openActivity(detailTask); }} onSubtask={() => { closeDetail(); setCreatingFor(detailTask.id); }} /> : null}
     </main>
   );
 }
@@ -184,6 +214,7 @@ function TaskComposer({ parentTaskID, onClose }: { parentTaskID: string | null; 
   const recordingChunksRef = useRef<Blob[]>([]);
   type Recognition = { lang: string; continuous: boolean; interimResults: boolean; onresult: ((event: { results: ArrayLike<ArrayLike<{ transcript: string }>>; resultIndex?: number }) => void) | null; onend: (() => void) | null; start: () => void; stop: () => void };
   const recognitionRef = useRef<Recognition | null>(null);
+  useEscapeClose(onClose);
   useEffect(() => () => {
     recognitionRef.current?.stop();
     recorderRef.current?.stop();
@@ -263,11 +294,13 @@ function TaskComposer({ parentTaskID, onClose }: { parentTaskID: string | null; 
 
 function ActivitySheet({ task, onClose }: { task: TaskInfo; onClose: () => void }) {
   const snapshot = useAppSnapshot();
+  useEscapeClose(onClose);
   const entries = snapshot.taskActivity?.taskID === task.id ? snapshot.taskActivity.entries : [];
   return <div className="task-modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="task-activity-sheet"><div className="task-composer-heading"><h2>Task activity</h2><button type="button" className="icon-btn" aria-label="Close activity" onClick={onClose}><X size={18} /></button></div><p className="task-activity-title">{task.title}</p>{entries.length ? entries.map((entry) => <div className="task-activity-entry" key={entry.id}><span><strong>{entry.actor}</strong> {entry.action}{entry.detail ? ` · ${entry.detail}` : ""}</span><time>{format.stamp(format.parseISO(entry.createdAt) ?? new Date())}</time></div>) : <div className="tasks-empty-inline">No activity recorded yet.</div>}</section></div>;
 }
 
-function TaskDetailSheet({ task, onClose, onActivity, onSubtask }: { task: TaskInfo; onClose: () => void; onActivity: () => void; onSubtask: () => void }) {
+/** `onHandoff` runs after a hand-off: the owner is already on the bot's chat, so only the sheet is dropped. */
+function TaskDetailSheet({ task, onClose, onHandoff, onActivity, onSubtask }: { task: TaskInfo; onClose: () => void; onHandoff: () => void; onActivity: () => void; onSubtask: () => void }) {
   const model = useAppModel();
   const snapshot = useAppSnapshot();
   const [title, setTitle] = useState(task.title);
@@ -282,6 +315,7 @@ function TaskDetailSheet({ task, onClose, onActivity, onSubtask }: { task: TaskI
   const [reminder, setReminder] = useState(dateInput(task.reminderAt));
   const [labels, setLabels] = useState((task.labels ?? []).join(", "));
   const children = snapshot.tasks.filter((item) => item.parentTaskID === task.id);
+  useEscapeClose(onClose);
   const save = () => {
     const date = (value: string) => value ? new Date(value) : null;
     model.editTask(task, { title, description: description || null, listID, priority, workflowStatus, progressNote: progressNote || null, dueAt: date(due), deadlineAt: date(deadline), reminderAt: date(reminder), labels: labels.split(",").map((label) => label.trim().replace(/^#/, "")).filter(Boolean) });
@@ -308,7 +342,7 @@ function TaskDetailSheet({ task, onClose, onActivity, onSubtask }: { task: TaskI
           <label><span>Reminder</span><input className="text-input" type="datetime-local" value={reminder} onChange={(event) => setReminder(event.target.value)} /></label>
           <label><span>AI agent</span><select className="select" value={handoffAgentID} onChange={(event) => setHandoffAgentID(event.target.value)}>{snapshot.agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label>
         </section>
-        <div className="task-detail-footer"><span>Created {format.stamp(format.parseISO(task.createdAt) ?? new Date())}</span><div><button type="button" className="btn" disabled={!handoffAgentID} onClick={() => { const agent = snapshot.agents.find((item) => item.id === handoffAgentID); if (agent) { model.handoffTask(task, agent); onClose(); } }}>Hand off to AI</button><button type="button" className="btn primary" disabled={!title.trim()} onClick={save}>Save changes</button></div></div>
+        <div className="task-detail-footer"><span>Created {format.stamp(format.parseISO(task.createdAt) ?? new Date())}</span><div><button type="button" className="btn" disabled={!handoffAgentID} onClick={() => { const agent = snapshot.agents.find((item) => item.id === handoffAgentID); if (agent) { model.handoffTask(task, agent); onHandoff(); } }}>Hand off to AI</button><button type="button" className="btn primary" disabled={!title.trim()} onClick={save}>Save changes</button></div></div>
       </div>
     </section>
   </div>;

@@ -5,7 +5,7 @@
  * Each agent has one enduring conversation surface; sessions are seams in it,
  * not list entries (blueprint v3 §5).
  */
-import { UserRound, CalendarDays, CheckCircle2, CheckSquare, Clock3, Inbox, PanelLeftClose, Plus, Search, Star, X } from "lucide-react";
+import { UserRound, CalendarDays, CheckCircle2, CheckSquare, Clock3, Inbox, PanelLeftClose, Plus, Search, Star, Users, X } from "lucide-react";
 import { useState, type FormEvent, type ReactNode } from "react";
 import { useAppModel, useAppSnapshot } from "../state/use-app-model";
 import { AppTile, SidebarAgentBadge, connectionShortStatus } from "./bits";
@@ -41,6 +41,9 @@ export function SidebarView({ onCollapse, collapsed = false }: { onCollapse?: ()
   const connected = snapshot.plugins.filter((plugin) => plugin.status === "connected");
   const total = snapshot.plugins.length;
   const owner = profileName(snapshot.settings.deviceName);
+  const groups = snapshot.groups ?? [];
+  // A group page or a not-found page is not a bot's conversation: no bot row is "open" then.
+  const onConversation = snapshot.route.kind !== "group" && !snapshot.notFound;
 
   /** The newest thing each agent said, one line. */
   const previewFor = (agentID: string): { updatedAt: string; preview?: string } | undefined => {
@@ -55,7 +58,7 @@ export function SidebarView({ onCollapse, collapsed = false }: { onCollapse?: ()
   };
 
   const row = (agent: (typeof roster)[number]) => {
-    const selected = snapshot.conversation.agentID === agent.id;
+    const selected = onConversation && snapshot.conversation.agentID === agent.id;
     // A private agent is worth saying out loud: other agents see a
     // receipt for its work, not the work itself.
     const state = snapshot.agentStates[agent.id];
@@ -71,6 +74,7 @@ export function SidebarView({ onCollapse, collapsed = false }: { onCollapse?: ()
         type="button"
         key={agent.id}
         className={`sidebar-row${selected ? " selected" : ""}`}
+        data-agent-id={agent.id}
         onClick={() => model.selectAgent(agent)}
         aria-label={`Open ${agent.name} chat`}
         aria-current={selected ? "true" : undefined}
@@ -192,25 +196,43 @@ export function SidebarView({ onCollapse, collapsed = false }: { onCollapse?: ()
         {favourites.length > 0 ? (
           <div className="sidebar-grid">
             {favourites.map((agent) => {
-              const selected = snapshot.conversation.agentID === agent.id;
+              const selected = onConversation && snapshot.conversation.agentID === agent.id;
               return (
-                <button
-                  type="button"
-                  key={agent.id}
-                  className={`sidebar-tile${selected ? " selected" : ""}`}
-                  onClick={() => model.selectAgent(agent)}
-                  aria-label={`Open ${agent.name} chat`}
-                  aria-current={selected ? "true" : undefined}
-                >
-                  <span className="sidebar-tile-mark">
-                    <SidebarAgentBadge agent={agent} size={44} />
-                    <span className="sidebar-tile-star" aria-label="Favourite">
-                      <Star size={10} />
+                <div className="sidebar-tile-cell" key={agent.id}>
+                  <button
+                    type="button"
+                    className={`sidebar-tile${selected ? " selected" : ""}`}
+                    onClick={() => model.selectAgent(agent)}
+                    aria-label={`Open ${agent.name} chat`}
+                    aria-current={selected ? "true" : undefined}
+                  >
+                    <span className="sidebar-tile-mark">
+                      <SidebarAgentBadge agent={agent} size={44} />
                     </span>
-                  </span>
-                  <span className="sidebar-tile-name">{agent.name}</span>
-                  {writtenRole(agent.role) ? <span className="sidebar-tile-tag">{writtenRole(agent.role)}</span> : null}
-                </button>
+                    <span className="sidebar-tile-name">{agent.name}</span>
+                    {writtenRole(agent.role) ? <span className="sidebar-tile-tag">{writtenRole(agent.role)}</span> : null}
+                  </button>
+                  {/* A sibling of the tile, not inside it: a button cannot hold a button, and this one
+                      must be reachable by keyboard and by finger. It is the way back from a pin. */}
+                  <button
+                    type="button"
+                    className="sidebar-tile-unpin"
+                    aria-label={`Unpin ${agent.name}`}
+                    title={`Unpin ${agent.name}`}
+                    onClick={() => {
+                      model.toggleFavorite(agent.id);
+                      // The tile is gone once unpinned; the bot is a roster row again. Keep a keyboard
+                      // user's place there instead of dropping focus on the page.
+                      requestAnimationFrame(() => {
+                        for (const rowButton of document.querySelectorAll<HTMLElement>(".sidebar-row[data-agent-id]")) {
+                          if (rowButton.dataset.agentId === agent.id) rowButton.focus();
+                        }
+                      });
+                    }}
+                  >
+                    <Star size={11} />
+                  </button>
+                </div>
               );
             })}
           </div>
@@ -223,6 +245,31 @@ export function SidebarView({ onCollapse, collapsed = false }: { onCollapse?: ()
         ) : (
           others.map(row)
         )}
+
+        {groups.length > 0 ? (
+          <>
+            <div className="sidebar-groups-title" id="sidebar-groups-title">Groups</div>
+            <div role="group" aria-labelledby="sidebar-groups-title">
+              {groups.map((group) => {
+                const selected = snapshot.route.kind === "group" && snapshot.route.id === group.id;
+                return (
+                  <button
+                    type="button"
+                    key={group.id}
+                    className={`sidebar-group-row${selected ? " selected" : ""}`}
+                    aria-label={`Open ${group.name} group`}
+                    aria-current={selected ? "page" : undefined}
+                    onClick={() => model.openGroup(group.id)}
+                  >
+                    <Users size={16} aria-hidden="true" />
+                    <span className="sidebar-row-title">{group.name}</span>
+                    <span className="sidebar-group-count">{group.agentIds.length}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </>
+        ) : null}
       </div>}
 
       <div className="sidebar-footer">
