@@ -55,6 +55,7 @@ import { secureDirectory, secureFile, verifyHomePrivate } from "./util/private-f
 import { extraHelpLines, runExtraCommand } from "./cli/extra-commands";
 import { runStartupHooks } from "./startup";
 import { loadVaultEnvForCli, unlockVaultAtStart, vaultRefusalMessage } from "./startup/s3-vault";
+import { ServeLockError, acquireServeLock } from "./startup/s3-serve-lock";
 
 const [command = "help", ...args] = Bun.argv.slice(2);
 
@@ -102,6 +103,14 @@ async function serve(): Promise<void> {
     if (verifyHomePrivate(agniHome()) === "fixed") log.warn(`${agniHome()} was readable by other accounts; it is now private to yours`);
   } catch (error) {
     console.error(`Agni cannot start: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
+  // The lock says "a server has this home open" to `agni vault migrate` and `export`, which the
+  // pid file cannot (a foreground or service-managed serve writes none). Held until exit.
+  try {
+    acquireServeLock();
+  } catch (error) {
+    console.error(`Agni cannot start: ${error instanceof ServeLockError ? error.message : String(error)}`);
     process.exit(1);
   }
   // The vault opens before the config is read, so providers see their keys.
