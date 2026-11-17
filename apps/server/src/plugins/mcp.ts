@@ -31,7 +31,7 @@ import { modeFor } from "./credentials";
 import { approvedHashes, canonicalDefinition, hashToolDefinition, memoryPins, reconcilePins, type PinCandidate } from "./mcp-pins";
 import { checkMcpUrl, guardedFetch } from "./mcp-url";
 
-/** Names of MCP tools the owner trusted and whose catalog mode is `free`; the approval broker lets these run unasked. */
+/** Names of MCP tools the owner trusted and whose catalog mode is `free`; the policy engine lets these run unasked. */
 export const MCP_FREE_TOOLS = new Set<string>();
 
 /** What each connected server claimed about its tools. Shown to the owner as information only; never consulted for gating. */
@@ -48,8 +48,10 @@ export function mcpApprovalNote(toolName: string): string | undefined {
 }
 
 /**
- * Policy metadata for an MCP tool, for the approval policy to use once Sprint 2's
- * registry merges. Every `mcp_` tool is an untrusted reader (its results are text a
+ * Policy metadata for an MCP tool, for a tool definition to carry as its own `meta`. The
+ * policy table has its own row for every `mcp_` tool (`policy/metadata.ts`) and a tool's meta
+ * can only add to it, so this describes the tool and decides nothing: the table, with
+ * `MCP_FREE_TOOLS`, is the authority. Every `mcp_` tool is an untrusted reader (its results are text a
  * third party wrote) and an effector (we cannot tell what it changes). Tier 2 asks
  * every time; tier 1 only for a tool the owner trusted and the catalog lets run free.
  * Any other name is not an MCP tool: undefined.
