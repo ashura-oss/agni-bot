@@ -53,8 +53,10 @@ const DAEMON_NETWORK_NAMES = [...NETWORK_NAMES, "ALL_PROXY"];
 /**
  * The server only: what the key store needs. libsecret talks to the owner's keyring over the session bus
  * (`DBUS_SESSION_BUS_ADDRESS`, found through `XDG_RUNTIME_DIR`), and the systemd passphrase for the vault arrives in the
- * folder `CREDENTIALS_DIRECTORY` names. None is a secret, but each is a door to one: a command the model wrote must not
- * be able to reach the keyring or that folder, so no other kind of child gets them. (`AGNI_TEST_RUN` passes as `AGNI_*`.)
+ * folder `CREDENTIALS_DIRECTORY` names. None is a secret, and leaving them out of a shell child is tidiness, not a boundary: a
+ * command can find the bus socket or the folder without them. What keeps a command the model wrote away from the keyring and
+ * that folder is the policy: the one command that runs free (a plain read-only one, such as `cat`) reads only inside scratch, and
+ * every other command asks the owner first (`policy/metadata.ts`). (`AGNI_TEST_RUN` passes as `AGNI_*`.)
  */
 const DAEMON_KEYSTORE_NAMES = ["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "CREDENTIALS_DIRECTORY"];
 /** The server only: its own settings, mail settings, and each provider's base URL and model (`GROQ_MODEL`, `OPENROUTER_BASE_URL`, ...). */
