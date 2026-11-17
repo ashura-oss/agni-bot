@@ -57,8 +57,12 @@ function parseBlob(raw: string | null | undefined): TokenBlob {
 
 /** The tokens of a connection, wherever they are kept. With the vault locked, a vault-held blob reads as empty. */
 export function readConnectionTokens(row: PluginConnectionRow): TokenBlob {
-  if (row.token_ref) return parseBlob(vaultForReads()?.get(row.token_ref));
-  return parseBlob(row.tokens);
+  const blob = parseBlob(row.token_ref ? vaultForReads()?.get(row.token_ref) : row.tokens);
+  // Stored tokens are secrets from the moment they are read: mask them, and in vault mode the tokens inside the
+  // JSON blob (the vault registered the whole blob, which is not what turns up in a log line). Staged, not settled:
+  // a row read a moment before an update must not push the newer tokens out of the slot.
+  stageSecretsAt(tokenSlot(row.id), ...tokenSecrets(blob));
+  return blob;
 }
 
 /** True when the blob holds a credential, as opposed to only a pending sign-in's `state`. */

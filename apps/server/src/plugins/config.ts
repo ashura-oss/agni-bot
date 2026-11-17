@@ -121,16 +121,23 @@ export function emptyPluginsFile(): PluginsFile {
 
 export function loadPluginsFile(path: string): PluginsFile {
   if (!existsSync(path)) return emptyPluginsFile();
+  let loaded: PluginsFile | undefined;
   try {
     const parsed = JSON.parse(readFileSync(path, "utf-8")) as PluginsFile;
     if (parsed.version === 1 && parsed.plugins && typeof parsed.plugins === "object") {
       // Vault mode: the secrets are not in the file. With the vault locked they are simply absent (and a save is refused).
       const vault = vaultForReads();
       if (vault) applyPluginSecrets(parsed, vault);
-      return parsed;
+      loaded = parsed;
     }
   } catch {
     // fall through: treat as unreadable below
+  }
+  if (loaded) {
+    // What is stored is committed state: mask it from the first line the server logs, not only after the first save.
+    // Outside the try above: a registry that refuses must not make a good file look corrupt.
+    settlePluginSecrets(loaded);
+    return loaded;
   }
   // Run with no plugins, but never save over the file: it may hold the only copy of the tokens.
   let kept = false;
