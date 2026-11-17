@@ -7,7 +7,10 @@ import { isOwnerOnlyDirectory, secureDirectoryIfNeeded, secureFile, writePrivate
 import { MIGRATIONS, type Migration } from "./migrations";
 
 /**
- * How a database path is protected on Windows, where "private" is an ACL.
+ * How a database path is protected: on Windows "private" is an ACL, on macOS and
+ * Linux it is a mode (700 folder, 600 files; an umask can only narrow a mode,
+ * but a database created through SQLite would take 644 & ~umask, so the files are
+ * made 600 first).
  *  - "folder": its folder is the server's to lock, owner-only, before SQLite
  *    opens anything, so every file made in it (the database, `-wal`, `-shm`,
  *    and the ones SQLite makes again later) inherits that from birth. This is
@@ -22,7 +25,6 @@ import { MIGRATIONS, type Migration } from "./migrations";
 type Protection = "folder" | "files" | null;
 
 function protectionFor(path: string, createdFolder: boolean): Protection {
-  if (process.platform !== "win32") return null;
   const folder = dirname(resolve(path));
   if (parse(folder).root === folder) return null;
   const inside = (dir: string, base: string): boolean => {
@@ -97,7 +99,7 @@ function protectAfterOpen(db: Database, path: string, protection: Protection): v
 export function openDatabase(path: string): Database {
   let protection: Protection = null;
   if (path !== ":memory:") {
-    const created = mkdirSync(dirname(path), { recursive: true });
+    const created = mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     protection = protectBeforeOpen(path, created !== undefined);
   }
   const db = new Database(path, { create: true });
@@ -109,6 +111,14 @@ export function openDatabase(path: string): Database {
   const applied = migrate(db);
   if (applied.length > 0) log.info(`db: applied migrations ${applied.join(", ")}`);
   return db;
+}
+
+/** A database that exists but lacks migrations this version lists. `missing` holds their ids. */
+export class DatabaseBehindError extends Error {
+  constructor(readonly path: string, readonly current: number, readonly missing: number[]) {
+    super(`database ${path} is at schema ${current}, missing migration(s) ${missing.join(", ")} — run \`agni setup\` (or \`agni migrate\`) first`);
+    this.name = "DatabaseBehindError";
+  }
 }
 
 /**
@@ -140,9 +150,7 @@ export function openDatabaseForCLI(path: string, migrations: ReadonlyArray<Migra
   const missing = migrations.map((migration) => migration.id).filter((id) => !applied.has(id));
   if (missing.length > 0) {
     db.close();
-    throw new Error(
-      `database ${path} is at schema ${current}, missing migration(s) ${missing.join(", ")} — run \`agni setup\` (or \`agni migrate\`) first`,
-    );
+    throw new DatabaseBehindError(path, current, missing);
   }
   return db;
 }

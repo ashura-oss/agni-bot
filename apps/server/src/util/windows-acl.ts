@@ -63,3 +63,24 @@ export async function restrictToOwnerOnWindowsAsync(path: string, isDirectory: b
   if (process.platform !== "win32") return;
   await runFile(windowsSystemTool("icacls"), icaclsArgs(path, await currentUserSidAsync(), isDirectory), { windowsHide: true });
 }
+
+/**
+ * True only when `text` (what `icacls <path> /save` wrote, decoded) holds
+ * exactly one DACL that is protected (inheritance cut) and has exactly one
+ * entry: full control for `sid`, as `restrictToOwnerOnWindows` sets it (with
+ * the inherit flags for a directory, none for a file).
+ *
+ * It fails closed. A NULL DACL (`D:NO_ACCESS_CONTROL`, which gives everyone
+ * access), flags with no entries, an empty or broken string, a second DACL,
+ * another account, a deny entry, less than full control, and any entry type or
+ * form this parser does not know all answer false.
+ */
+export function isOwnerOnlySddl(text: string, sid: string, isDirectory: boolean): boolean {
+  if (typeof text !== "string" || !/^S-1-\d+(?:-\d+)+$/.test(sid)) return false;
+  const daclLines = text.split(/\r?\n/).filter((line) => line.startsWith("D:"));
+  if (daclLines.length !== 1) return false;
+  const parsed = /^D:((?:P|AI|AR)*)((?:\([^()]*\))*)$/.exec(daclLines[0]!.trim());
+  if (!parsed || !parsed[1]!.includes("P")) return false;
+  const entries = parsed[2]!.match(/\([^()]*\)/g) ?? [];
+  return entries.length === 1 && entries[0] === `(A;${isDirectory ? "OICI" : ""};FA;;;${sid})`;
+}

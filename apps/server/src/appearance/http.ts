@@ -3,7 +3,7 @@ import { chmod, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { imageSize } from "image-size";
 import { NO_BROWSER_ORIGINS, type OriginPolicy } from "../auth/origin";
-import { requestToken, verifyToken } from "../auth/tokens";
+import { requestDevice } from "../auth/gate";
 import { newID, nowISO } from "../util/ids";
 import { ensurePrivateDirectory } from "../util/private-file";
 
@@ -24,8 +24,7 @@ export async function backgroundRequest(request: Request, db: Database, dbPath: 
   const headers = { ...policy.cors(request, "GET, POST, DELETE, OPTIONS", "authorization, content-type"), "cache-control": "private, no-store" };
   const reply = (data: unknown, status = 200) => Response.json(data, { status, headers });
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers });
-  const token = requestToken(request);
-  const device = token ? await verifyToken(db, token) : null;
+  const device = await requestDevice(request, db);
   if (!device) return reply({ error: "Pair this device before changing appearance." }, 401);
   const path = new URL(request.url).pathname;
   try {
@@ -68,7 +67,13 @@ export async function backgroundRequest(request: Request, db: Database, dbPath: 
     const row = db.query<BackgroundRow, [string]>("SELECT * FROM background_assets WHERE id = ?").get(id);
     if (!row) return reply({ error: "Background not found." }, 404);
     if (request.method === "GET") {
-      return new Response(Bun.file(row.path), { headers: { ...headers, "content-type": row.mime_type, "x-content-type-options": "nosniff" } });
+      return new Response(Bun.file(row.path), { headers: {
+        ...headers,
+        "content-type": row.mime_type,
+        "x-content-type-options": "nosniff",
+        "content-security-policy": "default-src 'none'; sandbox",
+        "cross-origin-resource-policy": "same-origin",
+      } });
     }
     if (request.method === "DELETE") {
       if (referenced(db, id)) return reply({ error: "Choose another background before deleting this image." }, 409);

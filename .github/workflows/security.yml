@@ -1,0 +1,77 @@
+name: security
+
+# Local-first security gates (Sprint 3, S3-11). The same script a developer runs
+# with `bun run check:security`. This file has not been run: the repository is
+# not pushed anywhere. Until it is, scripts/security-workflow.test.ts holds it
+# to the rules zizmor enforces (pinned actions, least permissions, no template
+# injection), and zizmor itself runs here once the repo has a remote.
+
+on:
+  pull_request:
+  push:
+    branches: [main, dev]
+  schedule:
+    # Weekly, so a new advisory against an unchanged lockfile is still noticed.
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+# Deny everything by default; the job asks for the one thing it needs.
+permissions: {}
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    name: security gates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # gitleaks scans the whole history.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.4.3"
+
+      - name: Install dependencies (the install policy is in bunfig.toml)
+        run: bun install --frozen-lockfile
+
+      - name: Install the pinned security tools
+        # Versions are exact. The two binaries are checked against SHA-256 values
+        # written here, so a changed release asset fails the step. semgrep and
+        # zizmor come from PyPI by exact version (their dependency trees are not
+        # hash-locked). Tools go to ~/.agni-tools/bin, where check-security.ts
+        # looks first.
+        run: |
+          set -euo pipefail
+          tools="$HOME/.agni-tools"
+          mkdir -p "$tools/bin" "$tools/download"
+          python3 -m venv "$tools/venv"
+          "$tools/venv/bin/python" -m pip install --disable-pip-version-check --no-cache-dir "semgrep==1.183.0" "zizmor==1.31.1"
+          ln -s "$tools/venv/bin/semgrep" "$tools/bin/semgrep"
+          ln -s "$tools/venv/bin/zizmor" "$tools/bin/zizmor"
+          cd "$tools/download"
+          curl --fail --silent --show-error --location --output gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks.tar.gz" | sha256sum --check --strict -
+          tar -xzf gitleaks.tar.gz gitleaks
+          install -m 0755 gitleaks "$tools/bin/gitleaks"
+          curl --fail --silent --show-error --location --output osv-scanner "https://github.com/google/osv-scanner/releases/download/v2.7.0/osv-scanner_linux_amd64"
+          echo "160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b  osv-scanner" | sha256sum --check --strict -
+          install -m 0755 osv-scanner "$tools/bin/osv-scanner"
+
+      - name: Test the gate script and the Semgrep rules
+        # Includes `semgrep --test`: every rule against its positive and negative fixture.
+        run: bun run test:scripts
+
+      - name: Run the security gates
+        # Strict by default: a tool that is missing fails the run instead of being skipped.
+        run: bun run check:security

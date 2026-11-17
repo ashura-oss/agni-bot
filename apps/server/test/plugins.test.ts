@@ -6,7 +6,6 @@ import { authorizeURL, isConfigured, redirectURI } from "../src/plugins/oauth";
 import {
   completeConnect,
   getConnection,
-  getConnectionByState,
   getConnectionFor,
   getConnections,
   startPending,
@@ -130,7 +129,7 @@ describe("plugin connect flow", () => {
     writeFileSync(pluginsPath, JSON.stringify({ version: 1, plugins: {} }));
     const service = new PluginService({ config: fakeConfig(), db, emit: () => {}, pluginsPath });
 
-    const result = service.configure("gmail", "agent", { user: "agni@example.com", pass: "app-pass" });
+    const result = service.configure("gmail", "agent", { user: "agni@example.com", pass: "fake-mail-secret-7731" });
     expect(result.error).toBeUndefined();
 
     const stored = JSON.parse(readFileSync(pluginsPath, "utf8")) as {
@@ -138,7 +137,7 @@ describe("plugin connect flow", () => {
     };
     expect(stored.plugins.gmail?.enabled).toBe(true);
     expect(stored.plugins.gmail?.auth.user).toBe("agni@example.com");
-    expect(stored.plugins.gmail?.auth.pass).toBe("app-pass");
+    expect(stored.plugins.gmail?.auth.pass).toBe("fake-mail-secret-7731");
 
     const connection = getConnectionFor(db, "gmail", "agent");
     expect(connection?.status).toBe("connected");
@@ -248,7 +247,6 @@ describe("oauth callback", () => {
     expect(tokens.refresh_token).toBe("rt_1");
 
     // The callback is keyed on state, not on the connection the frame opened.
-    expect(getConnectionByState(db, state)).toBeNull(); // consumed
     // Snapshot fan-out ends at connected.
     const snapshot = states.at(-1) as { plugins: PluginInfo[] };
     expect(snapshot.plugins.find((entry) => entry.id === "calendar")!.status).toBe("connected");
@@ -391,7 +389,7 @@ describe("oauth URL surface", () => {
   });
 
   test("the authorize URL asks only for the requested scopes", () => {
-    const url = authorizeURL({ config: fakeConfig(), clientID: "test-id", clientSecret: "test-secret" }, fakeConfig(), ["https://www.googleapis.com/auth/gmail.modify"], "st_x");
+    const url = authorizeURL({ config: fakeConfig(), clientID: "test-id", clientSecret: "test-secret" }, fakeConfig(), ["https://www.googleapis.com/auth/gmail.modify"], "st_x", "challenge_x");
     const parsed = new URL(url);
     expect(parsed.searchParams.get("scope")).toBe("https://www.googleapis.com/auth/gmail.modify");
     expect(parsed.searchParams.get("prompt")).toBe("consent");
@@ -414,16 +412,6 @@ describe("plugin connection store", () => {
     db.close();
   });
 
-  test("state lookup matches exactly, never a LIKE prefix accident", () => {
-    const db = openDatabase(":memory:");
-    startPending(db, { pluginID: "calendar", account: "agent", scopes: ["s"], capabilities: [], state: "st_abc" });
-    startPending(db, { pluginID: "gmail-owner", account: "owner", scopes: ["s"], capabilities: [], state: "st_abcdef" });
-    expect(getConnectionByState(db, "st_abc")!.account).toBe("agent");
-    expect(getConnectionByState(db, "st_abcdef")!.account).toBe("owner");
-    expect(getConnectionByState(db, "st_ab")).toBeNull();
-    db.close();
-  });
-
   test("completeConnect overwrites tokens wholesale on re-grant", () => {
     const db = openDatabase(":memory:");
     const row = startPending(db, { pluginID: "calendar", account: "agent", scopes: ["s"], capabilities: [] });
@@ -443,19 +431,19 @@ describe("plugin credentials reach the tools", () => {
   }
 
   test("a mailbox connected in the UI is the one the mail tool uses", () => {
-    writePlugins({ account: "agent", enabled: true, auth: { kind: "app-password", user: "agni@example.com", pass: "app-pass" } });
+    writePlugins({ account: "agent", enabled: true, auth: { kind: "app-password", user: "agni@example.com", pass: "fake-mail-secret-7731" } });
 
     const credentials = mailCredentialsFromPlugins(pluginsPath, "agent");
-    expect(credentials).toEqual({ user: "agni@example.com", pass: "app-pass" });
+    expect(credentials).toEqual({ user: "agni@example.com", pass: "fake-mail-secret-7731" });
 
     const config = resolveMailConfig("agent", pluginMailResolver(pluginsPath));
     expect(config?.user).toBe("agni@example.com");
-    expect(config?.pass).toBe("app-pass");
+    expect(config?.pass).toBe("fake-mail-secret-7731");
     expect(config?.imapHost).toBe("imap.gmail.com");
   });
 
   test("a plugin that is not connected yields no credentials", () => {
-    writePlugins({ account: "agent", enabled: false, auth: { kind: "app-password", user: "agni@example.com", pass: "app-pass" } });
+    writePlugins({ account: "agent", enabled: false, auth: { kind: "app-password", user: "agni@example.com", pass: "fake-mail-secret-7731" } });
     expect(mailCredentialsFromPlugins(pluginsPath, "agent")).toBeNull();
     writePlugins(null);
     expect(mailCredentialsFromPlugins(pluginsPath, "owner")).toBeNull();

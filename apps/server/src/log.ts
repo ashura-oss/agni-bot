@@ -1,3 +1,5 @@
+import { redact } from "./util/redact";
+
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 } as const;
 type Level = keyof typeof LEVELS;
 
@@ -8,7 +10,8 @@ function write(level: Level, args: unknown[]): void {
   if (LEVELS[level] < threshold) return;
   const stamp = new Date().toISOString();
   const stream = level === "error" || level === "warn" ? console.error : console.log;
-  stream(`${stamp} ${level.toUpperCase().padEnd(5)} ${args.map(format).join(" ")}`);
+  // A secret in an error message or a logged object must not reach the console or the log file.
+  stream(redact(`${stamp} ${level.toUpperCase().padEnd(5)} ${args.map(format).join(" ")}`));
 }
 
 function format(value: unknown): string {

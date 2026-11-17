@@ -8,7 +8,10 @@ import type { ChatGPTConnection } from "@agni/protocol";
 import { ProviderError } from "./client";
 import type { ProviderConfig } from "./providers";
 import { chatGPTPage } from "./chatgpt-page";
+import { entryName, eraseFile, inVaultMode, vaultForReads, vaultForWrites } from "../credentials/vault-mode";
+import { forgetSecretSlots, rememberSecretsAt, stageSecretsAt } from "../util/redact";
 import { log } from "../log";
+import { VaultError } from "../secrets/types";
 import { restrictToOwnerOnWindowsAsync } from "../util/windows-acl";
 
 /** The single switch: the router, login entry point and listing all honour it. */
@@ -48,6 +51,23 @@ interface TokenResponse {
   token_type?: unknown; expires_in?: unknown; earliest_refresh_at?: unknown; scope?: unknown;
 }
 
+/**
+ * The saved accounts as text. Vault mode (S3-02): the vault entry, else a plaintext file a migration
+ * has not removed yet (it is used, and the first save moves it). File mode: the file, else the vault
+ * entry a migration that stopped part way already made (a file that is there is newer, so it wins).
+ */
+function readStoreText(filePath: string): string {
+  const vault = vaultForReads();
+  if (inVaultMode()) return vault?.get(entryName.chatgptAccounts) ?? readFileSync(filePath, "utf8");
+  try {
+    return readFileSync(filePath, "utf8");
+  } catch (error) {
+    const stored = vault?.get(entryName.chatgptAccounts);
+    if (stored !== undefined && (error as NodeJS.ErrnoException).code === "ENOENT") return stored;
+    throw error;
+  }
+}
+
 export class ChatGPTAuthError extends Error {
   constructor(message: string, options?: ErrorOptions) { super(message, options); this.name = "ChatGPTAuthError"; }
 }
@@ -72,7 +92,7 @@ export class ChatGPTAuth {
   }) {
     let store: Store | undefined;
     if (options.filePath) {
-      try { store = storeSchema.parse(JSON.parse(readFileSync(options.filePath, "utf8"))); }
+      try { store = storeSchema.parse(JSON.parse(readStoreText(options.filePath))); rememberTokens(store); }
       catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
           // Start with no accounts, but leave the file alone so nothing is lost.
@@ -384,11 +404,31 @@ export class ChatGPTAuth {
     return chatGPTPage(message, status);
   }
   private save(): Promise<void> {
-    if (!this.options.filePath) return Promise.resolve();
+    // Every token change comes through here, so this is where the tokens are registered: before anything
+    // is written, and whether or not (or where) they are persisted. Staging comes first and settling the
+    // slots after the write, because a save that fails leaves the old tokens on disk.
+    rememberTokens(this.store, false);
+    if (!this.options.filePath) { rememberTokens(this.store); return Promise.resolve(); }
     if (this.unreadable) return Promise.reject(new ChatGPTAuthError(UNREADABLE));
     const path = this.options.filePath;
     const contents = JSON.stringify(this.store);
     const write = this.writes.catch(() => {}).then(async () => {
+      // Vault mode: the whole store is one vault entry, read back before anything else changes, and the plaintext
+      // file (an old install's, or one a migration has not reached) is removed once the vault holds the accounts.
+      // A locked vault refuses: the store is never written to a file instead.
+      let vault;
+      try { vault = vaultForWrites(); }
+      catch (cause) { throw new ChatGPTAuthError("Could not save the ChatGPT connection: the secrets vault is locked.", { cause }); }
+      if (vault) {
+        try {
+          vault.set(entryName.chatgptAccounts, contents);
+          if (vault.get(entryName.chatgptAccounts) !== contents) throw new VaultError("WRITE_FAILED", "The ChatGPT accounts could not be read back from the vault.");
+        } catch (cause) { throw new ChatGPTAuthError("Could not save the ChatGPT connection securely.", { cause }); }
+        // The accounts are safe in the vault now, so a file that will not go away must not fail the save (a refresh would read that as a lost session).
+        try { eraseFile(path); }
+        catch { log.warn("The old plaintext ChatGPT accounts file could not be removed; delete it yourself."); }
+        return;
+      }
       const directory = dirname(path);
       await mkdir(directory, { recursive: true, mode: 0o700 });
       await chmod(directory, 0o700);
@@ -399,8 +439,28 @@ export class ChatGPTAuth {
       finally { await unlink(temporary).catch(() => {}); }
     });
     this.writes = write;
-    return write;
+    return write.then(() => rememberTokens(this.store));
   }
 }
 
 class TerminalRefreshError extends ChatGPTAuthError {}
+
+/**
+ * Make `redact()` mask every token this store holds, so none can reach a log line or a frame.
+ * `settle` makes each account's slot hold exactly its tokens now: tokens a refresh replaced, or a
+ * disconnect or removed account dropped, are queued (still masked until they expire: a revoke does not
+ * kill an access token already issued). Without it the tokens are only staged.
+ */
+function rememberTokens(store: Store, settle = true): void {
+  const prefix = `chatgpt:${store.hostID}:`;
+  const live = new Set<string>();
+  for (const account of store.accounts) {
+    const slot = `${prefix}${account.id}`;
+    live.add(slot);
+    const { accessToken, refreshToken, idToken, expiresAt } = account.tokens ?? {};
+    const secrets = [{ value: accessToken, expiresAt }, refreshToken, idToken];
+    if (settle) rememberSecretsAt(slot, ...secrets);
+    else stageSecretsAt(slot, ...secrets);
+  }
+  if (settle) forgetSecretSlots(prefix, live);
+}

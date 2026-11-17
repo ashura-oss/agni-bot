@@ -14,26 +14,23 @@ function openDB(): Database {
   return new Database(join(dir, "test.sqlite"));
 }
 
-describe("runPreflight SQL", () => {
+describe("runPreflight named checks (S3-09: no model-written SQL)", () => {
+  const pending = { kind: "check", name: "pending_approvals", params: {} } as const;
+
   test("unchanged result hash returns changed false", async () => {
     const db = openDB();
     try {
-      const first = await runPreflight({ kind: "sql", query: "SELECT 1 AS value" }, db, null);
+      db.exec("CREATE TABLE approvals (id TEXT, status TEXT, created_at TEXT);");
+      const first = await runPreflight(pending, db, null);
       expect(first.changed).toBe(true);
-      expect(await runPreflight({ kind: "sql", query: "SELECT 1 AS value" }, db, first.hash)).toEqual({ ...first, changed: false });
+      expect(await runPreflight(pending, db, first.hash)).toEqual({ ...first, changed: false });
     } finally { db.close(); }
   });
 
-  test("plain SELECT changes when there is no prior hash", async () => {
-    const db = openDB();
-    try { expect((await runPreflight({ kind: "sql", query: "SELECT 1" }, db, null)).changed).toBe(true); }
-    finally { db.close(); }
-  });
-
-  test.each(["DELETE FROM x", "SELECT 1; DELETE FROM x", "SELECT * FROM x ATTACH DATABASE 'x' AS y", "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c) SELECT count(*) FROM c"]) (
-    "rejects unsafe SQL: %s", async (query) => {
+  test.each(["SELECT 1", "DELETE FROM x", "SELECT 1; DELETE FROM x", "SELECT * FROM x ATTACH DATABASE 'x' AS y", "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c) SELECT count(*) FROM c"]) (
+    "a stored SQL pre-check is refused, never run: %s", async (query) => {
       const db = openDB();
-      try { await expect(runPreflight({ kind: "sql", query }, db, null)).rejects.toThrow(); }
+      try { await expect(runPreflight({ kind: "sql", query }, db, null)).rejects.toThrow("SQL pre-checks were removed"); }
       finally { db.close(); }
     },
   );

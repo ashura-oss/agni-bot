@@ -1,0 +1,46 @@
+# gitleaks configuration for `bun run check:security` and the security workflow.
+# Needs gitleaks 8.25 or newer ([[allowlists]] and targetRules were added in
+# 8.25.0; https://github.com/gitleaks/gitleaks).
+#
+# Keep this file narrow. An allowlist entry is a place a real secret can hide,
+# so every entry says why it exists.
+title = "Agni Bot gitleaks config"
+
+[extend]
+# The built-in rule set (AWS, GitHub, OpenAI-style keys, private keys, generic
+# high-entropy "api key = ..." assignments, and so on).
+useDefault = true
+
+[[allowlists]]
+description = "Folders that are not project source: installed packages, build output, local agent worktrees"
+paths = [
+  '''(^|/)node_modules/''',
+  '''(^|/)dist/''',
+  '''(^|/)\.turbo/''',
+]
+
+[[allowlists]]
+description = "The lockfile holds package integrity hashes, which look like high-entropy secrets"
+paths = [
+  '''(^|/)bun\.lock$''',
+]
+
+[[allowlists]]
+description = "Protocol fixtures are generated, fake frames (placeholder token values)"
+paths = [
+  '''^packages/protocol/fixtures/''',
+  '''^packages/protocol/scripts/fixtures\.ts$''',
+]
+
+[[allowlists]]
+description = "A value containing one of these words is a test double, not a credential. Matched against the extracted secret, so a real key pasted next to the word 'test' is still caught."
+stopwords = [
+  "fake",
+  "test-key",
+  "test-secret",
+  "test-client",
+  "dummy",
+  "placeholder",
+  "example",
+  "canary",
+]

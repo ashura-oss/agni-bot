@@ -5,7 +5,7 @@
  */
 import { statSync } from "node:fs";
 import { resolve, sep } from "node:path";
-import { webAppHeaders } from "./csp";
+import { ASSET_HEADERS, webAppHeaders } from "./csp";
 
 export function webDir(env: Record<string, string | undefined> = process.env): string {
   return resolve(env.AGNI_WEB_DIR?.trim() || resolve(import.meta.dir, "../../../web/dist"));
@@ -37,6 +37,7 @@ export function webAppRequest(pathname: string, root = webDir(), host?: string):
     return new Response(Bun.file(path), {
       headers: {
         "cache-control": immutable ? "public, max-age=31536000, immutable" : "no-cache",
+        ...ASSET_HEADERS,
         ...(path.endsWith(".html") ? webAppHeaders(host) : {}),
       },
     });
