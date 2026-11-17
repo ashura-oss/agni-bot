@@ -2,7 +2,7 @@
  * The root: pairing or the two-column chat window, plus the overlays that can
  * appear over either. Keyboard commands mirror the Agni menu in the Mac app.
  */
-import { useEffect, useState, type CSSProperties } from "react";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { AlertTriangle, BellRing, X } from "lucide-react";
 import { useAppModel, useAppSnapshot } from "../state/use-app-model";
 import { appearanceVariables } from "../appearance";
@@ -19,6 +19,9 @@ import { DebugView } from "./DebugView";
 import { ChatGPTPlanNotice } from "./ChatGPTConnectionView";
 import { TasksView } from "./TasksView";
 import { ConnectionBanner } from "./ConnectionBanner";
+import { NotFoundView } from "./NotFoundView";
+import { RouteLoadingView } from "./RouteLoadingView";
+import { GroupView } from "./GroupView";
 
 export function RootView() {
   const model = useAppModel();
@@ -112,7 +115,7 @@ export function RootView() {
     >
       {snapshot.screen === "pairing" ? <PairingView /> : <ChatView />}
       {snapshot.isAgentSwitcherPresented ? <AgentSwitcherView /> : null}
-      {snapshot.isSettingsPresented ? <SettingsView /> : null}
+      {snapshot.isSettingsPresented && snapshot.screen !== "pairing" ? <SettingsView /> : null}
       {snapshot.isDebugPresented && snapshot.screen !== "pairing" ? <DebugView /> : null}
       <ChatGPTPlanNotice />
       {snapshot.toast ? <Toast /> : null}
@@ -124,23 +127,41 @@ function ChatView() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const snapshot = useAppSnapshot();
   const model = useAppModel();
+  const toggleSidebar = () => setSidebarCollapsed((value) => !value);
+  const route = snapshot.route;
+  // The Tasks screen is told which task the address names; it opens it (the id reaches it as a prop).
+  const taskRoute = { openTaskID: snapshot.routeTaskID };
+  let mainColumn: ReactNode;
+  if (snapshot.notFound) {
+    mainColumn = <NotFoundView onToggleSidebar={toggleSidebar} />;
+  } else if (snapshot.routePending) {
+    mainColumn = <RouteLoadingView onToggleSidebar={toggleSidebar} />;
+  } else if (route.kind === "group") {
+    mainColumn = <GroupView groupID={route.id} onToggleSidebar={toggleSidebar} />;
+  } else if (snapshot.isTasksPresented) {
+    mainColumn = <TasksView sidebarCollapsed={sidebarCollapsed} onToggleSidebar={toggleSidebar} {...taskRoute} />;
+  } else {
+    mainColumn = (
+      <main className="chat-main">
+        {snapshot.isNewChatPresented ? (
+          <NewChatView />
+        ) : (
+          <>
+            <ThreadHeader onToggleSidebar={toggleSidebar} />
+            <ConnectionBanner />
+            <ThreadView />
+          </>
+        )}
+      </main>
+    );
+  }
   return (
     <>
       <SidebarView collapsed={sidebarCollapsed} onCollapse={() => setSidebarCollapsed(true)} />
       {snapshot.isSidebarPresented ? (
         <div className="drawer-backdrop" onClick={() => model.closeSidebar()} />
       ) : null}
-      {snapshot.isTasksPresented ? <TasksView sidebarCollapsed={sidebarCollapsed} onToggleSidebar={() => setSidebarCollapsed((value) => !value)} /> : <main className="chat-main">
-        {snapshot.isNewChatPresented ? (
-          <NewChatView />
-        ) : (
-          <>
-            <ThreadHeader onToggleSidebar={() => setSidebarCollapsed((value) => !value)} />
-            <ConnectionBanner />
-            <ThreadView />
-          </>
-        )}
-      </main>}
+      {mainColumn}
       {snapshot.isAgentProfilePresented ? <AgentProfileView /> : null}
       {snapshot.isInspectorPresented ? <InspectorView /> : null}
     </>

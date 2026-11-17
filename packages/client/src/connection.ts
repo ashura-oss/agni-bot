@@ -298,7 +298,9 @@ export class AgniConnection {
           // Replayed/live overlap (H32). Errors reuse the current seq and bypass.
           const seq = frameSeq(frame);
           if (!isError && seq > 0 && seq <= this.settings.lastSeq) continue;
-          this.observe(seq);
+          // An error reuses the daemon's current seq; it is not a place in the stream. Taking it as one
+          // hides the frames the daemon held behind it (after a `resync_gap`, the roster), as if seen.
+          if (!isError) this.observe(seq);
 
           if (frame.type === "error" && !("__unknown" in frame) && frame.code === "resync_gap") {
             this.onEventValue?.({ type: "durableReloadRequired", restarted: false });

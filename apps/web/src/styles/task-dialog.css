@@ -1,0 +1,12 @@
+/* The new-task dialog (which also adds a subtask) keeps its fields their size and scrolls.
+ * The dialog is a column with a max height; left alone, its flex children shrink to fit, and the
+ * notes field was squeezed to 22px when the phone rules made the other fields 44px tall.
+ */
+.task-composer > * {
+  flex-shrink: 0;
+}
+
+/* About three lines, whatever else is in the dialog. */
+.task-composer .text-area {
+  min-height: 84px;
+}

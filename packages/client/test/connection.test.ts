@@ -325,6 +325,30 @@ describe("connection", () => {
     connection.stop();
   });
 
+  test("a resync gap does not hide the frames the server held for the handshake (stale session)", async () => {
+    // The daemon answers the gap with an error stamped with its CURRENT seq, then releases what it
+    // held behind hello.ok (the roster at seq 91). The error is not a stream position: if it moves
+    // lastSeq to 92, the roster at 91 is dropped as "already seen" and the bot list stays on the seed.
+    const transport = new FakeTransport([
+      { text: JSON.stringify({ type: "hello.ok", seq: 90, v: 1, serverTime: "now", lastSeq: 90 }) },
+      { text: JSON.stringify({ type: "error", seq: 92, code: "resync_gap", message: "cannot replay from 3" }) },
+      { text: JSON.stringify({ type: "agents.update", seq: 91, agents: [{ id: "scout", name: "Scout", tools: [] }] }) },
+      { text: JSON.stringify({ type: "presence", seq: 92, state: "online" }) },
+    ]);
+    const types: string[] = [];
+    const seqs: number[] = [];
+    const connection = new AgniConnection({ settings: settings(3), token: "t", makeTransport: () => transport, handshakeTimeoutMs: 5000 });
+    connection.onEvent = (event) => {
+      if (event.type === "frame") types.push(event.frame.type);
+      if (event.type === "lastSeq") seqs.push(event.seq);
+    };
+    connection.start();
+    expect(await settle(() => types.includes("presence"))).toBe(true);
+    connection.stop();
+    expect(types).toContain("agents.update");
+    expect(seqs).toEqual([91, 92]);
+  });
+
   test("unknown frames are ignored and bad ones are reported", async () => {
     const transport = new FakeTransport([
       { text: JSON.stringify({ type: "hello.ok", seq: 1, v: 1, serverTime: "now", lastSeq: 1 }) },

@@ -15,7 +15,11 @@ function focusables(root: HTMLElement): HTMLElement[] {
   return [...root.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((element) => !element.hasAttribute("hidden"));
 }
 
-export function useDialog(ref: RefObject<HTMLElement | null>, onClose: () => void): void {
+/**
+ * `initialFocus` is a selector for what should take focus when the dialog opens, in place of its
+ * first focusable element (Settings uses it to land on the open section, not on the first tab).
+ */
+export function useDialog(ref: RefObject<HTMLElement | null>, onClose: () => void, initialFocus?: string): void {
   const close = useRef(onClose);
   close.current = onClose;
 
@@ -27,7 +31,8 @@ export function useDialog(ref: RefObject<HTMLElement | null>, onClose: () => voi
     const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     if (!root.contains(document.activeElement)) {
       if (!root.hasAttribute("tabindex")) root.setAttribute("tabindex", "-1");
-      (focusables(root)[0] ?? root).focus({ preventScroll: true });
+      const wanted = initialFocus ? root.querySelector<HTMLElement>(initialFocus) : null;
+      (wanted ?? focusables(root)[0] ?? root).focus({ preventScroll: true });
     }
 
     const onKeyDown = (event: KeyboardEvent) => {

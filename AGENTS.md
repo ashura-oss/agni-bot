@@ -28,7 +28,7 @@ Where the fork is going:
 
 Upstream planning docs (`docs/blueprint-v3.html`, `docs/remaining-work.md`,
 and the rest) are useful history. They do not decide what this fork builds.
-`docs/README.md` says which docs matched the code when last audited.
+`docs/README.md` marks each doc as current or upstream history.
 
 ## Terminology
 
@@ -73,9 +73,11 @@ on purpose.
   close the request they cut off, with a model-only note (`agent/closure.ts`),
   so the next turn does not resume it or ask its approvals again. A timeout
   writes no note.
-- **Migrations are append-only.** Schemas live in
-  `apps/server/src/db/migrations.ts`. Add a new numbered migration; never edit
-  an applied one. There are currently 52.
+- **Migrations are append-only.** The base list is
+  `apps/server/src/db/migrations.ts` (ids 1 to 53). Ids 54 to 64 are reserved
+  for sprints 2 and 3 in `apps/server/src/db/s2/` and `db/s3/`. Add a new
+  numbered migration; never edit an applied one. `buildMigrations` throws on a
+  repeated id.
 - **Code wins over docs.** If a doc disagrees with the code, the code describes
   the behaviour. Fix the doc in the same change.
 
@@ -102,11 +104,14 @@ on purpose.
 - Tools: `apps/server/src/tools/` (`registry.ts`, `task-registry.ts`)
 - Background jobs and routines: `apps/server/src/jobs/`, `apps/server/src/routines/`
 - Plugins catalog, OAuth, credentials: `apps/server/src/plugins/`
-- Stores: `apps/server/src/stores/`, schema in `apps/server/src/db/`
+- Startup hooks, run once from `serve()`: `apps/server/src/startup/`
+- Shared seams from the P0 prep (stubs; do not describe as working until their sprint lands): `policy/tool-meta.ts` (types only), `policy/audit-sink.ts` (`audit()` drops events by default; no caller yet), `util/redact.ts` (`redact()` returns its input unchanged; `tools/bash.ts` has its own helper for the one-time secret), `models/usage-hook.ts` (the router reports each completion; the default recorder drops it), `util/secret-names.ts` (the secret-name classifier; no product code calls it yet).
+- Stores: `apps/server/src/stores/`. Database setup and migrations: `apps/server/src/db/` (`index.ts`, `migrations.ts`). `openDatabaseForCLI` refuses to run until every migration id is applied.
 - Shared client core: `packages/client/`
 - Web client: `apps/web/` (React + Vite)
 - Mac client: `apps/mac/` (SwiftUI). Behind the web client.
-- CLI: `apps/cli/src/index.ts`
+- Protocol client (`chat`, `ask`, `threads`, `history`, `ping`, `bench`): `apps/cli/src/index.ts`
+- Server command line (the `agni` bin: `setup`, `serve`, `daemon`, `migrate`, `pair`, `job`, `service`): `apps/server/src/index.ts`. Sprint commands register in `apps/server/src/cli/`: `command-table.ts` merges the tables, `extra-commands.ts` lists them, and `runExtraCommand` runs them.
 - Install and deploy material: `infra/`. Dev tools only: `tools/`.
 - Marketing pages: `apps/landing/`, `apps/public/`
 - Acceptance evals: `evals/` (`bun run eval`), seven checks
@@ -121,15 +126,21 @@ on purpose.
   pid file. Per-file overrides exist (`AGNI_DB_PATH`, `AGNI_PID_PATH`,
   `AGNI_LOG_PATH`, `AGNI_PLUGINS_PATH`, `AGNI_PROVIDER_CONFIG_PATH`,
   `AGNI_SCRATCH_DIR`, `AGNI_SHARE_DIR`). Check the code before stating a path.
+- **Provider settings file.** `providers.json` defaults to `AGNI_HOME`, not
+  `data/`. An older copy under the repo's `data/` folder is moved there on first
+  run (`apps/server/src/home.ts`).
 - **Timeouts.** First token 30000 ms, turn 120000 ms.
-- **Every provider is OpenAI-compatible `chat/completions`.** Adding a model
-  source is a provider entry, not a new client. Custom endpoints are already
-  supported through the provider config file.
+- **Every API-key provider is OpenAI-compatible `chat/completions`.** Adding a
+  model source is a provider entry, not a new client. Custom endpoints are
+  already supported through the provider config file. The ChatGPT subscription
+  source is the exception: it calls the Responses API
+  (`apps/server/src/models/chatgpt-responses.ts`).
 - **Evals run on a stub model.** They do not yet prove behaviour on a real
   provider. EVAL-007 is always skipped.
 - **On Windows, shell tools need Git for Windows (Git Bash).**
 - **Not built yet:** Slack and Discord integrations, the generic plugin loader
-  in `extensions/README.md`, voice, a mobile app, and coding jobs.
+  in `extensions/README.md`, voice, a mobile app, coding jobs, and built-in
+  Qwen and DeepSeek provider entries (use a custom endpoint for now).
 - **Large files.** `ws/dispatch.ts`, `agent/task-loop.ts`,
   `apps/web/src/state/app-model.ts`, and `apps/web/src/styles/app.css` are
   each over a thousand lines. Read the relevant part before editing; prefer

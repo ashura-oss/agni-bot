@@ -5,6 +5,7 @@ schedule in a timezone, and before each run it checks its preflight:
 
 - `http`: fetches the URL and compares the ETag, or a hash of the body.
 - `sql`: runs one read-only `SELECT` on the Agni Bot database and hashes the rows.
+- `mail`: one IMAP `UNSEEN` search. See Event triggers below.
 - `none`: always counts as changed.
 
 When the preflight shows no change, the run is recorded as `skipped_no_delta`
@@ -33,16 +34,20 @@ A routine cannot be created from a turn that started from another bot's message.
 | `allowedDomains` | empty | web tools refuse every host; `routine_create` always leaves it empty |
 | Preflight | `none` | `sql` must be one read-only `SELECT`, with no `;` and no `WITH` |
 
-A routine run can use only the read-only tools: memory and transcript search,
-links, tasks, grep, glob, read_file, web search and fetch, mail search and read,
-recall_fact, and skills. It cannot send mail, run bash, write files, hand off to
-another bot, or change jobs or routines.
+A routine run can use only these tools: memory search, transcript search, links
+search, tasks list, web search and fetch, mail read, `recall_fact`, and the
+skills tools. Mail search and calendar list are added only when the routine has
+no `allowedDomains`, so what it reads has no web egress. A routine cannot send
+mail, run bash, read or write files (`read_file`, `grep`, and `glob` are not
+offered), hand off to another bot, or change jobs or routines.
+
+The allowlist is `ROUTINE_TOOL_ALLOWLIST` in `apps/server/src/routines/run.ts`.
 
 ## Known limits
 
 - The SQL preflight rejects `WITH`, so it cannot run recursive queries.
 - A bot may hold at most 20 routines.
-- A state block over 4 KB is refused. The prior state is kept and the run records a warning.
+- A state block over 4,096 characters is refused. The prior state is kept and the run records a warning.
 - An `http` preflight checks every redirect hop: http or https only, and a public host. It follows at most 5 redirects.
 
 ## Not built
@@ -50,7 +55,7 @@ another bot, or change jobs or routines.
 Crystallization, webhook triggers, Telegram, Discord and Slack delivery, shell
 preflight, USD budgets, and a kernel sandbox.
 
-## Event triggers and templates (Phase 2)
+## Event triggers and templates
 
 - A `mail` preflight (`{kind:"mail", account:"agent"|"owner"}`) is the new-mail
   trigger: pair it with a short cron (5 minutes is the minimum). Each tick does

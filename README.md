@@ -12,20 +12,24 @@ and a Gmail mailbox for the agent. Full plan:
 modify it; selling it or using it commercially is not allowed. See
 [`LICENSE.md`](LICENSE.md) (PolyForm Noncommercial 1.0.0).
 
+The fork's first model sources are Qwen and DeepSeek, chosen to keep running
+costs low. Built-in provider entries for them are planned. The providers built in today are
+listed in [`docs/architecture.md`](docs/architecture.md).
+
 ## Layout
 
 | Path | What it is |
 | --- | --- |
-| `apps/server` | Bun + TypeScript core: WebSocket protocol, agent loop, model router, SQLite stores, daemon lifecycle, job queue. Runs on this Mac now, bb-1 later. |
+| `apps/server` | Bun + TypeScript core: WebSocket protocol, agent loop, model router, SQLite stores, daemon lifecycle, job queue. Its command line is the `agni` command. Runs on this Mac now, bb-1 later. |
 | `apps/web` | React + Vite web client, a faithful port of the native Mac UI. Shares `@agni/client` with future shells. |
 | `apps/mac` | Native SwiftUI macOS client (`AgniApp` + `AgniKit`). Token in Keychain, resumable streaming. |
 | `apps/app` | Planned Tauri 2 client (macOS + Android). README only; no runnable code yet. |
 | `packages/client` | Client core: frame decoding, connection loop, conversation reducer, settings, formatting. Used by the web app; the reference for the Swift port. |
 | `packages/protocol` | Wire protocol v2: typed frames shared by server and every client. This is the contract. |
-| `apps/cli` | Protocol client: `chat` (interactive), `ask`, `bench`, `ping`. The P0 proof gate lives here. |
+| `apps/cli` | Protocol client: `chat` (interactive), `ask`, `threads`, `history`, `bench`, `ping`. The P0 proof gate (`bench`) lives here. |
 | `infra` | Deploy material: `install.sh`, `launchd/`, `systemd/`, `env.example`, `firecrawl.compose.yml`, `wrangler.toml`. See `infra/README.md`. |
 | `tools` | Dev tools only (mock provider, read-only audit). |
-| `docs` | Blueprint v3 (canonical), architecture notes, protocol spec. |
+| `docs` | Architecture, protocol, plugins, and routines. `docs/README.md` says which docs are current and which are upstream history. |
 
 ## Quickstart
 
@@ -95,7 +99,7 @@ app and CLI. For remote access, run `tailscale serve --bg 8787` and set
 Useful commands:
 
 ```sh
-bun run check               # typecheck + web/client Vitest + Bun server tests
+bun run check               # typecheck, web and client tests, server tests, and evals
 bun run web:build           # production bundle in apps/web/dist
 bun run --filter @agni/client smoke   # headless client core against a live daemon
 bun run --filter @agni/web smoke:ui   # Playwright smoke (needs AGNI_URL/AGNI_TOKEN
@@ -139,7 +143,7 @@ bun run job run <id>        # make a job due now
 bun run job rm <id>         # cancel
 ```
 
-Jobs run in the daemon's `turn` lane: the model call streams into its thread
+Turn jobs run on the daemon's job pool (`AGNI_JOB_CONCURRENCY`, default 2). The model call streams into its thread
 (so any client sees it live) and completion raises a `notify` frame. Failures
 retry with backoff, then land as `failed` with a notification.
 
@@ -160,8 +164,9 @@ never returned to the model, written to the transcript, or logged.
 - **No chat pasting:** the agent is instructed never to ask for a password in
   prose. If it does, refuse and use the card.
 
-The secret is injected via stdin and a short-lived 0600 askpass file in a 0700
-temp directory; it is removed when the command exits. Output is scrubbed of the
+The secret never goes on the command line or into the environment. It is written
+to a 0600 file in a private temp directory, and a 0700 askpass script prints it to
+the command. The directory is removed when the command exits. Output is scrubbed of the
 exact value before it reaches the model.
 
 **On a Mac, the operating system can ask instead.** `run_privileged` takes an
@@ -200,8 +205,8 @@ nothing shows there that the agent could not have recalled — a private
 agent's fact is not in the list, and another agent's scoped note is not
 either.
 
-Editing and deleting come later; the read view ships first, because a
-memory you cannot see is a memory you cannot trust.
+The web Inspector is read-only today. The protocol has frames to edit, pin, and
+forget a memory (see [`docs/protocol.md`](docs/protocol.md), Editable memory).
 
 ### The acceptance suite
 
@@ -224,8 +229,9 @@ promise breaks:
 | EVAL-007 | provider-backed quality — checks that need a live model provider |
 
 They run against an in-memory database and a stub model, so they measure
-the *system* rather than the luck of a provider. The provider-backed checks
-are skipped when there is no key.
+the *system* rather than the luck of a provider. EVAL-001b (the hybrid recall
+check) is skipped when no embedder is configured. EVAL-007 is always skipped:
+its live-provider path is not part of the deterministic suite.
 
 ### Seeing what the agent is doing
 
@@ -252,9 +258,8 @@ work:
   (the executive assistant is the owner's proxy), and a new agent created in
   chat starts at `summary`.
 
-One rule holds it together: every path that can carry another agent's text
-goes through the same redaction helper — tool results, task rows, recall, and
-the logs. A fact is scoped the same way: `scope=agent` memory is unreadable
+The rules live in one module, `agent/visibility.ts`. Handoffs, delegated
+results, background results, group chat, and the critic step call its helpers. A fact is scoped the same way: `scope=agent` memory is unreadable
 by other agents, and a private fact is readable by its owner alone.
 
 Change it with `update_agent` (`visibility: private | summary | shared`) or
@@ -303,16 +308,16 @@ score = relevance * recency_decay(last_used_at) * salience * (1 + log(1 + use_co
 
 and a recall moves `last_used_at` and `use_count`, so the formula reflects
 what actually gets used. Below the confidence floor (`AGNI_MIN_RECALL_SCORE`,
-default `0.15`) nothing is injected — a plausible match that is not good
+default `0.2`) nothing is injected — a plausible match that is not good
 enough is still nothing.
 
 The agent can search the transcript itself with `transcript_search`; the
 search respects the same visibility rules as everything else, so a private
 agent's conversation is not searchable from outside.
 
-Retrieval is hybrid when a local embedder is configured
-(`AGNI_EMBEDDING_BASE_URL` or `AGNI_OLLAMA_BASE_URL`, plus
-`AGNI_EMBEDDING_MODEL`). The text search comes first — it is local and
+Retrieval is hybrid when an embedder is configured (`AGNI_OLLAMA_BASE_URL` for
+Ollama, or `AGNI_EMBEDDING_BASE_URL` for an OpenAI-compatible endpoint).
+`AGNI_EMBEDDING_MODEL` sets the model name. The text search comes first — it is local and
 fast — and the embedder is the *lift* for the cases the text search cannot
 serve. If the embedder is down, recall falls back to FTS alone. There is no
 vector service: the vectors live in the database and the similarity is
@@ -325,7 +330,7 @@ anything — forgetting is still the owner's call.
 
 The slot budgets of the context assembler are configuration:
 `AGNI_SLOT_PINNED_CORE`, `AGNI_SLOT_ANCHOR`, `AGNI_SLOT_LEDGER`,
-`AGNI_SLOT_SUMMARIES`, `AGNI_SLOT_RECALL` (tokens).
+`AGNI_SLOT_SUMMARIES`, `AGNI_SLOT_RECALL`, `AGNI_SLOT_PREVIOUS_TAIL` (tokens).
 
 ### Smoke test without any keys
 
@@ -362,13 +367,15 @@ Model choices changed in the Mac app are stored in `~/.agni/providers.json`
 (mode 600). Provider API keys stay in `config.env`; the JSON file contains model
 IDs only. `AGNI_HOME` itself must be set in the process environment.
 
-## Phases
+## Phases (plan)
+
+This is the plan from the blueprint. It is not a status report.
 
 | Phase | Scope | Proof |
 | --- | --- | --- |
 | P0 | Server + instant lane, CLI test client | p50 ≤ 1.5 s over the socket, streaming deltas, failover on 429 |
 | P0.5 | Daemon lifecycle, chat REPL, background jobs | `daemon start`, `chat` streams, scheduled job lands in a thread + notify |
-| P1 | Mac app (Tauri): pairing, threads, streaming, resync | Kill app mid-turn, reopen, turn resumes |
+| P1 | Mac app (SwiftUI): pairing, threads, streaming, resync | Kill app mid-turn, reopen, turn resumes |
 | P2 | Memory/links/tasks stores + 07:55 brief via ntfy | Capture → retrieve → approve from a notification |
 | P3 | ACP (codex-acp) + MCP (REA) | Repo task streams from Codex into the same thread UI |
 | P4 | Gmail (IMAP/SMTP app password) + calendar ICS | Approved draft sends; brief shows a real event |
@@ -384,8 +391,8 @@ P0–P2 is the "faster than Hermes and usable daily" milestone.
   never in the apps.
 - Anything that shells out, writes files outside scratch, sends mail, or pays
   money is approval-gated before it is implemented.
-- No IDE features, ever. Repo-shaped work is delegated through ACP harnesses.
-- `bun test` and `bun run typecheck` pass before every commit.
+- No IDE features, ever. Repo-shaped work is planned for ACP harnesses (P3), not built.
+- `bun run typecheck`, `bun run test`, and `bun run test:web` pass before a change is called done. `bun run check` runs them with the evals.
 
 ### Writing messages and attaching files (web)
 
@@ -402,6 +409,6 @@ exact IDs of already-configured models that support image input. A missing
 vision model is reported before the message is sent; text/PDF uploads do not
 need vision. Provider keys continue to live only on the server.
 
-After installing this update, restart the daemon (`bun run daemon restart`)
+After an update, restart the daemon (`bun run daemon restart`)
 and Vite (`Ctrl+C`, then `bun run web`). Database migrations apply automatically at
-server startup. The native SwiftUI app has not gained attachment controls yet.
+server startup. The native SwiftUI app does not have attachment controls yet.

@@ -1,74 +1,75 @@
 # Docs index
 
-Status of every doc in the repo, so an AI agent knows what to trust. Statuses
-were set on 2026-10-26 by reading the code, and updated after the owner's
-decisions that day. Where a doc and the code disagree, the code wins for
-behaviour and the doc is stale.
+Which docs to trust, and which are only history. Statuses were checked against
+the code on `dev` on 2026-11-17. Where a doc and the code disagree, the code
+describes the behaviour and the doc is wrong.
 
-Read in this order first:
+Read these first:
 
-1. [`../AGENTS.md`](../AGENTS.md): what Agni Bot is, terminology, hard rules, traps.
-2. [`architecture.md`](architecture.md): the two-minute system map.
-3. [`blueprint-v3.html`](blueprint-v3.html): the canonical plan, for product intent.
-4. [`protocol.md`](protocol.md): the wire contract (protocol v2).
+1. [`../AGENTS.md`](../AGENTS.md): what Agni Bot is, its terms, hard rules, traps, and where the code lives.
+2. [`architecture.md`](architecture.md): the system map.
+3. [`protocol.md`](protocol.md): the wire contract (protocol v2).
+4. [`plugins.md`](plugins.md) and [`routines.md`](routines.md): outside accounts and scheduled work.
+5. [`blueprint-v3.html`](blueprint-v3.html): the original plan. Use it for intent, not for status.
 
 ## Status key
 
-- **CURRENT**: matches the code as checked.
-- **PARTLY STALE**: mostly right, with named claims that are out of date.
-- **STALE**: superseded or contradicted by code. Do not use as current status.
-- **PLAN**: a design or plan. Not a statement of what is built.
-- **NOT AUDITED**: not checked against code in this pass. Treat with caution.
-- **LEGACY**: moved to `../legacy/`. Not product docs. Do not use as product facts.
+- **current**: maintained for this fork. Matches the code as checked on the date above.
+- **upstream history**: written for the friends' project, or an old plan. Kept
+  unchanged so merges from upstream stay simple. It is not a statement of what
+  this fork builds. Check the code before you quote it.
 
-## Repo-level docs
+## Every file in docs/
 
-| Path | Status | Notes |
+| File | Status | What it is |
 | --- | --- | --- |
-| `AGENTS.md` | CURRENT | Root guide for AI agents. |
-| `README.md` | CURRENT | Intro with bot framing and license note. Seven evals. Data paths match `~/.agni/`, except `providers.json`. |
-| `extensions/README.md` | CURRENT | Placeholder. The extension loader is not built. |
-| `.deepsec/README.md`, `.deepsec/AGENTS.md` | NOT PRODUCT | Security-scan workspace for the repo, not product docs. |
-| `thoughts.md` | PARTLY STALE | Mac pairing notes. Some items may be out of date. |
-| `legacy/notes/status.md` | LEGACY | Personal ops note (Jarvis health agent, Firecrawl). |
-
-## docs/
-
-| Path | Status | Notes |
-| --- | --- | --- |
-| `architecture.md` | CURRENT | Rewritten 2026-10-26. |
-| `blueprint-v3.html` | PARTLY STALE | Canonical plan. Framing corrected 2026-10-26. Section 10 has a Status column (2026-10-26) that says what is built. The plan rows are unchanged history. |
-| `protocol.md` | CURRENT | Protocol v2. Verified against `packages/protocol` in part; re-check frame details there. |
-| `plugins.md` | CURRENT | Rewritten 2026-10-26. Built vs planned is in its status table. |
-| `remaining-work.md` | CURRENT | Reported current by audit. Not line-checked. |
-| `agni-context-memory-spec.md` | CURRENT | Context and memory spec. Reported current by audit. |
-| `research-context-management.md` | CURRENT | Research brief for context management. |
-| `harness-review.md` | CURRENT | The nightly harness review (tool-usage proposals). Approval UI and eval probing are not built. |
-| `p2-plan.md` | STALE | Historical P2 plan. A status banner was added 2026-10-26; tools are now registered. |
-| `issues-to-fix.md` | PARTLY STALE | Issue list. Entries need checking against code before action. |
-| `routines-plan.md` | PLAN | Built on feat/agnibot-routines (not merged yet). Plan for the build; sections 0-9 describe the build as it was made. |
-| `ui-design.md` | CURRENT | Desktop messaging V3, preserved V2 customization, and deferred T3-inspired options; earlier mobile rationale is marked historical. |
-| `ui-mocks.html` | PARTLY STALE | Mocks. One bot is labelled "Agni Instant". "Instant" is a lane name, not a bot name. |
-| `gmail-plan.html`, `plugins-plan.html`, `google-oauth-setup.html` | PLAN | Plans and setup notes. Check the code before quoting them. |
-| `homepage.html` | NOT AUDITED | |
-| `legacy/docs/audit-context-memory-spec.md` | STALE / LEGACY | Superseded by `remaining-work.md`. Moved to `legacy/` 2026-10-26. |
-| `legacy/docs/research/motorcyclist-safety/*.md` | LEGACY | Singapore road-safety research. Unrelated to the product. |
+| `README.md` | current | This index. |
+| `architecture.md` | current | System map: clients, server, jobs, task lane, stores, plugins, shared seams. |
+| `protocol.md` | current | Wire contract for protocol v2: frames, limits, error codes. |
+| `plugins.md` | current | Connected accounts and MCP servers: catalog, capability modes, trusted tools. |
+| `routines.md` | current | Scheduled routines: preflight, allowed tools, limits, event triggers. |
+| `agni-context-memory-spec.md` | upstream history | Upstream context and memory spec. |
+| `backend-improvement-plan.md` | upstream history | Upstream backend improvement plan. Its bug list may be stale. |
+| `blueprint-v3.html` | upstream history | Original product plan. Section 10 has a status column dated 2026-10-26. |
+| `gmail-plan.html` | upstream history | Upstream Gmail plan. |
+| `google-oauth-setup.html` | upstream history | Upstream Google OAuth setup notes. |
+| `harness-review.md` | upstream history | Upstream design for a nightly harness review. |
+| `homepage.html` | upstream history | Upstream homepage draft. Not audited. |
+| `issues-to-fix.md` | upstream history | Upstream issue list. Entries need checking against the code. |
+| `p2-plan.md` | upstream history | Historical P2 plan. |
+| `plugins-plan.html` | upstream history | Upstream plugin plan. Use `plugins.md` for status. |
+| `remaining-work.md` | upstream history | Upstream list of remaining work. Not line-checked. |
+| `research-context-management.md` | upstream history | Upstream research brief on context management. |
+| `routines-plan.md` | upstream history | Plan for the routines build. Its sections describe the build as it was made. Use `routines.md` for status. |
+| `ui-design.md` | upstream history | Upstream UI design notes. |
+| `ui-mocks.html` | upstream history | Upstream UI mocks. One bot label is a lane name, not a bot. |
 
 ## Other locations
 
+These were audited on 2026-10-26. The rows marked "not re-checked" were not
+checked again on 2026-11-17.
+
 | Path | Status | Notes |
 | --- | --- | --- |
-| `apps/web/README.md` | CURRENT | Run and smoke commands match the scripts. Its "port of the Mac client" line is still accurate. |
-| `apps/mac/README.md` | CURRENT | Corrected to protocol v2 on 2026-10-26. |
-| `apps/mac/DESIGN.md` | NOT AUDITED | Design notes. |
-| `apps/app/README.md` | PLAN | Tauri client. No app code exists yet. |
-| `apps/landing/index.html` | CURRENT | Rebuilt 2026-10-26: thread-led hero, bot roster, speed ledger, quickstart. Public repo and deploy links removed. Connections list matches the code. |
-| `apps/public/index.html`, `apps/public/privacy.html` | NOT AUDITED | Privacy page names integrations (Google, Granola, Notion). Those exist in the catalog. The page should not imply Slack or Discord. |
-| `legacy/agni-report.html`, `legacy/artifacts/*.html` | LEGACY | Old generated review artifacts. Not canon. |
+| `README.md` | current | Repo intro, quickstart, and dev commands. Updated 2026-11-17. |
+| `AGENTS.md` | current | Codebase map and engineering rules for agents. Updated 2026-11-17. |
+| `apps/web/README.md` | current, not re-checked | Run and smoke commands. |
+| `apps/mac/README.md` | current, not re-checked | Mac client (SwiftUI). |
+| `apps/mac/DESIGN.md` | not audited | Design notes. |
+| `apps/app/README.md` | planned | Tauri client. No app code exists yet. |
+| `apps/landing/index.html` | current, not re-checked | Landing page. |
+| `apps/public/index.html`, `apps/public/privacy.html` | not audited | The privacy page names integrations (Google, Granola, Notion). It should not imply Slack or Discord. |
+| `infra/README.md`, `infra/npm/README.md` | not audited | Install and deploy notes. |
+| `extensions/README.md` | placeholder | The extension loader is not built. |
+| `thoughts.md` | partly stale | Mac pairing notes. |
+| `bug.md` | not audited | Open bug list named in `AGENTS.md`. |
+| `.deepsec/README.md`, `.deepsec/AGENTS.md` | not product docs | Security-scan workspace. |
+| `legacy/` | legacy | Superseded material. Not product facts. |
 
 ## Known gaps
 
 - No doc covers the `tools/audit/` peer-memory audit script.
-- `providers.json` still defaults to `data/` in the working directory, while the
-  other state files default to `~/.agni/`. See `AGENTS.md`.
-- A local `.env` that still sets `AGNI_DB_PATH=data/...` keeps the old DB location.
+- The shared seams added in the P0 shared prep (`redact()`, the audit sink,
+  `ToolMeta`, the usage recorder, and the secret-name classifier) are stubs or
+  have no callers yet. `architecture.md` lists them. No doc describes them as working.
+- A local `.env` that still sets `AGNI_DB_PATH=data/...` keeps the old database location.

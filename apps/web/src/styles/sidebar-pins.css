@@ -1,0 +1,65 @@
+/* The way back from a pin: the star in the corner of a pinned bot's tile is a button.
+ * It sits beside the tile (a button cannot hold a button) and is always drawn, so a pin
+ * made by accident on a touch screen can be undone there, and by keyboard.
+ */
+.sidebar-tile-cell {
+  position: relative;
+  min-width: 0;
+}
+
+.sidebar-tile-cell > .sidebar-tile {
+  height: 100%;
+}
+
+.sidebar-tile-unpin {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--hairline);
+  border-radius: 50%;
+  background: var(--surface-raised);
+  color: var(--ink-secondary);
+  transition: border-color var(--motion-snappy);
+}
+
+.sidebar-tile-unpin svg {
+  fill: var(--amber);
+  stroke: currentColor;
+}
+
+.sidebar-tile-unpin:hover {
+  border-color: var(--ink-secondary);
+}
+
+@media (max-width: 720px), (hover: none) {
+  /* Room above the first row, so the touch area below is not clipped by the scrolling list. */
+  .sidebar-grid {
+    padding-top: 8px;
+  }
+
+  /* A phone, or any touch screen with no hover (a tablet is wider than 720px), gets a 44px touch area.
+   * It must not sit on the tile: a tap on the tile's top-right would unpin instead of opening the chat.
+   * So the cell keeps a strip above the tile for the button.
+   * The circle is 22px in the strip; its touch area is the strip's full height, reaching 8px above the
+   * cell (the grid's row gap, or its top padding) and 23px to the left of the circle. It stops where
+   * the tile begins. The inset is from the padding box, inside the 1px border. */
+  .sidebar-tile-cell {
+    padding-top: 36px;
+  }
+
+  .sidebar-tile-unpin {
+    top: 7px;
+    right: 0;
+  }
+
+  .sidebar-tile-unpin::after {
+    content: "";
+    position: absolute;
+    inset: -16px -1px -8px -23px;
+  }
+}
