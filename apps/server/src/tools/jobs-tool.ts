@@ -68,6 +68,11 @@ export interface ScheduledJobView {
   lastResult: string | null;
 }
 
+/** What a bot is told when a job it asks for could never be made. One text each, said before the owner is asked and again when the job is made. */
+const SELF_ONLY = "an agent may only schedule jobs for itself";
+const NOTHING_TO_DO = "a scheduled job needs something to do";
+const notADate = (at: unknown): string => `"${String(at)}" is not a date`;
+
 const MIN_EVERY_MINUTES = 5;
 const MAX_EVERY_MINUTES = 10_080;
 
@@ -162,10 +167,10 @@ export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: 
   const { root, denialRoot, createdByRequest, created, taint } = from;
   const requested = args.agentID?.trim();
   if (requested && canonicalAgentID(requested) !== canonicalAgentID(callerAgentID)) {
-    throw new Error("an agent may only schedule jobs for itself");
+    throw new Error(SELF_ONLY);
   }
   const text = args.text.trim();
-  if (!text) throw new Error("a scheduled job needs something to do");
+  if (!text) throw new Error(NOTHING_TO_DO);
   if (closureWording(text)) throw new Error(CLOSURE_WORDING_REFUSAL);
   const full = capProblem(db, callerAgentID);
   if (full) throw new Error(full);
@@ -191,7 +196,7 @@ export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: 
   let recurrence: string;
   if (args.at) {
     const when = new Date(args.at);
-    if (Number.isNaN(when.getTime())) throw new Error(`"${args.at}" is not a date`);
+    if (Number.isNaN(when.getTime())) throw new Error(notADate(args.at));
     runAt = when.toISOString();
     recurrence = "once";
     // Still the request it was scheduled in, for its wake count (it has a clock of its own, which `clockKey` would take away).
@@ -323,6 +328,13 @@ function callerOf(ctx: ToolContext): string {
 function scheduleProblem(db: Database, args: Record<string, unknown>, bot: string | undefined): string | null {
   const given = (value: unknown): boolean => value !== undefined && value !== null;
   if ([args.at, args.dailyAt, args.everyMinutes].filter(given).length > 1) return "pick one: `at`, `dailyAt` or `everyMinutes`";
+  // Whose job it is, and what it says: the owner is not asked about a job that `scheduleJob` would refuse for either.
+  const requested = typeof args.agent_id === "string" ? args.agent_id.trim() : "";
+  if (requested && bot && canonicalAgentID(requested) !== canonicalAgentID(bot)) return SELF_ONLY;
+  const text = typeof args.text === "string" ? args.text.trim() : "";
+  if (!text) return NOTHING_TO_DO;
+  if (closureWording(text)) return CLOSURE_WORDING_REFUSAL;
+  if (given(args.at) && (typeof args.at !== "string" || !args.at.trim() || Number.isNaN(new Date(args.at).getTime()))) return notADate(args.at);
   try {
     if (given(args.dailyAt)) parseWallClock(String(args.dailyAt));
     if (given(args.dailyAt) && Array.isArray(args.days)) for (const day of args.days) parseDay(String(day));

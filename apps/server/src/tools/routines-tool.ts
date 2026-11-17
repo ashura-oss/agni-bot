@@ -34,7 +34,16 @@ function callerRoutine(db: Database, id: string, agentID: string): Routine {
   return routine;
 }
 
-function createRoutine(db: Database, args: Record<string, unknown>, agentID: string): Routine {
+/** What a `routine_create` call asks for, once it has been checked. */
+interface CheckedRoutine {
+  name: string; prompt: string; cron: string; timezone: string; misfire: "skip" | "run_once"; preflight: Preflight; maxTokens: number; maxExecutionMs: number;
+}
+
+/**
+ * Check what a `routine_create` call asks for: everything `createRoutine` refuses, in one place, so the engine can say it before the
+ * owner is asked about a routine that could never be made. Throws the refusal.
+ */
+function checkRoutine(db: Database, args: Record<string, unknown>, agentID: string): CheckedRoutine {
   const name = String(args.name ?? "").trim();
   const prompt = String(args.prompt ?? "").trim();
   const cron = String(args.cron ?? "").trim();
@@ -72,6 +81,21 @@ function createRoutine(db: Database, args: Record<string, unknown>, agentID: str
   if (listRoutines(db).filter((r) => r.agentID === agentID).length >= MAX_ROUTINES_PER_BOT) {
     throw new Error(`routine limit reached: ${MAX_ROUTINES_PER_BOT} per bot`);
   }
+  return { name, prompt, cron, timezone, misfire: misfireValue, preflight, maxTokens, maxExecutionMs };
+}
+
+/** Why this `routine_create` call can never be made into a routine by this bot, or null. */
+function routineProblem(db: Database, args: Record<string, unknown>, bot: string | undefined): string | null {
+  try {
+    checkRoutine(db, args, bot ?? "ea");
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
+function createRoutine(db: Database, args: Record<string, unknown>, agentID: string): Routine {
+  const { name, prompt, cron, timezone, misfire: misfireValue, preflight, maxTokens, maxExecutionMs } = checkRoutine(db, args, agentID);
   const id = newID("rtn");
   const createdAt = nowISO();
   const runAt = nextRun(cron, timezone, new Date()).toISOString();
@@ -100,6 +124,8 @@ export function createRoutineTools(db: Database): ToolDefinition<unknown, unknow
         misfire: { type: "string", enum: ["skip", "run_once"] },
         maxTokens: { type: "integer", minimum: 1, maximum: 16000 }, maxExecutionMs: { type: "integer", minimum: 1, maximum: 600000 },
       }, ["name", "prompt", "cron", "timezone"]), timeoutMs: 5_000,
+      // What the schema cannot say: a routine that could never be made is refused before the owner is asked about it.
+      validate: (args, bot) => routineProblem(db, args, bot),
       handler: async (args, ctx) => {
         if (ctx.peerInput) return { error: "not done: this turn started from another agent's message" };
         return createRoutine(db, (args ?? {}) as Record<string, unknown>, ctx.chain?.currentAgentID ?? "ea");
