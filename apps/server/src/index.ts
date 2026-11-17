@@ -55,7 +55,8 @@ import { secureDirectory, secureFile, verifyHomePrivate } from "./util/private-f
 import { extraHelpLines, runExtraCommand } from "./cli/extra-commands";
 import { runStartupHooks } from "./startup";
 import { loadVaultEnvForCli, unlockVaultAtStart, vaultRefusalMessage } from "./startup/s3-vault";
-import { ServeLockError, acquireServeLock } from "./startup/s3-serve-lock";
+import { ServeLockError, type ServeLock } from "./startup/s3-serve-lock";
+import { acquireServeLockAtStart } from "./startup/s3-serve-start";
 
 const [command = "help", ...args] = Bun.argv.slice(2);
 
@@ -107,8 +108,9 @@ async function serve(): Promise<void> {
   }
   // The lock says "a server has this home open" to `agni vault migrate` and `export`, which the
   // pid file cannot (a foreground or service-managed serve writes none). Held until exit.
+  let serveLock: ServeLock;
   try {
-    acquireServeLock();
+    serveLock = await acquireServeLockAtStart();
   } catch (error) {
     console.error(`Agni cannot start: ${error instanceof ServeLockError ? error.message : String(error)}`);
     process.exit(1);
@@ -151,6 +153,9 @@ async function serve(): Promise<void> {
     }
     throw error;
   }
+  // The port is ours: the lock now says where this server listens, which is how a later `serve` tells this server from a
+  // pid the machine reused after it was killed.
+  serveLock.recordEndpoint(config.host, config.port);
   // Only after the port is ours: a second `serve` that hit EADDRINUSE must
   // not re-queue the live daemon's running jobs.
   const requeued = requeueStuckJobs(db);
