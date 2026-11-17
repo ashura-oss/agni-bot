@@ -236,7 +236,7 @@ function recordedBody(toolName: string, args: Record<string, unknown>, options: 
 
 /** The protocol's name for each kind of outside text a run can have read. */
 const SOURCE_KIND: Record<TaintKind, ApprovalSource["kind"]> = {
-  web: "web", email: "email", peer: "agent", attachment: "attachment", mcp: "connector", routine: "scheduled", scheduled: "scheduled", unknown: "unknown",
+  web: "web", email: "email", peer: "agent", attachment: "attachment", mcp: "connector", routine: "scheduled", scheduled: "scheduled", history: "unknown", unknown: "unknown",
 };
 
 /** The card's sources as the frame carries them: newest first, one line each, hidden characters shown as escapes (a label is a page title or a sender name: outside text). */
@@ -261,6 +261,7 @@ const SOURCE_LINE: Record<string, (bot: string, label: string) => string> = {
   mcp: (bot, label) => `${bot} read ${label} earlier in this task.`,
   routine: () => "This task started from saved routine state, not from you.",
   scheduled: () => "This task started from a scheduled job, not from you.",
+  history: (bot) => `${bot} is carrying on a conversation in which an earlier run read outside content.`,
   unknown: (bot) => `${bot} read outside content earlier in this task.`,
 };
 

@@ -28,7 +28,7 @@ export type { AuditEvent, AuditSink } from "./audit-sink";
  * What kind of outsider text a run has read. The approval card names it:
  * "Ava read a web page earlier in this task: example.com/offers".
  */
-export type TaintKind = "web" | "email" | "peer" | "attachment" | "mcp" | "routine" | "scheduled" | "unknown";
+export type TaintKind = "web" | "email" | "peer" | "attachment" | "mcp" | "routine" | "scheduled" | "history" | "unknown";
 
 export interface TaintSource {
   kind: TaintKind;

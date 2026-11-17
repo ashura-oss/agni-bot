@@ -576,6 +576,10 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
       ...(principal.kind === "peer" && run.policy?.taint === undefined ? [unknownTaint(`a brief from ${run.peer?.from ?? "another bot"}, which did not say what it had read`)] : []),
       // A session that comes back from a restart has read what it had read, or something unknown if nothing was saved.
       ...(recovering ? restoredTaint(existing?.taint ?? null) : []),
+      // A new run in a thread reads what the runs before it wrote there. If the last of them had read outside text (or left no readable
+      // record of it), the history holds words written under that text's influence. The owner's own chat turn is exempt: the owner is
+      // there to see what is said, and what they ask for is their own. Every other run (a job's fire, a wake, a bot's brief) is not.
+      ...(!recovering && principal.kind !== "owner" ? historyTaint(existing) : []),
       ...(principal.kind === "routine" ? [{ kind: "routine" as const, label: "saved routine state", at: nowISO() }] : []),
       ...(run.attachmentIDs?.length ? [{ kind: "attachment" as const, label: attachmentLabel(db, inputMessage.id), at: nowISO() }] : []),
       ...(run.groupContext !== undefined && run.channelID ? groupTaint(db, run.channelID, persona.id) : []),
@@ -1325,6 +1329,16 @@ function restoredTaint(raw: string | null): TaintSource[] {
   } catch {
     return readTaint(undefined, "a session restored with no record of what it had read");
   }
+}
+
+/**
+ * What the thread's earlier runs had read, as one source: the thread has a session whose last record of what it read is not empty, or
+ * cannot be read (no record, or one that does not parse). A thread with no session yet has no history to be influenced by.
+ */
+function historyTaint(session: { taint: string | null } | null | undefined): TaintSource[] {
+  if (!session) return [];
+  if (restoredTaint(session.taint).length === 0) return [];
+  return [{ kind: "history", label: "earlier messages in this conversation", at: nowISO() }];
 }
 
 /** Who started this run, in the policy's terms. */

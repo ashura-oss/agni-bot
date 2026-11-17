@@ -162,7 +162,7 @@ export function packTaint(run: Pick<RunContext, "taint">): TaintSource[] {
   return run.taint.sources.slice(-MAX_STORED_SOURCES).map((source) => ({ ...source }));
 }
 
-const KINDS = new Set(["web", "email", "peer", "attachment", "mcp", "routine", "scheduled", "unknown"]);
+const KINDS = new Set(["web", "email", "peer", "attachment", "mcp", "routine", "scheduled", "history", "unknown"]);
 
 /** Read a stored taint back, tolerating anything: a bad entry is dropped, never trusted. */
 export function unpackTaint(value: unknown): TaintSource[] {

@@ -19,7 +19,7 @@ import { DEFAULT_VISIBILITY, MISSING_AGENT_VISIBILITY, RESULT_MAX_CHARS, redactR
 import { rootGuardrail } from "../agent/guardrails";
 import { asksWhenClean } from "../policy/metadata";
 import { readTaint, unknownTaint } from "../policy/context";
-import { carriedRoot, packCarried, readCarried, saveTaskTaint, storedCarried, taskTaint } from "../policy/carry";
+import { carriedRoot, packCarried, readCarried, saveTaskTaint, storedCarried, taskTaint, type Carried } from "../policy/carry";
 import { denialScope } from "../policy/denials";
 import type { TaintSource } from "../policy/types";
 import type { Router } from "../models/router";
@@ -185,6 +185,7 @@ export function registerTurnJob(runner: JobRunner, deps: TurnJobDeps): void {
 
     const text = payload.text?.trim();
     if (!text) throw new Error("turn job payload has no text");
+    const carried = readCarried(payload);
     const delegationTaskID = payload.delegationTaskID?.trim() || null;
     if (delegationTaskID) {
       // A cancelled task must not run, even if its job was already claimed.
@@ -231,10 +232,12 @@ export function registerTurnJob(runner: JobRunner, deps: TurnJobDeps): void {
 
     const startedAt = nowISO();
     let result: Awaited<ReturnType<typeof runTurn>>;
-    // The task has a record of what it read from the moment it starts, and keeps it whatever happens next.
-    if (delegationTaskID) saveTaskTaint(deps.db, delegationTaskID, readCarried(payload).taint);
+    // The task has a record of what it read from the moment it starts, and keeps it whatever happens next. A retry (or a run resumed after
+    // the owner's answer) starts with all of it: what any earlier try read, not only what its sender had.
+    if (delegationTaskID) saveTaskTaint(deps.db, delegationTaskID, carried.taint);
+    const startTaint = delegationTaskID ? taskTaint(deps.db, delegationTaskID) : carried.taint;
     try {
-      result = await runTurn(deps, payload, persona, threadID, conversation, text, job.attempts > 1, job.id, job.run_at);
+      result = await runTurn(deps, payload, carried, startTaint, persona, threadID, conversation, text, job.attempts > 1, job.id, job.run_at);
     } catch (error) {
       // S1-12: a cancelled task ends here, whatever the aborted turn threw.
       if (delegationTaskID && isDelegationCancelled(deps.db, delegationTaskID)) return { result: "cancelled" };
@@ -647,6 +650,8 @@ function announceTask(deps: TurnJobDeps, taskID: string): void {
 async function runTurn(
   deps: TurnJobDeps,
   payload: TurnJobPayload,
+  carried: Carried,
+  startTaint: readonly TaintSource[],
   persona: ResolvedPersona,
   threadID: string,
   conversation: ConversationRow | undefined,
@@ -656,7 +661,6 @@ async function runTurn(
   jobSlot?: string,
 ): Promise<{ turnID: string; text: string; stopReason: string; taint: TaintSource[]; endedBy?: "wall_time" }> {
   const controller = new AbortController();
-  const carried = readCarried(payload);
   const delegationTaskID = payload.delegationTaskID?.trim() || null;
   const task = delegationTaskID ? getTask(deps.db, delegationTaskID) : null;
   // S1-12: cancelling the task aborts this turn instead of waiting for it to end.
@@ -682,7 +686,7 @@ async function runTurn(
         // child is on its parent's clock; a wake, a resumed task and any other job start their own, and a retry keeps the one its run started
         // (`jobs.run_clock_key`).
         ...carried,
-        taint: [...carried.taint, ...wakeTaint(deps.db, payload.results)],
+        taint: [...startTaint, ...wakeTaint(deps.db, payload.results)],
         ...(jobSlot ? { jobSlot } : {}),
         jobID: jobID ?? null,
       },
