@@ -13,7 +13,7 @@
 import type { AgentInfo, TaskInfo } from "@agni/client";
 import type { ChannelInfo } from "@agni/protocol";
 
-export const SETTINGS_SECTIONS = ["general", "appearance", "plugins", "approvals", "models", "device"] as const;
+export const SETTINGS_SECTIONS = ["general", "appearance", "plugins", "approvals", "spending", "models", "device"] as const;
 export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
 
 export type TaskViewRoute = { kind: "today" | "inbox" | "upcoming" | "calendar" | "completed" | "list"; listID?: string };

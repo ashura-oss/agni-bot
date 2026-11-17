@@ -15,6 +15,7 @@ import type {
   MemoryItem,
   NoticeRow,
   PluginInfo,
+  PolicyState,
   ProviderStatus,
   SecretStoreKind,
   ServerSettings,
@@ -121,6 +122,8 @@ export interface AppSnapshot {
   toast: NoticeRow | null;
   /** The standing "Always allow" rules; null until the daemon has answered. */
   approvalRules: ApprovalRuleInfo[] | null;
+  /** Pause, today's spend and the runs a spend cap stopped. */
+  policy: PolicyState;
   /** Counts the daemon's "already running" refusals of Run now, so a button can stand down. */
   runRefusals: number;
   /** A message the daemon refused as too long: its text goes back to the composer. */

@@ -1,5 +1,5 @@
 import { AttachmentInfoSchema, type AttachmentInfo } from "@agni/client";
-import { AppearanceProfileSchema, type AppearanceProfile, type ChannelInfo } from "@agni/protocol";
+import { AppearanceProfileSchema, type AppearanceProfile, type ChannelInfo, type SpendCaps } from "@agni/protocol";
 /**
  * The app model: pairing, the connection, the open transcript, the roster, the
  * daemon's health, and every user intent the views need. Views call methods
@@ -9,6 +9,7 @@ import { AppearanceProfileSchema, type AppearanceProfile, type ChannelInfo } fro
 import {
   AgniConnection,
   Conversation,
+  PolicyState,
   SecretStore,
   SettingsStore,
   defaultServerSettings,
@@ -186,6 +187,10 @@ export class AppModel {
    * without naming the card (`approval_not_opened`), these are the cards to give back.
    */
   private allowing = new Set<string>();
+  /** Pause, spend and the runs a spend cap stopped (S2). The frames land here; the views read the snapshot. */
+  private policy = new PolicyState();
+  /** Runs the owner asked to continue and the daemon has not answered: its `not_found` names no run. */
+  private continuing = new Set<string>();
   /**
    * Counts connection attempts (one per hello). A card is stamped with the count when it
    * arrives, so after a restart the cards the new process re-sent can be told from the
@@ -319,6 +324,7 @@ export class AppModel {
       statusText: this.statusText,
       toast: this.toast,
       approvalRules: this.approvalRules,
+      policy: this.policy,
       runRefusals: this.runRefusals,
       rejectedDraft: this.rejectedDraft,
     };
@@ -1114,6 +1120,59 @@ export class AppModel {
     );
   }
 
+  // MARK: pause, spend and off (S2)
+
+  /** Send a policy frame. Says so when it cannot go (a pause the owner thinks happened is worse than a toast). */
+  private sendPolicy(frame: ClientFrame, quiet = false): boolean {
+    const connection = this.connection;
+    if (!connection || !isReady(this.connectionState)) {
+      if (!quiet) this.showToast(notice("failure", "Not sent", "You are offline. Try again when the connection is back."));
+      return false;
+    }
+    connection.send(frame).catch(() => {
+      if (!quiet) this.showToast(notice("failure", "Not sent", "The daemon did not get that. Try again."));
+    });
+    return true;
+  }
+
+  /** Read the pause state and today's spend (the header shows both). */
+  refreshPolicy(): void {
+    this.sendPolicy({ type: "policy.pause" }, true);
+    this.refreshSpend();
+  }
+
+  refreshSpend(): void {
+    this.sendPolicy({ type: "spend.status" }, true);
+  }
+
+  /** Pause or resume every bot. The state changes when the daemon says so (`policy.pause.ok`), not before. */
+  setAllPaused(paused: boolean): void {
+    this.sendPolicy({ type: "policy.pause", paused });
+  }
+
+  setBotEnabled(agentID: string, enabled: boolean): void {
+    this.sendPolicy({ type: "agent.enabled.set", agentID, enabled });
+  }
+
+  /** Is this bot turned off? (Not "all paused".) The pause state first, the roster flag while it has not arrived. */
+  isBotOff(agentID: string): boolean {
+    if (this.policy.pause) return this.policy.isOff(agentID);
+    return [...this.mentionAgents, ...this.agents].find((agent) => agent.id === agentID)?.enabled === false;
+  }
+
+  /** Let a run a spend cap stopped go on, once. It does not restart by itself: the next message goes through. */
+  continueSpend(runKey: string): boolean {
+    const sent = this.sendPolicy({ type: "spend.continue", runKey });
+    if (sent) this.continuing.add(runKey);
+    return sent;
+  }
+
+  saveSpendCaps(caps: Partial<SpendCaps>): void {
+    this.policy.capsError = null;
+    this.sendPolicy({ type: "spend.caps.set", ...caps });
+    this.publish();
+  }
+
   /** Ask the daemon for the whole call behind a long card; Allow stays locked until `approval.full.ok` comes. */
   openApprovalFull(approval: ApprovalRow): void {
     const row = this.conversation.approvals.find((candidate) => candidate.id === approval.id);
@@ -1694,6 +1753,7 @@ export class AppModel {
             this.refreshGroups();
             this.refreshPlugins();
             this.refreshAppearance();
+            this.refreshPolicy();
             if (this.preferences.push) this.syncPush();
             this.startHealthPolling();
             if (!wasReady) this.openConversation(this.conversation.agentID);
@@ -1847,6 +1907,19 @@ export class AppModel {
       return;
     }
     this.flushTokens(); // keep order: tokens before whatever arrived after them
+
+    // Pause, spend and the runs a spend cap stopped: the policy state keeps them, the app only reacts.
+    if (frame.type === "turn.start") this.policy.clearStopsOf(frame.agentID);
+    if (frame.type === "turn.end") this.refreshSpend();
+    if (this.policy.apply(frame)) {
+      if (frame.type === "spend.continue.ok") this.continuing.delete(frame.runKey);
+      if (frame.type === "spend.stopped") {
+        const name = this.requesterName(frame.agentId) ?? "A bot";
+        this.notifyUser(`${name} stopped`, safeLine(frame.message.split("\n")[0] ?? "A spending limit was reached.", 300), true);
+      }
+      this.publish();
+      return;
+    }
 
     // AppModel owns channel routing; the reducer owns the transcript.
     if (frame.type === "status.update") {
@@ -2179,6 +2252,18 @@ export class AppModel {
         this.publish();
         return;
       }
+      if (frame.code === "not_found" && this.continuing.size > 0) {
+        // The run is no longer stopped, or the daemon restarted: its notice says to send the message again.
+        for (const runKey of this.continuing) this.policy.continueRefused(runKey);
+        this.continuing.clear();
+        this.publish();
+        return;
+      }
+      if (frame.code === "bad_cap") {
+        this.policy.capsError = frame.message;
+        this.publish();
+        return;
+      }
       if (frame.code === "not_found") {
         // A rule that was already revoked (here or on another device): show what is true now.
         this.showToast(notice("info", "Already gone", frame.message));
@@ -2212,7 +2297,7 @@ export class AppModel {
         }
         return;
       }
-      if (frame.code === "bad_frame" && /too long/i.test(frame.message) && this.lastSent) {
+      if (((frame.code === "bad_frame" && /too long/i.test(frame.message)) || frame.code === "agent_off") && this.lastSent) {
         // Nothing was stored: take the bubble back and hand the text to the composer.
         const sent = this.lastSent;
         this.lastSent = null;
