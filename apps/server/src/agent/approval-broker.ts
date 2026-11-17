@@ -18,14 +18,15 @@ import type { Database } from "bun:sqlite";
 import type { ApprovalSource } from "@agni/protocol";
 import { newID, nowISO } from "../util/ids";
 import { redact } from "../util/redact";
-import { clip, entry, escapeUnsafe, fitEntry, quoted } from "./card-text";
+import { clip, entry, escapeUnsafe, fitEntry } from "./card-text";
+import { describeAction, previewAction } from "./card-preview";
 import { saveCardMeta } from "./pending-cards";
 import type { ApprovalCard, RiskKind, TaintKind } from "../policy/types";
-import { isOutsideScratch, resolveWritePath, scratchDir, writeTargetExists } from "../tools/write-file";
 import { addApprovalRule, approvalTarget } from "../stores/approval-rules";
-import { describeRecurring, isRecurringSchedule } from "../policy/standing-rules";
 
 export { clip };
+// The card's heading and body are drawn in `card-preview.ts`; they are re-exported here, where they have always been found.
+export { describeAction, previewAction };
 
 export type Decision = "once" | "always" | "reject";
 
@@ -127,7 +128,8 @@ export class ApprovalBroker {
     const action = redact(describeAction(toolName, args));
     const note = this.deps.approvalNote?.(toolName);
     const bot = info?.botName?.trim() || "A bot";
-    const body = previewAction(toolName, args, bot);
+    // Throws (and nothing is stored or sent) when the call cannot be shown whole: the engine refuses such a call before it gets here.
+    const body = previewAction(toolName, args, bot, { card: info?.card, db: this.deps.db, agentID: info?.agentID });
     const lead = info ? cardLead(info.card, bot) : "";
     const preview = redact(`${lead}${note ? `${body}\n\n${escapeUnsafe(note)}` : body}`);
     const { db } = this.deps;
@@ -253,109 +255,4 @@ function cardLead(card: ApprovalCard, bot: string): string {
   if (card.refusedRun) lines.push("\"Always allow\" is off: you refused something in this task.");
   if (card.standingRule) lines.push("\"Always allow\" is off: work that starts again on its own is always put to you.");
   return `${lines.join("\n")}\n\n`;
-}
-
-/** An argument for display. A missing one reads as "(not given)", never "?" or "undefined". */
-function shown(value: unknown, max = 400): string {
-  if (value === undefined || value === null || value === "") return "(not given)";
-  return escapeUnsafe(clip(typeof value === "string" ? value : JSON.stringify(value) ?? "(not given)", max));
-}
-
-/** The arguments with every long string cut in the middle (start and end kept), for the JSON view. */
-function boundedArgs(value: unknown, max: number): unknown {
-  if (typeof value === "string") return clip(value, max);
-  if (Array.isArray(value)) return value.map((item) => boundedArgs(item, max));
-  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, boundedArgs(item, max)]));
-  return value;
-}
-
-function describeAction(toolName: string, args: Record<string, unknown>): string {
-  switch (toolName) {
-    case "bash": return `run shell: ${shown(String(args.command ?? ""), 400)}`;
-    case "write_file": {
-      const path = typeof args.path === "string" ? args.path : "";
-      const exists = path !== "" && !isOutsideScratch(path, scratchDir()) && writeTargetExists(path);
-      const label = !exists ? "write file" : args.append === true ? "append to existing file" : "overwrite existing file";
-      return `${label}: ${shown(path)}`;
-    }
-    case "read_file": return `read file: ${shown(args.path)}`;
-    case "memory_write": return `save memory: ${entry(String(args.text ?? ""), 80)}`;
-    case "link_save": return `save link: ${shown(args.url)}`;
-    case "task_create": return `add task: ${shown(args.title)}`;
-    case "task_update": return `update task ${shown(args.id)}`;
-    case "mail_send": return `send email to ${Array.isArray(args.to) ? shown(args.to.map((to) => entry(to)).join(", ")) : shown(args.to)}: ${entry(String(args.subject ?? ""), 80)}`;
-    case "job_schedule": return isRecurringSchedule(args) ? `start a repeating job: ${describeRecurring(args)}` : `job_schedule(${escapeUnsafe(clip(JSON.stringify(args), 400))})`;
-    case "rename_agent": return args.agentId ? `rename ${shown(args.agentId)} to ${shown(args.name)}` : `rename the assistant to ${shown(args.name)}`;
-    default: return `${entry(toolName, 80)}(${escapeUnsafe(clip(JSON.stringify(args), 400))})`;
-  }
-}
-
-function previewAction(toolName: string, args: Record<string, unknown>, bot = "A bot"): string {
-  if (toolName === "bash") return quoted(String(args.command ?? ""), 4_000);
-  if (toolName === "job_schedule" && isRecurringSchedule(args)) return repeatingJobPreview(args, bot);
-  if (toolName === "mail_send") return [...audienceLines(args), describeAction(toolName, args), "", quoted(String(args.body ?? ""), 4_000)].join("\n");
-  if (toolName === "write_file" && typeof args.path === "string") {
-    // The path the write really lands on: a relative path means under scratch,
-    // and a link is followed. This is also what "always allow" would remember.
-    const real = resolveWritePath(args.path);
-    return `${describeAction(toolName, args)}
-
-Resolved path: ${real === null || real === undefined ? "(cannot be resolved)" : entry(real, 1_000)}`;
-  }
-  return fullCall(toolName, args);
-}
-
-/**
- * A repeating job: who it is for, when it runs in words, and the prompt it will run each time, quoted as data (the bot wrote it, and
- * it will run without anyone reading it again). Every other argument it was given is named too.
- */
-function repeatingJobPreview(args: Record<string, unknown>, bot: string): string {
-  const lines = [
-    `Bot: ${entry(bot, 80)}`,
-    `Runs: ${describeRecurring(args)}`,
-    `${entry(bot, 80)} would run this each time, on its own:`,
-    quoted(String(args.text ?? ""), 4_000),
-  ];
-  const others = Object.keys(args).filter((name) => !["text", "dailyAt", "days", "everyMinutes"].includes(name));
-  if (others.length > 0) lines.push("", `Also given: ${others.map((name) => `${entry(name, 40)} = ${entry(args[name], 80)}`).join(", ")}`);
-  return lines.join("\n");
-}
-
-/** How much of a call's arguments the card shows: enough that padding cannot push anything out of sight. */
-const PREVIEW_ARGS_CHARS = 4_000;
-/** One string in the arguments view. */
-const PREVIEW_ARG_STRING_CHARS = 1_000;
-
-/**
- * A card for a tool that has no preview of its own: the whole call, not a cut
- * of its first and last 200 characters. Who the call reaches (recipients and
- * attendees) comes first, in plain lines, because an argument list long enough
- * to be cut would otherwise be able to hide them. A cut list also names every
- * argument and its size.
- */
-function fullCall(toolName: string, args: Record<string, unknown>): string {
-  const json = escapeUnsafe(JSON.stringify(boundedArgs(args, PREVIEW_ARG_STRING_CHARS), null, 2) ?? "{}", true);
-  const sizes = Object.entries(args).map(([name, value]) => `${entry(name, 80)} (${(typeof value === "string" ? value : JSON.stringify(value) ?? "").length} chars)`);
-  const body = json.length > PREVIEW_ARGS_CHARS ? `${clip(json, PREVIEW_ARGS_CHARS)}\n\nArguments given: ${sizes.join(", ")}` : json;
-  return [...audienceLines(args), `${entry(toolName, 80)} with these arguments:`, "", body].join("\n");
-}
-
-/** Argument names that hold the people a call reaches. */
-const AUDIENCE_KEYS: ReadonlyArray<readonly [string, string]> = [
-  ["to", "To"], ["cc", "Cc"], ["bcc", "Bcc"], ["attendees", "Attendees"],
-  ["recipients", "Recipients"], ["emails", "Emails"], ["invitees", "Invitees"], ["guests", "Guests"], ["participants", "Participants"],
-];
-const AUDIENCE_SHOWN = 50;
-
-/** The people a call reaches, one line per kind with how many there are, ahead of everything else. */
-function audienceLines(args: Record<string, unknown>): string[] {
-  const out: string[] = [];
-  for (const [key, label] of AUDIENCE_KEYS) {
-    const value = args[key];
-    const names = Array.isArray(value) ? value : typeof value === "string" && value ? [value] : [];
-    if (names.length === 0) continue;
-    const more = names.length > AUDIENCE_SHOWN ? `, … (+${names.length - AUDIENCE_SHOWN} more)` : "";
-    out.push(`${label} (${names.length}): ${names.slice(0, AUDIENCE_SHOWN).map((name) => entry(name)).join(", ")}${more}`);
-  }
-  return out;
 }

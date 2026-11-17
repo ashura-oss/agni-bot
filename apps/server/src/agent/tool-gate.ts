@@ -9,6 +9,7 @@
 import type { Database } from "bun:sqlite";
 import type { ServerFrameBody } from "@agni/protocol";
 import type { ApprovalBroker } from "./approval-broker";
+import { CardNotShown } from "./card-preview";
 import { expireApprovalForCall } from "./pending-cards";
 import { audit } from "../policy/audit-sink";
 import { SHELL_REFUSAL, recordDenial } from "../policy/denials";
@@ -53,13 +54,14 @@ const STORED_CODE: Record<string, string> = {
   not_available: "tool_not_allowed",
   not_loaded: "tool_not_loaded",
   domain_not_allowed: "domain_not_allowed",
+  cannot_show: "cannot_show",
   protected_write: "protected_write",
   denied_resource: "denied_resource",
   audit_unavailable: "audit_unavailable",
 };
 
 const PREVIEW: Record<string, string> = {
-  not_available: "not available", not_loaded: "not loaded", domain_not_allowed: "domain not allowed",
+  not_available: "not available", not_loaded: "not loaded", domain_not_allowed: "domain not allowed", cannot_show: "too much to show you",
   protected_write: "not allowed after outside content", denied_resource: "you said no to this", audit_unavailable: "not recorded",
 };
 
@@ -102,6 +104,12 @@ async function askOwner(
   let answer: Awaited<ReturnType<ApprovalBroker["request"]>>;
   try {
     answer = await deps.broker.request(run.threadID, run.turnID, input.tool, input.callID, input.args, waitSignal, { card, agentID: run.bot, botName: run.services.botName, expiresAt });
+  } catch (error) {
+    // The engine checks this before it asks; a card that still cannot be drawn (the routine it names went away, say) is not shown, and nothing runs.
+    // It is not the owner's no: no denial is recorded.
+    if (!(error instanceof CardNotShown)) throw error;
+    deps.setState("running");
+    return blocked("cannot_show", `Not done: ${error.message}`, "too much to show you");
   } finally {
     release();
   }

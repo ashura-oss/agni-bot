@@ -134,6 +134,16 @@ export interface PolicyInput {
 // The answer
 // ---------------------------------------------------------------------------
 
+/**
+ * What kind of standing rule (work that starts again on its own) a call is, as the engine classified it. The card carries it, and
+ * the preview is chosen by it, so what the owner reads is the view of what the engine decided (`policy/standing-rules.ts`).
+ *  - repeating_job: a `job_schedule` with a clock time or an interval.
+ *  - next_job: a one-shot `job_schedule` from a run of a job a bot made (a chain of one-shot jobs is a repeating job by another route).
+ *  - routine_create: a new routine.
+ *  - routine_resume: `routine_pause` with `enabled: true`.
+ */
+export type StandingKind = "repeating_job" | "next_job" | "routine_create" | "routine_resume";
+
 /** What the owner's card should say about the harm, in words: the tier alone is not precise enough. */
 export type RiskKind = "undoable" | "egress" | "irreversible" | "either" | "command" | "standing";
 
@@ -190,6 +200,11 @@ export interface ApprovalCard {
    */
   standingRule?: string;
   /**
+   * What kind of standing rule the engine decided this call is. Set whenever `standingRule` is. The preview is the view of this
+   * kind, and a card whose kind and call disagree is not shown (`agent/card-preview.ts`).
+   */
+  standingKind?: StandingKind;
+  /**
    * The standing rule is asked of a run that has read outside text, so what it starts will run with that text's restrictions
    * from its first step. The card says so.
    */
@@ -205,6 +220,8 @@ export type RefusalCode =
   | "protected_write"
   | "denied_resource"
   | "audit_unavailable"
+  /** The owner could not be shown the whole call (too long for a card, or the call and its classification disagree): no card is raised and nothing runs. */
+  | "cannot_show"
   | "off";
 
 /** The standing rule that let a call through, for the approval row that records it. */

@@ -347,7 +347,7 @@ function giveUpIfSideEffects(db: Database, threadID: string, since: string, mess
     .query<{ tool_name: string; args: string }, [string, string]>(
       `SELECT tool_name, args FROM tool_calls
        WHERE thread_id = ? AND created_at >= ?
-         AND (error IS NULL OR error NOT IN ('approval_rejected', 'approval_expired', 'tool_not_allowed', 'domain_not_allowed'))`,
+         AND (error IS NULL OR error NOT IN ('approval_rejected', 'approval_expired', 'tool_not_allowed', 'domain_not_allowed', 'cannot_show'))`,
     )
     .all(threadID, since);
   const acted = calls.find((call) => {

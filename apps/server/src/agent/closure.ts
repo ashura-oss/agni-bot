@@ -69,7 +69,7 @@ export const CLOSURE_WORDING_REFUSAL = "not done: that text reads like a server 
  */
 export const ABORTED_MID_CALL = "aborted_mid_call";
 const LOOP_ERROR_CODES: ReadonlySet<string> = new Set([
-  "approval_rejected", "approval_expired", "tool_not_allowed", "domain_not_allowed", "tool_not_loaded",
+  "approval_rejected", "approval_expired", "tool_not_allowed", "domain_not_allowed", "tool_not_loaded", "cannot_show",
   "cancelled", "interrupted_before_result", ABORTED_MID_CALL, "tool timed out or was cancelled",
 ]);
 export function toolErrorCode(message: string): string {
@@ -118,7 +118,7 @@ function bucketOf(row: RecordedCall): { bucket: Bucket; outcome: string } {
       ? { bucket: "denied", outcome: "denied" }
       : { bucket: "notRun", outcome: "not run: stopped while waiting for approval" };
   }
-  if (row.error !== null && ["approval_expired", "tool_not_allowed", "domain_not_allowed", "tool_not_loaded", "cancelled"].includes(row.error)) {
+  if (row.error !== null && ["approval_expired", "tool_not_allowed", "domain_not_allowed", "tool_not_loaded", "cannot_show", "cancelled"].includes(row.error)) {
     return { bucket: "notRun", outcome: "not run: refused or not approved" };
   }
   if (row.result === null) {

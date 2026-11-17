@@ -25,6 +25,7 @@
  * a handful of small database reads at most. Under a millisecond.
  */
 import { entry } from "../agent/card-text";
+import { cardProblem } from "../agent/card-preview";
 import { approvalTarget, matchApprovalRule } from "../stores/approval-rules";
 import { audit } from "./audit-sink";
 import { isTainted, newestFirst } from "./context";
@@ -34,7 +35,7 @@ import { policyHooks } from "./hooks";
 import { assessCall, policyFor } from "./metadata";
 import { isRecurringSchedule, standingRuleOrigin } from "./standing-rules";
 import type {
-  ApprovalCard, CallAssessment, Decision, Operation, PolicyInput, RefusalCode, RunContext, ToolTier,
+  ApprovalCard, CallAssessment, Decision, Operation, PolicyInput, RefusalCode, RunContext, StandingKind, ToolTier,
 } from "./types";
 import { domainAllowed } from "../routines/egress";
 
@@ -91,8 +92,10 @@ function judge(run: RunContext, input: PolicyInput, record: boolean): Decision {
   // unattended, sandboxed shell is off in any run that holds a refusal; the sandbox profile, not this check, is the
   // boundary there.)
   const refusedRun = refusalOnCard(run, tool, assessment);
-  // A repeating job is a standing rule (policy/standing-rules.ts): why the owner must be asked, or null when this is the owner's own clean turn.
-  const standing = policy?.standingWrite?.(args, run) ? standingLine(tool, args, standingRuleOrigin(run)) : null;
+  // A repeating job is a standing rule (policy/standing-rules.ts): what kind of one the engine decided this call is, and why the owner must be
+  // asked (null when this is the owner's own clean turn). The card is drawn from this very answer, not from a second look at the arguments.
+  const standingKind = policy?.standingKind?.(args, run) ?? null;
+  const standing = standingKind !== null ? standingLine(standingKind, standingRuleOrigin(run)) : null;
 
   // 4. budget
   const budget = policyHooks.checkBudget(run);
@@ -154,15 +157,18 @@ function judge(run: RunContext, input: PolicyInput, record: boolean): Decision {
     resources: assessment.resources,
     operation: assessment.operation,
     ...(refusedRun ? { refusedRun } : {}),
-    ...(standing !== null ? { standingRule: standing } : {}),
+    ...(standing !== null && standingKind !== null ? { standingRule: standing, standingKind } : {}),
     ...(standing !== null && tainted ? { standingTainted: true } : {}),
   };
+  // A card that cannot show the owner everything that will run is not raised (fail closed): the call is refused, and the model told why.
+  const unshowable = cardProblem(tool, args, { bot: run.services.botName?.trim() || "A bot", card, db: run.services.db, agentID: run.bot });
+  if (unshowable !== null) return refuse("cannot_show", `Not done: ${unshowable}`, "the owner could not be shown the whole call");
   return { action: "ask", reason: why, assessment: { ...assessment, tier }, card };
 }
 
 /** The card's sentence for a standing rule: why the owner is asked, and for a one-shot job, why that is a standing rule at all. */
-function standingLine(tool: string, args: Record<string, unknown>, origin: string | null): string | null {
-  if (origin === null || tool !== "job_schedule" || isRecurringSchedule(args)) return origin;
+function standingLine(kind: StandingKind, origin: string | null): string | null {
+  if (origin === null || kind !== "next_job") return origin;
   return `${origin} A job that schedules the next job keeps the work going by itself.`;
 }
 

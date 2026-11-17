@@ -54,6 +54,19 @@ export function quoted(text: string, max: number): string {
   return clip(lines.join("\n"), max);
 }
 
+/**
+ * Model-written text as the owner reads it when the text is part of what will run: quoted line by line like `quoted`, and never cut.
+ * A card that cannot hold all of it is not shown (`agent/card-preview.ts`), so nothing here ever drops a character.
+ */
+export function quotedWhole(text: string): string {
+  return escapeUnsafe(text.replace(/\r\n/g, "\n"), true).split("\n").map((line) => `> ${line}`).join("\n");
+}
+
+/** One model-chosen value on one line, with every character shown (hidden ones as escapes). For a field that is part of what will run. */
+export function whole(value: unknown): string {
+  return escapeUnsafe(typeof value === "string" ? value : JSON.stringify(value) ?? "");
+}
+
 /** Cap long text without hiding its end: the dangerous part is often the tail. */
 export function clip(text: string, max: number): string {
   if (text.length <= max) return text;

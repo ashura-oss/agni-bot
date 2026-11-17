@@ -13,7 +13,7 @@ import { entry } from "../agent/card-text";
 import { describeSchedule, parseDay, parseWallClock } from "../jobs/schedule";
 import { isTainted } from "./context";
 import type { ToolResource } from "./tool-meta";
-import type { RunContext } from "./types";
+import type { RunContext, StandingKind } from "./types";
 
 /** What a refused repeating job is recorded under: it names no file, so the refusal is of making repeating jobs at all. */
 export const STANDING_JOB_RESOURCE: ToolResource = { kind: "other", value: "agni:standing-job" };
@@ -28,25 +28,34 @@ export function isRecurringSchedule(args: Record<string, unknown>): boolean {
   return isGiven(args.dailyAt) || isGiven(args.everyMinutes);
 }
 
+const KINDS: Record<StandingKind, true> = { repeating_job: true, next_job: true, routine_create: true, routine_resume: true };
+
+/** Every kind of standing rule the engine can give a call. A record, so a new kind cannot be added without being listed here. */
+export const STANDING_KINDS: readonly StandingKind[] = Object.keys(KINDS) as StandingKind[];
+
 /**
- * Is this `job_schedule` call a standing rule? A repeating job always is. A one-shot job is too when it is made by a fire of
- * a job a bot made: a chain of one-shot jobs, each telling its run to schedule the next, is a repeating job by another route.
- * The owner's own turn, a wake and a fire of a job the owner made are not the start of a chain. A run that read outside text is
- * not asked about a one-shot job at all: it is refused (a protected write), as before.
+ * What kind of standing rule is this `job_schedule` call, or null when it is not one? A repeating job always is. A one-shot job is
+ * too when it is made by a fire of a job a bot made: a chain of one-shot jobs, each telling its run to schedule the next, is a
+ * repeating job by another route. The owner's own turn, a wake and a fire of a job the owner made are not the start of a chain. A
+ * run that read outside text is not asked about a one-shot job at all: it is refused (a protected write), as before.
+ *
+ * This one answer is what the engine asks with and what the card is drawn from: nothing else decides what the owner is shown.
  */
-export function isStandingSchedule(args: Record<string, unknown>, run: RunContext | undefined): boolean {
-  if (isRecurringSchedule(args)) return true;
-  return run?.principal?.kind === "job" && !isTainted(run);
+export function standingScheduleKind(args: Record<string, unknown>, run: RunContext | undefined): StandingKind | null {
+  if (isRecurringSchedule(args)) return "repeating_job";
+  return run?.principal?.kind === "job" && !isTainted(run) ? "next_job" : null;
 }
 
 /**
- * Does this `routine_create` call or `routine_pause` call start work that runs on a schedule by itself? A new routine does,
- * and so does resuming a paused one (`enabled: true`); pausing one does not. Like a repeating job, it is the owner's own untainted
- * turn or the owner's card. A run that read outside text is not asked: it is refused outright (a protected write), as before.
+ * What kind of standing rule is this `routine_create` call or `routine_pause` call, or null when it is not one? A new routine starts
+ * work that runs on a schedule by itself, and so does resuming a paused one (`enabled: true`); pausing one does not. Like a repeating
+ * job, it is the owner's own untainted turn or the owner's card. A run that read outside text is not asked: it is refused outright
+ * (a protected write), as before.
  */
-export function isStandingRoutine(args: Record<string, unknown>, run: RunContext | undefined, tool: "routine_create" | "routine_pause"): boolean {
-  if (tool === "routine_pause" && args.enabled !== true) return false;
-  return run !== undefined && !isTainted(run);
+export function standingRoutineKind(args: Record<string, unknown>, run: RunContext | undefined, tool: "routine_create" | "routine_pause"): StandingKind | null {
+  if (tool === "routine_pause" && args.enabled !== true) return null;
+  if (run === undefined || isTainted(run)) return null;
+  return tool === "routine_create" ? "routine_create" : "routine_resume";
 }
 
 /** The refusal a routine's creation or resumption is recorded under: the same one a repeating job has. */
@@ -84,9 +93,15 @@ export function standingRuleOrigin(run: RunContext | undefined): string | null {
   }
 }
 
+/** The moment a one-shot job runs, as the server will read it (an exact UTC time); a text that is not a date is shown as written. */
+export function oneShotTime(at: unknown): string {
+  const when = typeof at === "string" ? new Date(at) : null;
+  return when !== null && !Number.isNaN(when.getTime()) ? when.toISOString() : entry(at, 40);
+}
+
 /** The schedule of a `job_schedule` call in plain words, from the arguments as the model wrote them. Never throws. */
 export function describeRecurring(args: Record<string, unknown>): string {
-  if (isGiven(args.at) && !isRecurringSchedule(args)) return `once, at ${entry(args.at, 40)}`;
+  if (isGiven(args.at) && !isRecurringSchedule(args)) return `once, at ${oneShotTime(args.at)}`;
   try {
     if (isGiven(args.dailyAt)) {
       const clock = parseWallClock(String(args.dailyAt));

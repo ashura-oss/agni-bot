@@ -18,6 +18,7 @@ import { setRunCaps } from "../src/stores/policy-settings";
 import { enqueueJob } from "../src/stores/jobs";
 import { addApprovalRule, approvalTarget } from "../src/stores/approval-rules";
 import { createJobTools } from "../src/tools/jobs-tool";
+import { createRoutineTools } from "../src/tools/routines-tool";
 import { resolvePersona } from "../src/agent/personas";
 import { decide } from "../src/policy/engine";
 import { addTaint } from "../src/policy/context";
@@ -673,9 +674,11 @@ describe("a routine is a repeating job: a job run's routine_create and routine_p
   const resume = { id: "rtn_1", enabled: true };
   const pause = { id: "rtn_1", enabled: false };
 
-  test("only the owner's own untainted turn, with no job behind it, makes one unasked", () => {
+  test("only the owner's own untainted turn, with no job behind it, makes one unasked", async () => {
     rig = policyRig();
-    for (const [tool, args] of [["routine_create", create], ["routine_pause", resume]] as const) {
+    // The card for a resume shows the routine that would run, so the routine it names must exist.
+    const made = await (createRoutineTools(rig.db)[0]!.handler as unknown as (args: unknown, ctx: unknown) => Promise<{ id: string }>)(create, { threadID: "thr", turnID: "trn", signal: new AbortController().signal, chain: { depth: 1, rootAgentID: "ea", currentAgentID: "ea", handoffSummary: null } });
+    for (const [tool, args] of [["routine_create", create], ["routine_pause", { id: made.id, enabled: true }]] as const) {
       expect({ tool, own: decide(rig.run, { tool, args, callID: "call_1" }).action }).toEqual({ tool, own: "run" });
       for (const [what, run] of [
         ["a job a bot made", rig.another({ principal: { kind: "job" }, jobID: "job_bot" })],

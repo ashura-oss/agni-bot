@@ -18,10 +18,10 @@ import { MCP_FREE_TOOLS } from "../plugins/mcp";
 import { entry } from "../agent/card-text";
 import { isReadOnlyCommand } from "../tools/bash";
 import { isOutsideScratch, scratchDir, writeTargetExists } from "../tools/write-file";
-import type { CallAssessment, RiskKind, RunContext, TaintKind, TaintSource } from "./types";
+import type { CallAssessment, RiskKind, RunContext, StandingKind, TaintKind, TaintSource } from "./types";
 import type { ToolClass, ToolMeta, ToolResource, ToolTier } from "./tool-meta";
 import { hostResource, pathResource, recipientResources, shellFacts, shellWorkingDir } from "./resources";
-import { STANDING_JOB_RESOURCE, isStandingRoutine, isStandingSchedule, standingRoutineResources } from "./standing-rules";
+import { STANDING_JOB_RESOURCE, standingRoutineKind, standingRoutineResources, standingScheduleKind } from "./standing-rules";
 
 type Args = Record<string, unknown>;
 
@@ -40,12 +40,12 @@ export interface ToolPolicy extends ToolMeta {
    */
   protectedWrite?: boolean;
   /**
-   * This call starts work that goes on by itself (a repeating job, or a link in a chain of jobs). Only the owner's own
-   * untainted turn may make it unasked; any other run puts a card to the owner, even a run that has read outside text, which
-   * `protectedWrite` would refuse outright (policy/standing-rules.ts). It reads the run too: the same call is a standing rule
-   * from one run and not from another.
+   * What kind of standing rule this call is, or null when it is not one: it starts work that goes on by itself (a repeating job, or a
+   * link in a chain of jobs). Only the owner's own untainted turn may make it unasked; any other run puts a card to the owner, even a
+   * run that has read outside text, which `protectedWrite` would refuse outright (policy/standing-rules.ts). It reads the run too:
+   * the same call is a standing rule from one run and not from another. The card carries the kind, and the preview is drawn from it.
    */
-  standingWrite?: (args: Args, run: RunContext) => boolean;
+  standingKind?: (args: Args, run: RunContext) => StandingKind | null;
   /** This tool's result is outsider text: it taints the run that reads it. */
   taintedBy?: TaintedBy;
   /** What this particular call is, when that differs from the tool's defaults. */
@@ -224,19 +224,19 @@ export const TOOL_POLICY: Readonly<Record<string, ToolPolicy>> = {
   // call names the refusal of such work, so the owner's no to one holds against the others in that run.
   job_schedule: local({
     protectedWrite: true,
-    standingWrite: isStandingSchedule,
+    standingKind: standingScheduleKind,
     resources: () => [STANDING_JOB_RESOURCE],
   }),
   job_cancel: local({ protectedWrite: true }),
   // A routine runs on a schedule by itself, so creating one and resuming a paused one are standing rules like a repeating job.
   routine_create: local({
     protectedWrite: true,
-    standingWrite: (args, run) => isStandingRoutine(args, run, "routine_create"),
+    standingKind: (args, run) => standingRoutineKind(args, run, "routine_create"),
     resources: (args) => standingRoutineResources(args, "routine_create"),
   }),
   routine_pause: local({
     protectedWrite: true,
-    standingWrite: (args, run) => isStandingRoutine(args, run, "routine_pause"),
+    standingKind: (args, run) => standingRoutineKind(args, run, "routine_pause"),
     resources: (args) => standingRoutineResources(args, "routine_pause"),
   }),
   routine_delete: local({ protectedWrite: true }),
