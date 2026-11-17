@@ -122,6 +122,7 @@ export interface TurnJobPayload {
   rootJob?: string | null;
   denialRoot?: string;
   clockKey?: string;
+  allowedDomains?: unknown;
   /** The run a delegation counts against (see `delegate_task`'s cap on running delegations). */
   rootKey?: string;
   /** The channel the turn's result belongs to. */
@@ -692,6 +693,8 @@ async function runTurn(
       },
       facts: payload.facts,
       ...(channelID ? { channelID } : {}),
+      // The web limits of the routine that asked for the job, which every fire keeps.
+      ...(carried.allowedDomains ? { allowedDomains: carried.allowedDomains } : {}),
       ...(payload.inputRole ? { inputRole: payload.inputRole } : {}),
       ...(retry ? { reuseInput: true } : {}),
       ...(payload.peer ? { peer: payload.peer } : {}),

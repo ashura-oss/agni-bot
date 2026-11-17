@@ -445,6 +445,8 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
   // A job a narrowed run scheduled fires with the tools of the run that asked: it is cut down by the same rule, each time it fires.
   const narrowedRun = startedByBot || run.policy?.narrowed === true;
   const parentCapabilities = run.policy?.capabilities ?? undefined;
+  // A routine's domain list, or the one a run handed down (a handoff's child, a job a run with a list scheduled).
+  const allowedDomains = run.allowedDomains ?? run.policy?.allowedDomains;
   const narrowedTools = narrowedRun ? [...narrowCapabilities(ownTools, parentCapabilities)] : ownTools;
   const effectiveTools = run.toolAllowlist
     ? narrowedTools
@@ -569,7 +571,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
       ...(run.queryText ? [run.queryText] : []),
     ],
     unattended: Boolean(run.untrustedInput) && !peerSourced,
-    allowedDomains: run.allowedDomains,
+    allowedDomains,
     taint: [
       ...(run.policy?.taint ?? []),
       // A run another bot started is tainted unless the sender said it had read nothing outside (an empty list).
@@ -785,7 +787,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
         unattended: Boolean(run.untrustedInput) && !peerSourced,
         run: runCtx,
         peerInput,
-        allowedDomains: run.allowedDomains,
+        allowedDomains,
       };
       // Several read-only lookups in one step start together; the loop below
       // still consumes them in order, so guards and message order are unchanged.

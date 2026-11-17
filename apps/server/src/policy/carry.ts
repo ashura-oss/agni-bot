@@ -108,6 +108,8 @@ export interface Carried {
   clockKey?: string;
   /** The peer chain a delegation belongs to (`stores/peer-chains.ts`). */
   chainID?: string;
+  /** A routine's domain list for web tools. Absent: the run has no list. Present but unreadable: the empty list, which refuses every domain. */
+  allowedDomains?: string[];
   /**
    * The owner's own work: a chain that began with the owner (their chat turn, or a CLI job they made) and no link a bot made. One sticky
    * bit: only a front door that knows sets it, a bot's link clears it and nothing sets it again, and anything that cannot be read is false.
@@ -135,6 +137,7 @@ export interface Carried {
  *   clockKey      | copy (the parent's       | new                   | new                | new                     | new
  *                 | clock)                   |                       |                    |                         |
  *   chainID       | set by the caller        | -                     | -                  | copy                    | copy
+ *   allowedDomains| copy                     | copy                  | copy               | copy                    | copy
  *   ownerOnly     | copy from the owner's    | cleared               | cleared            | copy (merged wakes: the | copy
  *                 | own turn, else cleared   | (a bot's link)        | (a bot's link)     | owner's only if every   |
  *                 |                          |                       |                    | part is)                |
@@ -163,6 +166,7 @@ interface Source {
   denialRoot?: string;
   clockKey?: string;
   chainID?: string;
+  allowedDomains?: string[];
   ownerOnly: boolean;
   /** The run was acting for the owner. A stored value has no principal: it is false. */
   principalOwner: boolean;
@@ -184,6 +188,7 @@ function sourceOfRun(run: RunContext): Source {
   let capabilities: string[] | null = null;
   try { capabilities = [...run.effectiveCapabilities]; } catch { capabilities = null; }
   const { rootTurnID, rootJob, denialRoot, clockKey } = run;
+  const domains = run.services?.allowedDomains;
   const rooted = typeof rootTurnID === "string" && rootTurnID !== "";
   return {
     // A record that cannot be read is one unknown source, and a run that read nothing is an empty list.
@@ -193,6 +198,7 @@ function sourceOfRun(run: RunContext): Source {
     ...(rooted ? { rootTurnID, rootJob: typeof rootJob === "string" && rootJob !== "" ? rootJob : null } : {}),
     ...(typeof denialRoot === "string" && denialRoot !== "" ? { denialRoot } : {}),
     ...(typeof clockKey === "string" && clockKey !== "" ? { clockKey } : {}),
+    ...(Array.isArray(domains) ? { allowedDomains: [...domains] } : {}),
     ownerOnly: run.ownerOnly === true,
     principalOwner: run.principal?.kind === "owner",
     ownersChatTurn: run.principal?.kind === "owner" && run.jobID == null,
@@ -250,6 +256,7 @@ export function packCarried(from: RunContext | Carried | undefined, link: Link, 
       out.ownerOnly = src.ownerOnly;
       break;
   }
+  if (src.allowedDomains) out.allowedDomains = [...src.allowedDomains];
   return out;
 }
 
@@ -292,6 +299,7 @@ export function readCarried(payload: unknown): Carried {
   // are another matter (no list is not narrowed): it runs with its bot's own, but tainted.
   else if (isWake || ownerOnly) taint = [];
   else taint = [unknownTaint("a job whose sender did not say what it had read")];
+  const domains = p.allowedDomains;
   return {
     taint,
     narrowed,
@@ -300,6 +308,7 @@ export function readCarried(payload: unknown): Carried {
     ...(isNonEmpty(p.denialRoot) ? { denialRoot: p.denialRoot } : {}),
     ...(isNonEmpty(p.clockKey) ? { clockKey: p.clockKey } : {}),
     ...(isNonEmpty(p.chainID) ? { chainID: p.chainID } : {}),
+    ...(domains === undefined ? {} : { allowedDomains: Array.isArray(domains) && domains.every((item) => typeof item === "string") ? [...domains] as string[] : [] }),
     ownerOnly,
   };
 }
