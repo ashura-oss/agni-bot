@@ -66,7 +66,8 @@ describe("the policy controls on a phone", () => {
   it("the pause button is the icon alone, and the spend chip drops its 'Today' lead, so the header fits 375px", () => {
     expect(declarations(phone, ".policy-pause-text").display).toBe("none");
     expect(declarations(phone, ".spend-chip-lead").display).toBe("none");
-    expect(declarations(phone, ".spend-chip")["max-width"]).toBeTruthy();
+    expect(declarations(phone, ".spend-chip-body")["flex-direction"]).toBe("column");
+    expect(declarations(phone, ".thread-header .agent-pill")["max-width"]).toBe("110px");
   });
 
   it("the money field is 16px, so a phone does not zoom on focus", () => {

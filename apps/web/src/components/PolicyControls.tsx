@@ -51,6 +51,9 @@ export function SpendChip() {
   const tailAt = rest.indexOf(". Limit reached");
   const body = tailAt >= 0 ? rest.slice(0, tailAt) : rest;
   const tail = tailAt >= 0 ? rest.slice(tailAt) : "";
+  // "$0.42 of $2.00": on a phone the two halves stack, so the chip is narrow enough for the header.
+  const [amount = "", ...limitParts] = body.split(" of ");
+  const limit = limitParts.length > 0 ? `of ${limitParts.join(" of ")}` : "";
   return (
     <>
       <button
@@ -62,7 +65,15 @@ export function SpendChip() {
         onClick={() => model.openSettings("spending")}
       >
         {lead ? <span className="spend-chip-lead">{lead}</span> : null}
-        {body}
+        <span className="spend-chip-body">
+          <span>{amount}</span>
+          {limit ? (
+            <>
+              {" "}
+              <span>{limit}</span>
+            </>
+          ) : null}
+        </span>
         {tail ? <span className="spend-chip-tail">{tail}</span> : null}
       </button>
       {line.hint ? (
