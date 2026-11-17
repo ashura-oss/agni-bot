@@ -89,7 +89,7 @@ function schedulingRefusal(ctx: ToolContext): string | null {
   return null;
 }
 
-/** The request a scheduled job stays in: its wakes are counted with the request's. */
+/** The request a one-shot job a bot schedules stays in: its wakes are counted with the request's. */
 export interface RequestRoot {
   rootTurnID: string;
   rootJob: string | null;
@@ -99,19 +99,21 @@ export interface RequestRoot {
 export interface ScheduledFrom {
   /** The scheduling run's refusal scope: what the owner refused there holds in every run of the job. Always set for a run. */
   denialRoot?: string;
-  /** The scheduling run's request, for the job's wake count. */
+  /**
+   * The scheduling run's request, for the wake count of a one-shot job: it is part of that request. A recurring job never
+   * takes it: each of its runs is a request of its own, counted by its own wakes (`jobID@turnID`).
+   */
   root?: RequestRoot;
 }
 
 /**
- * The root a job scheduled by this call keeps, or undefined when it is its own. A run that is part of an earlier request (a
- * wake, a delegated child, a resumed task, a job that was itself scheduled from one) has the root of that request; a chat
- * turn, or a job on its own schedule, is its own root and starts a request of its own. Without this a bot in a wake could
- * schedule a job to leave the request: its refusals, its wake count, its spend.
+ * The request a one-shot job scheduled by this call stays in, or undefined when it starts one of its own. Only the owner's own
+ * turn starts a request. Any other run (a wake, a delegated child, a resumed task, a job, a job scheduled from one) hands its
+ * request on, so a chain of jobs, each scheduling the next, is counted as one: its wakes, its spend.
  */
 function inheritedRoot(ctx: ToolContext): RequestRoot | undefined {
   const run = ctx.run;
-  if (!run || run.rootTurnID === run.turnID) return undefined;
+  if (!run || run.principal.kind === "owner") return undefined;
   return { rootTurnID: run.rootTurnID, rootJob: run.rootJob };
 }
 
@@ -141,8 +143,6 @@ export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: 
     // Counted against the bot's own allowance (S2-09).
     scheduledBy: "bot",
     notify: args.notify !== false,
-    // Still the request it was scheduled in (a job has a clock of its own, which `clockKey` would take away).
-    ...(root ? { rootTurnID: root.rootTurnID, rootJob: root.rootJob } : {}),
     // The owner's refusals in the run that scheduled it hold in every run of this job, for good (what the run delegates, wakes and schedules too).
     ...(denialRoot ? { denialRoot } : {}),
   };
@@ -154,6 +154,8 @@ export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: 
     if (Number.isNaN(when.getTime())) throw new Error(`"${args.at}" is not a date`);
     runAt = when.toISOString();
     recurrence = "once";
+    // Still the request it was scheduled in, for its wake count (it has a clock of its own, which `clockKey` would take away).
+    if (root) { payload.rootTurnID = root.rootTurnID; payload.rootJob = root.rootJob; }
   } else if (args.dailyAt) {
     const clock = parseWallClock(args.dailyAt);
     const days = args.days?.map((day) => parseDay(day));

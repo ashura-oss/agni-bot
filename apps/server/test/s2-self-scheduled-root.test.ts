@@ -1,10 +1,12 @@
 /**
- * A job a bot schedules from inside a request stays in that request (S2-09, fix round E).
+ * What a job a bot schedules keeps of the run that scheduled it (S2-09, fix rounds E and F).
  *
- * A wake, a delegated child and a resumed task run under the root of the request they came from: the owner's earlier
- * refusals hold there, and the request's wakes are counted together. A bot in such a run could call `job_schedule`, and the
- * new job was its own root: it had no refusals, a wake count of zero, and so a way round the limit. The job now keeps the
- * root of the run that scheduled it. It is still a job: it has a clock of its own.
+ * Refusals: every job a bot schedules, one-shot or recurring, keeps the refusal scope of the run that scheduled it. What the
+ * owner refused in a chat holds in a routine made from it for good, and in what the routine delegates, wakes and schedules.
+ *
+ * Wakes: only the owner's own turn starts a request. A one-shot job scheduled by any other run is part of that run's request
+ * (its wakes are counted together), so a chain of jobs cannot get a fresh wake allowance at each link. A recurring job is a
+ * request on each run, counted by its own wakes. Every job has a clock of its own.
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -12,7 +14,7 @@ import { afterEach, describe, expect, setSystemTime } from "bun:test";
 import { resetS2Startup } from "../src/startup/s2";
 import { setRunCaps } from "../src/stores/policy-settings";
 import { scenarioTest, useScenarios, say, type ModelStep, type Scenario, type ScenarioClient } from "./scenarios/harness";
-import { answerCards, allCallsTo, call, playTurn, resultJson, scripted, type CallRecord, type TurnReport } from "./invariants/support";
+import { answerCards, allCallsTo, call, later, minutes, playTurn, resultJson, scripted, type CallRecord, type TurnReport } from "./invariants/support";
 
 const scenarios = useScenarios();
 afterEach(() => { setSystemTime(); resetS2Startup(); });
@@ -213,5 +215,77 @@ describe("a refusal holds in what a scheduled job hands work to", () => {
     expectRefused(allCallsTo(s, "write_file", a).find((entry) => entry.callID === "call_coder_write"), "the coder");
     expect(owner.cards, "the coder raised a card").toEqual([]);
     expect(readFileSync(target, "utf8")).toBe("original ledger");
+  });
+});
+
+interface WakeJob { id: string; state: string; result: string | null }
+const wakeJobs = (s: Scenario): WakeJob[] => s.all<WakeJob>("SELECT id, state, result FROM jobs WHERE kind = 'turn' AND payload LIKE '%wakeKey%' ORDER BY rowid");
+const settled = (jobs: WakeJob[]): boolean => jobs.every((job) => job.state === "done" || job.state === "failed");
+
+describe("a one-shot job scheduled by a job", () => {
+  scenarioTest("is part of its request: the chain's wakes are counted together", async () => {
+    const s = await scenarios.start();
+    setRunCaps(s.db, { maxWakesPerRequest: 1 });
+    const a = await s.connect({ label: "A" });
+    s.model.queue(...scripted(true, [call("job_schedule", { at: past(), text: "Start the count." }, "call_schedule"), say("Scheduled.")]));
+    const request = await playTurn(s, a, "count the pallets", { answer: () => "once" });
+    expect(request.calls.find((entry) => entry.callID === "call_schedule")?.ok, "the owner's turn could not schedule the job; the script is out of step").toBe(true);
+
+    // The first job schedules a second one and delegates; the second delegates too. Each task's result wakes the job that delegated it.
+    const owner = answerCards(a, "once");
+    s.model.queue(
+      ...scripted(true, [
+        call("job_schedule", { at: past(), text: "Count the west warehouse." }, "call_chain"),
+        call("delegate_task", { toAgentID: "researcher", goal: "Count the pallets in the east warehouse." }, "call_delegate_1"),
+        say("The researcher is counting."),
+      ]),
+      ...scripted(true, [call("delegate_task", { toAgentID: "researcher", goal: "Count the pallets in the west warehouse." }, "call_delegate_2"), say("The researcher is counting again.")]),
+      say("There are 42 pallets."),
+      say("There are 17 pallets."),
+      say("Noted."),
+    );
+    for (let tick = 0; tick < 12 && !(wakeJobs(s).length === 2 && settled(wakeJobs(s))); tick += 1) await s.runner().tick();
+    owner.stop();
+
+    expect(allCallsTo(s, "job_schedule", a).find((entry) => entry.callID === "call_chain")?.ok, "the first job could not schedule the second; the script is out of step").toBe(true);
+    const wakes = wakeJobs(s);
+    expect(wakes.length, "the two jobs' tasks did not each queue a wake; the script is out of step").toBe(2);
+    expect(s.model.overruns, "the chain's second wake ran a model turn").toBe(0);
+    expect(wakes[1]!.result ?? "", "the second job's wake was not held to the chain's wake limit").toMatch(/wake limit/i);
+  });
+});
+
+describe("a recurring job scheduled from a wake", () => {
+  scenarioTest("counts its wakes run by run: the limit is not used up for good by the first", async () => {
+    const s = await scenarios.start();
+    setRunCaps(s.db, { maxWakesPerRequest: 1 });
+    const a = await s.connect({ label: "A" });
+    s.model.queue(call("delegate_task", { toAgentID: "researcher", goal: "Count the pallets in the east warehouse." }, "call_delegate"), say("On it."));
+    await playTurn(s, a, "count the pallets");
+
+    // The child answers; the request's one wake schedules a recount every five minutes.
+    const owner = answerCards(a, "once");
+    s.model.queue(
+      say("There are 42 pallets."),
+      ...scripted(true, [call("job_schedule", { text: "Count the pallets again and report.", everyMinutes: 5 }, "call_schedule"), say("A recount is scheduled.")]),
+    );
+    const scheduled = (): boolean => allCallsTo(s, "job_schedule", a).length > 0;
+    for (let tick = 0; tick < 6 && !scheduled(); tick += 1) await s.runner().tick();
+    expect(allCallsTo(s, "job_schedule", a)[0]?.ok, "the wake could not schedule the recount; the script is out of step").toBe(true);
+
+    // Each run delegates, and its wake is the run's own first, within the limit of one.
+    for (let run = 1; run <= 2; run += 1) {
+      later(minutes(6));
+      s.model.queue(
+        ...scripted(true, [call("delegate_task", { toAgentID: "researcher", goal: `Count the pallets, run ${run}.` }, `call_run_${run}`), say("The researcher is counting.")]),
+        say(`There are ${40 + run} pallets.`),
+        say("Noted."),
+      );
+      for (let tick = 0; tick < 8 && !(wakeJobs(s).length === run + 1 && settled(wakeJobs(s))); tick += 1) await s.runner().tick();
+      expect(wakeJobs(s).length, `run ${run} did not queue its wake; the script is out of step`).toBe(run + 1);
+      expect(wakeJobs(s)[run]!.result ?? "", `run ${run}'s wake was held to a wake count shared with the other runs`).not.toMatch(/wake limit/i);
+    }
+    owner.stop();
+    expect(s.model.overruns, "a wake of a recurring run was not run").toBe(0);
   });
 });
