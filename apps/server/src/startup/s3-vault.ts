@@ -17,8 +17,9 @@ export interface VaultStartResult {
 /**
  * Open the vault at start, before `loadConfig()`, so providers see the keys.
  *  - `vault` mode: always open it (made on first start).
- *  - `file` mode (the default until S3-3 flips it): open it only when
- *    `vault.bin` exists, so an install that never migrated is unchanged.
+ *  - `file` mode (a home with no mode recorded, or a fresh home with no usable
+ *    keystore): open it only when `vault.bin` exists, so an install that never
+ *    migrated is unchanged.
  * A vault that exists but cannot be opened is never worked around: this throws
  * `VaultError` and the caller refuses to start. `serve()` in `index.ts` calls it.
  */

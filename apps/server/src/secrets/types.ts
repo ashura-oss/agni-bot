@@ -149,11 +149,13 @@ export interface VaultStatus {
 
 /**
  * Where secrets come from at start.
- *  - `file`  (default until S3-3 lands): the old plaintext `config.env` is
- *    loaded as before. The vault is only opened when `vault.bin` exists.
+ *  - `file`  (a home with no mode recorded, and a fresh home on a machine with
+ *    no usable keystore): the plaintext `config.env` is loaded as before. The
+ *    vault is only opened when `vault.bin` exists.
  *  - `vault`: the vault is always opened (and made on first use); secret
  *    entries in `config.env` are NOT loaded, the vault's `env/<NAME>` entries
- *    fill `process.env` instead. Set with `AGNI_SECRETS_MODE=vault`.
+ *    fill `process.env` instead. Set with `AGNI_SECRETS_MODE=vault`; `agni
+ *    setup` records it for a fresh home.
  */
 export type SecretsMode = "file" | "vault";
 

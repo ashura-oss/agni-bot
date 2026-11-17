@@ -3,7 +3,7 @@
  * holds a secret: the provider keys saved from Settings, plugin passwords and
  * tokens, OAuth tokens in the database, ChatGPT accounts.
  *
- *  - `file` mode (the default until `agni vault migrate` flips it): the old
+ *  - `file` mode (a home with no mode recorded; `agni vault migrate` switches it): the old
  *    plaintext stores, unchanged. Writes are plaintext; reads also look in a vault
  *    that happens to be open (see `vaultForReads`).
  *  - `vault` mode: every secret lives in the vault and nothing is written to a

@@ -266,7 +266,7 @@ describe("the file's access rules", () => {
 });
 
 describe("secrets mode", () => {
-  test("defaults to file until S3-3 flips it; AGNI_SECRETS_MODE=vault turns the vault on", () => {
+  test("no recorded mode reads as file (a home from before the vault keeps its keys); AGNI_SECRETS_MODE=vault turns the vault on", () => {
     expect(secretsMode({})).toBe("file");
     expect(secretsMode({ AGNI_SECRETS_MODE: "vault" })).toBe("vault");
     expect(secretsMode({ AGNI_SECRETS_MODE: "VAULT " })).toBe("vault");

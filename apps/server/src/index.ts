@@ -15,7 +15,7 @@
  *   bun run job list         queued and running jobs (--all includes finished)
  *   bun run job rm|run <id>  cancel a job / make it due now
  */
-import { chmodSync, copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { PROTOCOL_VERSION } from "@agni/protocol";
@@ -51,8 +51,9 @@ import { formatDuration, parseDurationMs, parseWhen } from "./util/time";
 import { startServer, type RunningServer } from "./ws/server";
 import { agniHome, loadHomeEnv, migrateHomeLayout } from "./home";
 import { browserOpenCommand } from "./util/open-url";
-import { secureDirectory, secureFile, verifyHomePrivate } from "./util/private-file";
+import { verifyHomePrivate } from "./util/private-file";
 import { extraHelpLines, runExtraCommand } from "./cli/extra-commands";
+import { prepareHome } from "./cli/s3-setup";
 import { runStartupHooks } from "./startup";
 import { loadVaultEnvForCli, unlockVaultAtStart, vaultRefusalMessage } from "./startup/s3-vault";
 import { ServeLockError, type ServeLock } from "./startup/s3-serve-lock";
@@ -502,38 +503,30 @@ async function openBrowser(args: string[]): Promise<void> {
 }
 
 /**
- * First run (and upgrade) in one command: AGNI_HOME + config.env, the login
- * service (or the detached daemon with --no-service), then a paired browser.
+ * First run (and upgrade) in one command: AGNI_HOME + config.env, the secrets mode (the vault for a fresh home), the
+ * login service (or the detached daemon with --no-service), then a paired browser. `--prepare-only` stops after the
+ * secrets mode (the installer uses it, because it starts the service itself).
  */
 async function setup(args: string[]): Promise<void> {
   const home = agniHome();
-  const envPath = join(home, "config.env");
-  let created = false;
+  let prepared: Awaited<ReturnType<typeof prepareHome>>;
   try {
-    mkdirSync(home, { recursive: true, mode: 0o700 });
-    // An older ~/.agni may be 755; the DB and logs inside rely on this being private.
-    chmodSync(home, 0o700);
-    // Windows has no mode bits. The directory gets an owner-only ACL before
-    // config.env exists, so the file is created already protected, and the
-    // files already under it (an upgrade) inherit it. Fail closed: the owner is
-    // about to put API keys in here.
-    secureDirectory(home, "throw");
-    verifyHomePrivate(home);
-    if (!existsSync(envPath)) {
-      copyFileSync(resolve(import.meta.dir, "../../../infra/env.example"), envPath);
-      chmodSync(envPath, 0o600);
-      created = true;
-    }
-    // Also on a rerun: a config.env from an older setup may have its own ACL.
-    secureFile(envPath);
+    prepared = await prepareHome({ home, envExample: resolve(import.meta.dir, "../../../infra/env.example") });
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
   }
-  if (created) {
-    console.log(`created ${envPath} — add a model provider key there (or in the web app's settings)`);
+  console.log(prepared.secrets.message);
+  // From here on this process is in the mode setup chose, whether or not config.env was just made.
+  process.env.AGNI_SECRETS_MODE = prepared.secrets.mode;
+  if (prepared.created) {
+    const keys = prepared.secrets.mode === "vault"
+      ? "add a model provider key in the web app's settings (it goes into the vault)"
+      : "add a model provider key there (or in the web app's settings)";
+    console.log(`created ${join(home, "config.env")} — ${keys}`);
     loadHomeEnv();
   }
+  if (hasFlag(args, "--prepare-only")) return;
   const config = loadConfig();
   if (hasFlag(args, "--no-service")) await daemonCommand(["start"]);
   else await service(["install"]);
@@ -665,8 +658,9 @@ function usage(code = 0): void {
   const extraHelp = extraHelpLines().map((line) => `${String.fromCharCode(10)}${line}`).join("");
   (code === 0 ? console.log : console.error)(`agni ${agniVersion()}
 
-  setup              first run / upgrade: config.env, login service, open a paired browser
-                     (--no-service: detached daemon instead; --no-open: just print the link)
+  setup              first run / upgrade: config.env, secrets mode (vault for a fresh home), login service, open a paired browser
+                     (--no-service: detached daemon instead; --no-open: just print the link;
+                     --prepare-only: only config.env and the secrets mode, start nothing)
   open [--no-browser]  mint a pairing code and open the web app
   serve              start the HTTP/WebSocket server in the foreground
   daemon start       start it detached; waits for /health

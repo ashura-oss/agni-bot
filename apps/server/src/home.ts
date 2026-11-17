@@ -51,9 +51,10 @@ export function parseEnvFile(text: string): Record<string, string> {
  * Load AGNI_HOME/config.env into process.env. Variables already set (the
  * shell, or a repo .env Bun loaded in dev) win, so nothing changes for dev.
  *
- * Secrets: while `AGNI_SECRETS_MODE` is `file` (the default until S3-3 flips
- * it) credentials in config.env load as before. In `vault` mode they do not:
- * only non-secret settings load here, and the credentials come from the vault
+ * Secrets: in `file` mode (a home with no mode recorded is in file mode: it was
+ * made before the vault) credentials in config.env load as before. In `vault`
+ * mode, which `agni setup` records for a fresh home, they do not: only
+ * non-secret settings load here, and the credentials come from the vault
  * (`unlockVaultAtStart` fills them in). The mode may be set in the shell or in
  * config.env itself.
  */
