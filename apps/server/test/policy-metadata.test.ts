@@ -38,8 +38,9 @@ describe("tool metadata", () => {
     expect(policy?.classes).toEqual(expect.arrayContaining(["untrusted-reader", "effector"]));
   });
 
-  test("a tool's own meta wins over the table", () => {
-    expect(policyFor("web_fetch", { classes: ["inert"], tier: 0 })?.classes).toEqual(["inert"]);
+  test("a tool's own meta adds to the table's row and never takes from it", () => {
+    // It used to replace the row (classes: ["inert"]), which made a page reader stop tainting the run. See s2-p-policy-meta.test.ts.
+    expect(policyFor("web_fetch", { classes: ["inert"], tier: 0 })?.classes).toEqual(["untrusted-reader", "inert"]);
   });
 
   test("the classes say what each kind of tool is", () => {
