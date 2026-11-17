@@ -15,6 +15,10 @@ import type { Migration } from "../migrations";
  *    that has not ended: it counts for at most the longest wait the app allows. A restart closes the ones a
  *    dead process left open (`closeOpenWaits`), so a crash does not give a retried job that time for free.
  *
+ * A column on `jobs` belongs to the same fix round:
+ *  - `wake_scope`: set when a wake is counted against its request (`takeWakePlace`), so the wake count is one indexed read
+ *    and not a JSON read of every turn job.
+ *
  * `turns.ended_by` marks a turn the run's time limit ended. Its `stop_reason` stays `timeout` (that is the
  * protocol's word for it), but the nightly harness review must not read it as a model that is too slow.
  */
@@ -35,5 +39,7 @@ export const migration: Migration | null = {
     CREATE INDEX idx_run_clock_waits_key ON run_clock_waits(clock_key);
     CREATE INDEX idx_run_clocks_started ON run_clocks(started_at);   -- every clock start drops the ones older than a week
     ALTER TABLE turns ADD COLUMN ended_by TEXT;   -- NULL, or wall_time
+    ALTER TABLE jobs ADD COLUMN wake_scope TEXT;      -- the request a counted wake belongs to (jobs/wake-limit.ts)
+    CREATE INDEX idx_jobs_wake_scope ON jobs(wake_scope) WHERE wake_scope IS NOT NULL;
   `,
 };

@@ -6,11 +6,12 @@
  */
 import { afterEach, describe, expect, setSystemTime } from "bun:test";
 import { resetS2Startup } from "../src/startup/s2";
+import { WAKE_COUNT_SQL } from "../src/jobs/wake-limit";
 import { enqueueJob } from "../src/stores/jobs";
 import { createThread } from "../src/stores/threads";
 import { getRunCaps, setRunCaps } from "../src/stores/policy-settings";
 import { scenarioTest, gate, say, useScenarios, type Scenario } from "./scenarios/harness";
-import { later, minutes } from "./invariants/support";
+import { call, later, minutes } from "./invariants/support";
 
 const scenarios = useScenarios();
 // A scenario boots the startup hooks, which wire the router gate and the budget to its database: unwire them with it.
@@ -117,5 +118,35 @@ describe("the wake limit", () => {
     queueWake(s, threadID, "trn_root_a", 3);
     await s.runner().tick();
     expect(s.model.requests.length - before, "a third wake ran under a limit of two").toBe(0);
+  });
+
+  scenarioTest("a daily routine that delegates is held to the limit per run, not for ever: day 11's wake runs", async () => {
+    const s = await scenarios.start();
+    const DAY = minutes(24 * 60);
+    const routine = enqueueJob(s.db, { kind: "turn", payload: { text: "check the warehouse", agentID: "ea", notify: false, everyMs: DAY } }).id;
+    for (let day = 1; day <= 11; day += 1) {
+      s.model.queue(
+        call("delegate_task", { toAgentID: "researcher", goal: `Count the pallets for day ${day}.` }, `call_d${day}`),
+        say("On it."),
+        say(`Counted for day ${day}.`),
+        say(`Told the owner about day ${day}.`),
+      );
+      const before = s.model.requests.length;
+      for (let tick = 0; tick < 6 && s.model.requests.length - before < 4; tick += 1) await s.runner().tick();
+      expect(s.model.requests.length - before, `day ${day}: the routine, its task and its wake did not each run a model turn`).toBe(4);
+      const wakes = s.all<{ state: string; result: string | null }>("SELECT state, result FROM jobs WHERE kind = 'turn' AND payload LIKE '%wakeKey%' ORDER BY rowid");
+      expect(wakes.length, `day ${day}: the wake was not queued`).toBe(day);
+      expect(wakes[day - 1]!.state, `day ${day}: the wake was not completed (${wakes[day - 1]!.result})`).toBe("done");
+      expect(wakes[day - 1]!.result ?? "", `day ${day}: the wake was refused by the limit`).not.toMatch(/wake limit/i);
+      later(DAY);
+    }
+    expect(stateOf(s, routine), "the routine is still scheduled").toBe("queued");
+  });
+
+  scenarioTest("counting a request's wakes reads an index, not every turn job", async () => {
+    const s = await scenarios.start();
+    const plan = s.db.query<{ detail: string }, [string, string]>(`EXPLAIN QUERY PLAN ${WAKE_COUNT_SQL}`).all("trn_root_a", "job_none").map((row) => row.detail);
+    expect(plan.some((detail) => /USING (COVERING )?INDEX idx_jobs_wake_scope/.test(detail)), `the count does not use idx_jobs_wake_scope: ${plan.join(" | ")}`).toBe(true);
+    expect(plan.some((detail) => /^SCAN jobs/.test(detail)), `the count scans every job: ${plan.join(" | ")}`).toBe(false);
   });
 });
