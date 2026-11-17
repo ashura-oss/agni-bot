@@ -7,7 +7,7 @@ describes the behaviour and the doc is wrong.
 Read these first:
 
 1. [`../AGENTS.md`](../AGENTS.md): what Agni Bot is, its terms, hard rules, traps, and where the code lives.
-2. [`architecture.md`](architecture.md): the system map.
+2. [`architecture.md`](architecture.md): the system map, including the policy gate and the secrets vault.
 3. [`protocol.md`](protocol.md): the wire contract (protocol v2).
 4. [`plugins.md`](plugins.md) and [`routines.md`](routines.md): outside accounts and scheduled work.
 5. [`blueprint-v3.html`](blueprint-v3.html): the original plan. Use it for intent, not for status.
@@ -24,10 +24,10 @@ Read these first:
 | File | Status | What it is |
 | --- | --- | --- |
 | `README.md` | current | This index. |
-| `architecture.md` | current | System map: clients, server, jobs, task lane, stores, plugins, shared seams. |
-| `protocol.md` | current | Wire contract for protocol v2: frames, limits, error codes. |
-| `plugins.md` | current | Connected accounts and MCP servers: catalog, capability modes, trusted tools. |
-| `routines.md` | current | Scheduled routines: preflight, allowed tools, limits, event triggers. |
+| `architecture.md` | current | System map: clients, server, jobs, task lane, policy gate, stores, secrets and audit, plugins. |
+| `protocol.md` | current | Wire contract for protocol v2: frames (including the policy and memory frames), limits, error codes, and who may connect. |
+| `plugins.md` | current | Connected accounts and MCP servers: catalog, capability modes, trusted and pinned MCP tools. |
+| `routines.md` | current | Scheduled routines: preflight checks, allowed tools, limits, event triggers. |
 | `agni-context-memory-spec.md` | upstream history | Upstream context and memory spec. |
 | `backend-improvement-plan.md` | upstream history | Upstream backend improvement plan. Its bug list may be stale. |
 | `blueprint-v3.html` | upstream history | Original product plan. Section 10 has a status column dated 2026-10-26. |
@@ -60,6 +60,7 @@ checked again on 2026-11-17.
 | `apps/landing/index.html` | current, not re-checked | Landing page. |
 | `apps/public/index.html`, `apps/public/privacy.html` | not audited | The privacy page names integrations (Google, Granola, Notion). It should not imply Slack or Discord. |
 | `infra/README.md`, `infra/npm/README.md` | not audited | Install and deploy notes. |
+| `infra/env.example` | not audited | Environment template. It does not list every variable the code reads (for example `AGNI_KEYSTORE`). |
 | `extensions/README.md` | placeholder | The extension loader is not built. |
 | `thoughts.md` | partly stale | Mac pairing notes. |
 | `bug.md` | not audited | Open bug list named in `AGENTS.md`. |
@@ -69,7 +70,8 @@ checked again on 2026-11-17.
 ## Known gaps
 
 - No doc covers the `tools/audit/` peer-memory audit script.
-- The shared seams added in the P0 shared prep (`redact()`, the audit sink,
-  `ToolMeta`, the usage recorder, and the secret-name classifier) are stubs or
-  have no callers yet. `architecture.md` lists them. No doc describes them as working.
+- The shared seams from the early prep (`redact()`, the audit sink, `ToolMeta`,
+  the usage recorder, and the secret-name classifier) are live now.
+  `architecture.md` describes them. It also lists the stored text paths that
+  are not yet redacted before storage.
 - A local `.env` that still sets `AGNI_DB_PATH=data/...` keeps the old database location.

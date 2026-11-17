@@ -4,7 +4,7 @@ A routine is a recurring background job owned by one bot. It runs on a cron
 schedule in a timezone, and before each run it checks its preflight:
 
 - `http`: fetches the URL and compares the ETag, or a hash of the body.
-- `check`: a named, fixed question about Agni's own data, picked by name with typed values (the list is in `apps/server/src/routines/preflight-checks.ts`); the answer is hashed. A `sql` preflight is refused: nothing a model writes ever becomes SQL.
+- `check`: a named, fixed question about Agni's own data, picked by name with typed values (the list is in `apps/server/src/routines/preflight-checks.ts`: `thread_activity`, `agent_memories`, `open_tasks`, `pending_approvals`, `failed_jobs` and `new_turns`); the answer is hashed. A `sql` preflight is refused: nothing a model writes ever becomes SQL.
 - `mail`: one IMAP `UNSEEN` search. See Event triggers below.
 - `none`: always counts as changed.
 
@@ -12,6 +12,11 @@ When the preflight shows no change, the run is recorded as `skipped_no_delta`
 and the bot is not called. Otherwise the bot runs the routine's prompt with a
 read-only tool set and reports into a background session in its conversation.
 Five failures in a row pause the routine and notify the owner.
+
+A routine's run is gated like input from another bot. What it reads can taint
+the run, and a tainted run asks the owner before it sends anything or changes
+bots, jobs or routines. The rules are in [`architecture.md`](architecture.md),
+Policy gate.
 
 ## Tools
 
@@ -34,7 +39,7 @@ A routine cannot be created from a turn that started from another bot's message.
 | Misfire | `run_once` | `skip` drops a run that is more than one period late |
 | `maxTokens` | 16,000 | 1 to 16,000 (the task loop's own cap) |
 | `maxExecutionMs` | 120,000 | 1 to 600,000 |
-| `allowedDomains` | empty | web tools refuse every host; `routine_create` always leaves it empty |
+| `allowedDomains` | empty | web tools refuse every host. `routine_create` always leaves it empty. The owner can set up to 20 bare hosts with `routine.domains.set`; a bot cannot |
 | Preflight | `none` | `http`, `mail`, `none`, or a named `check`; `sql` is refused |
 
 A routine run can use only these tools: memory search, transcript search, links

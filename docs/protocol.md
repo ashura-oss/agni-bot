@@ -27,6 +27,9 @@ never reason about thread ids.
   assigned by the server. Exception: `error` frames go only to the
   connection that caused them and reuse the current `seq` without advancing
   it, so they never take a replay slot.
+- Socket limits: a frame may be at most 1 MiB (`MAX_FRAME_BYTES` in
+  `ws/frame-limits.ts`). A connection that sends frames faster than a burst of
+  100, refilled at 20 a second, is closed with code 4029 (`rate limited`).
 - A client that misses frames reconnects and sends `resync {lastSeq}`; the
   server replays every frame after `lastSeq`. If the gap is older than the
   bounded replay log, the client gets `error {code: "resync_gap"}` and reloads
@@ -34,7 +37,7 @@ never reason about thread ids.
 - Handshake: connect → `hello {v, token, device}` → `hello.ok` +
   `agents.update`. `hello.ok` answers the connecting socket only and is not
   part of the replay log. The server closes connections that don't complete
-  the handshake within `AGNI_HELLO_TIMEOUT_MS` (code 4001), on version mismatch
+  the handshake within `AGNI_HELLO_TIMEOUT_MS` (default 5000 ms; code 4001), on version mismatch
   (4002), or on a bad token (4003).
 - `lastSeq` in `hello.ok` is the server's current sequence; a client whose own
   `lastSeq` is higher (server crash + restart) must treat the difference as a
@@ -66,6 +69,35 @@ is no "any loopback" and no wildcard.
 At boot the server logs when the bind address would lock browsers out (a
 wildcard or non-loopback bind with neither `AGNI_PUBLIC_ORIGIN` nor
 `AGNI_ALLOWED_ORIGINS` set).
+
+### Routes that need a paired device
+
+Every HTTP route needs a paired device (a bearer token, or the session cookie)
+except these:
+
+- the app shell: any GET or HEAD that no other route claims;
+- `/auth/*`: pairing and the session check;
+- `/health`: it answers liveness only, without a device;
+- `/ws`: the `hello` frame authenticates the socket;
+- `/oauth/callback`: bound to a one-time `state` the server issued;
+- `GET /share/<token>`: the link is the credential.
+
+Any other request without a device is refused, with a message that says to pair
+the device first.
+
+### Pairing, the session cookie, and response headers
+
+`POST /auth/pair` takes a one-time code and sets the `agni_session` cookie:
+`HttpOnly`, `SameSite=Strict`, `Path=/`, lasting 30 days. Each `GET /auth/session`
+from a live browser sends the cookie again with 30 fresh days. Pairing is limited
+to 5 attempts a minute per address and 20 a minute in total.
+
+HTML responses carry a content security policy that allows scripts only from the
+app itself, and that denies framing. They also send `X-Frame-Options: DENY`,
+`Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff` and a
+`Permissions-Policy`. The app's own inline styles are allowed (`style-src` keeps
+`'unsafe-inline'`). A share page is stricter: no script, `noindex`, and images
+only as `data:` URIs.
 
 ### `GET /health` tiers
 
@@ -190,8 +222,8 @@ browser complete back at the daemon's loopback redirect
 | `plugin.state` | `{plugins: [PluginInfo]}` | Replayable snapshot emitted whenever a connection changes (browser callback landed, expired, errored, disconnected). |
 
 `PluginInfo`: `{id, name, category: "google"\|"mcp", description,
-authKind: "oauth"\|"mcp", account, scopes, capabilities,
-available, connectionID?, status?: "disconnected"\|"pending"\|"connected"\|"error",
+authKind: "oauth"\|"mcp"\|"app-password"\|"api-key", account, scopes, capabilities,
+available, connectionID?, status?: "disconnected"\|"pending"\|"connected"\|"reauth_required"\|"error",
 accountLabel?, error?, connectedAt?}`.
 
 ## server → client
@@ -273,7 +305,7 @@ bubble. A client that ignores `reset` still shows the right answer: the sealing
 `unknown_provider`, `invalid_key`, `provider_exists`, `provider_storage`, `provider_auth`,
 `unknown_plugin`, `unknown_connection`, `plugin_not_configured`, `plugin_unavailable`,
 `plugin_connect_failed`, `unknown_background`, `unknown_channel`, `invalid_attachment`,
-`invalid_domains`, `resync_gap`, `not_found`, `not_running`, `agent_off`, `paused`, `bad_cap`, `spend_unavailable`, `approval_not_opened`, `approval_text_cut`, `internal`.
+`invalid_domains`, `resync_gap`, `not_found`, `not_running`, `agent_off`, `paused`, `bad_cap`, `spend_unavailable`, `approval_not_opened`, `approval_text_cut`, `unknown_memory`, `unknown_conflict`, `internal`.
 
 The four codes that answer one client frame (checked in `apps/server/src/ws/dispatch.ts`):
 
@@ -308,7 +340,20 @@ are skipped on replay. A client never "missed" a reply addressed to someone
 else. Everything else — turns, tokens, tool strips, approvals, notifications —
 is replayable.
 
-### Pause, per-bot off and approval expiry (additive v2 extension, Sprint 2)
+### Frames added by the policy work
+
+These frames are additive, so the version stays 2. The secrets, HTTP security and
+web routing work added no frames.
+
+| Direction | Frames |
+| --- | --- |
+| client → server | `policy.pause`, `agent.enabled.set`, `spend.status`, `spend.caps.set`, `spend.continue`, `approval.full`, `approval.rules.list`, `approval.rule.revoke`, `routine.domains.set` |
+| server → client | `policy.pause.ok`, `spend.status.ok`, `spend.stopped`, `spend.continue.ok`, `approval.full.ok`, `approval.rules.list.ok`, `approval.rule.revoke.ok`, `approval.closed` |
+
+`approval.request` gained the optional fields `source`, `tier`, `expiresAt` and
+`truncated`. The sections below give each frame's payload.
+
+### Pause, per-bot off and approval expiry (additive v2 extension)
 
 One switch pauses everything and any bot can be turned off. Both are stored in the
 database, so `agni pause` / `agni resume` from a terminal works on a running server

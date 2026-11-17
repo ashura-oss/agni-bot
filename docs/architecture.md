@@ -24,6 +24,8 @@ CLI (apps/cli)  ────┘                                                �
                                                       ├─ ws: server / dispatch / frame log
                                                       ├─ agent: bots (personas), task lane,
                                                       │         creation, visibility
+                                                      ├─ policy: one gate for every tool call,
+                                                      │          spend caps, pause, audit log
                                                       ├─ jobs: queue runner + turn kind
                                                       │        (daemon work while idle)
                                                       ├─ models: router → Groq · Cerebras ·
@@ -33,6 +35,7 @@ CLI (apps/cli)  ────┘                                                �
                                                       │           failover before first token)
                                                       ├─ plugins: catalog (Gmail, Calendar, Drive,
                                                       │           MCP connectors), OAuth, credentials
+                                                      ├─ secrets: encrypted vault, redaction
                                                       ├─ stores: SQLite (WAL) + FTS5 (see Stores)
                                                       └─ tools: registry (schema + timeout),
                                                                 bounded memory, links, tasks, mail,
@@ -46,7 +49,9 @@ Planned, not built: an ACP bridge for coding jobs (P3), a Tauri client
 
 - `apps/web` is a React + Vite client. It uses the transport-agnostic core in
   `packages/client` (frame codec, connection loop, resync, conversation reducer,
-  settings, health).
+  settings, health). Its screens have addresses (`/agent/<id>`, `/group/<id>`,
+  `/task/<id>`, `/tasks`, `/settings`), and `apps/web/src/state/router.ts`
+  maps them to screens.
 - `apps/mac` is a SwiftUI client. `AgniKit` is its own Swift connection and
   conversation layer, and `AgniProtocol` mirrors the frames by hand.
 - Both speak `packages/protocol` version **2**. A frame change lands in
@@ -64,6 +69,16 @@ provider settings file, `providers.json`, also defaults to `~/.agni/`
 (`apps/server/src/models/providers.ts`). An older copy under the repo's `data/`
 folder is moved there on first run (`apps/server/src/home.ts`).
 
+At start, `serve` opens the vault before it reads its settings, so providers see
+their keys (`apps/server/src/startup/s3-vault.ts`). A vault that exists but cannot
+be opened stops the start with a message. The server never falls back to
+plaintext keys.
+
+The local server answers only the `Host` and `Origin` names it expects. Every
+route needs a paired device except the app shell, pairing, `/health`, the
+WebSocket handshake, the OAuth callback and share links. See
+[`protocol.md`](protocol.md), "Who may connect".
+
 ## Background jobs
 
 The `jobs` table is the queue: `queued → running → done | failed`. Claims are
@@ -77,6 +92,13 @@ The `turn` kind runs one prompt in a thread. The daemon uses it for reminders
 and scheduled briefs, and it streams results to any connected client. Completion
 raises `notify`. A `turn` job with `everyMs` reschedules itself and keeps its
 thread. Failures retry with backoff, then park as `failed` with a notification.
+
+A paused bot, or a bot turned off, starts no new work. Its scheduled jobs that
+come due are skipped and recorded as `skipped (paused)` or `skipped (bot off)`.
+They do not run late when the bot is resumed. Task reminders keep running during
+pause-all. Housekeeping that calls a model waits until the pause ends. The runner
+checks the pause state when it claims a job, so a pause takes effect on the next
+claim.
 
 Background results land in the bot's conversation as a `background` session
 block. They join the transcript without stealing the active chat block.
@@ -108,7 +130,8 @@ they get `resync_gap` and reload from the database. See [`protocol.md`](protocol
 - **S5 warm path**: router health and cooldown avoid paying timeouts twice.
 - **S6 perceived speed**: local echo and streaming deltas on the client.
 - **S7 bounded everything**: per-turn timeout, first-token timeout, step budgets
-  in the task runner, daily caps on the usage ledger.
+  in the task runner, and spend caps checked before every model call (see
+  Policy gate below).
 
 ## Task lane
 
@@ -130,8 +153,9 @@ The loop is bounded in four ways:
 The loop persists its message log
 and each tool result. An interrupted session restores saved tool results. Calls
 with an uncertain outcome come back as errors and are never replayed
-automatically. Approval decisions are stored in SQLite and resolve the active
-loop through the approval broker.
+automatically. Each tool call goes through the policy gate before it runs.
+Approval decisions are stored in SQLite and resolve the active loop through the
+approval broker (`agent/approval-broker.ts`).
 
 A turn that runs out of budget still answers, naming the work that happened.
 A turn that only reads the app's own source is told to act, then stopped with
@@ -147,6 +171,53 @@ and role. Both survive a restart: the roster is rebuilt from the `agents` rows a
 A handoff lands in the *asked* bot's conversation, so opening that bot shows the
 delegated work.
 
+## Policy gate
+
+Every tool call is decided once, by `decide()` in
+`apps/server/src/policy/engine.ts`. The checks run in this order. The first one
+that answers ends the question:
+
+1. **Pause.** The owner has paused everything, or this bot is off.
+2. **Capability.** The tool is this bot's, is registered, and is loaded.
+3. **Schema.** The arguments are well formed.
+4. **Resources.** A routine's domain list, and anything the owner already refused in this run.
+5. **Budget.** Spend caps and run limits still have room.
+6. **Tier and taint.** What the call does, and whether the run has read outside content.
+7. **Stored rules.** An "always allow" that matches this bot, this tool and this target.
+8. **Owner.** A card asks, and the call waits for the answer.
+
+Each tool declares its class (untrusted-reader, private-reader, effector or
+inert), its tier (0 to 3), and what it touches (`policy/metadata.ts`). MCP tools get tier 2 unless
+the owner trusts them. A test fails when a registered tool has no metadata.
+
+A run is **tainted** once it reads outside content: a web page, mail, or the
+output of another bot (`policy/context.ts`). In a tainted run:
+
+- a send asks the owner, and the card names the untrusted source;
+- a fetch to a host the owner did not name asks;
+- the run cannot change bots, routines, jobs, skills, rules or MCP setup;
+- stored "always allow" rules do not apply, and nothing new is remembered.
+
+The agent's own mailbox and calendar are free only in an untainted run. A
+refusal covers the thing refused, not just the tool, for the rest of the run
+(`policy/denials.ts`). Taint and limits carry into delegated work
+(`policy/narrowing.ts`).
+
+Spend caps (`policy/budget.ts`) are checked before every model call. The
+router writes one ledger row for each completed call, background calls
+included (`models/usage-hook.ts`, `apps/server/src/startup/s2-ledger.ts`). Prices
+and the date each came from are in `models/prices.ts`. The defaults are $2 a
+day across all bots, $1 a day for one bot, and $0.50 per job. A check that
+cannot read its state stops the call. It fails closed.
+
+Run limits (`stores/policy-settings.ts`) bound one run: 30 minutes of run time,
+not counting time spent waiting for the owner; 4 delegations at once; 10
+self-scheduled jobs per bot; and 10 wakes per request.
+
+Every decision, approval, taint change, pause and cap change is written to the
+audit log (`stores/audit.ts`, table `audit_events`). Each row carries the hash
+of the row before it. `agni audit verify` recomputes the chain.
+
 ## Failure honesty
 
 - Failover happens only **before** the first token reaches the client. A stream
@@ -161,17 +232,24 @@ delegated work.
 
 One SQLite database in WAL mode. Its location comes from `AGNI_DB_PATH`
 (default in `config.ts`). Tables are created by numbered migrations. The base
-list in `apps/server/src/db/migrations.ts` has 53 migrations (ids 1 to 53). Ids
-54 to 64 are reserved for later sprints in `db/s2/` and `db/s3/`, and are empty
-today. The schema has about 50 tables. Main groups:
+list in `apps/server/src/db/migrations.ts` has ids 1 to 53. Migrations 54 to 59
+and 65 are in `db/s2/`, and migrations 60 to 64 are in `db/s3/`. They add the
+policy settings, cost columns on the usage ledger, the audit log, the pause
+state, run clocks and denials, MCP tool pins, OAuth states, and vault references
+for plugin credentials. Migration 63 paused any routine that held model-written
+SQL. `openDatabaseForCLI` refuses to run until every listed migration is
+applied. Main groups:
 
 - Conversations and turns: `conversations`, `threads`, `turns`, `messages`,
   `channels`, `channel_messages`, `summaries`, `attachments`, `artifacts`
 - Bots and memory: `agents`, `agent_memories`, `memories`, `memory_conflicts`,
   `links`, plus FTS5 indexes
 - Work: `tasks`, `task_lists`, `task_activity`, `jobs`, `forms`, `approvals`,
-  `peer_chains`
-- Usage and plugins: `usage_ledger`, `plugin_connections`
+  `approval_rules`, `peer_chains`
+- Policy and audit: `policy_settings`, `pause_state`, `audit_events`,
+  `run_denials`, `run_clocks`, `run_clock_waits`
+- Usage and plugins: `usage_ledger` (with cost and cached tokens),
+  `plugin_connections`, `mcp_tool_pins`, `oauth_states`
 - Devices and appearance: `devices`, `appearance_*`
 
 A conversation is the one chat with a bot, never reset. Every `threads` row is
@@ -181,19 +259,31 @@ opens with the carried summary and closes into it (`closed_by`: `manual`,
 closing block (`agent/rollover.ts`). A failed summary carries the previous
 summary forward and never blocks a turn.
 
-## Shared seams (stubs)
+## Secrets, redaction and the audit log
 
-These exist so later work can plug in without changing its callers. Most have
-no real behaviour yet. Do not describe them as working.
-
-- `policy/tool-meta.ts`: the `ToolMeta` types. Types only.
-- `policy/audit-sink.ts`: `audit()`. The default sink drops events, and nothing calls it yet.
-- `util/redact.ts`: `redact()` returns its input unchanged. `tools/bash.ts`
-  has its own private helper that masks the one-time password.
-- `models/usage-hook.ts`: the model router reports each successful completion
-  through `recordModelUsage`. The default recorder drops the event.
-- `util/secret-names.ts`: the classifier that decides whether a setting name is
-  a secret. Unknown names count as secrets. Nothing in product code calls it yet.
+- **Vault.** `apps/server/src/secrets/` keeps provider keys, plugin credentials
+  and ChatGPT accounts in `vault.bin` (AES-256-GCM). The vault's 32-byte data
+  key sits in the operating system's keystore (`bun-secrets`), or in a
+  passphrase file on a headless Linux server. Where no keystore is usable,
+  `agni setup` uses file mode. Secrets then stay in `config.env` and
+  `plugins.json`, readable only by the owner. `agni doctor` shows the mode.
+  Registered migrators move old plaintext into the vault
+  (`apps/server/src/credentials/register.ts`, `secrets/migrate.ts`).
+  `agni vault export --yes` writes the values back to plaintext.
+- **Redaction.** `util/redact.ts` keeps a registry of secret values. Each value
+  has a holder, such as a vault entry or an environment variable. Log lines and
+  outgoing frames are masked against that registry. Stored text is masked when it
+  goes through `redactForStorage` (`util/redact-storage.ts`), and not every store
+  does yet. Routine run records, job and task results, task activity and
+  summaries are still written without redaction, and so are some channel
+  messages and tool records. Treat them as able to hold a secret.
+- **Child processes.** Shell tools and the PDF worker get a fixed environment
+  and `PATH` (`util/child-env.ts`). The server picks their working directory, and
+  their whole process tree is ended with them (`util/process-tree.ts`). This is
+  hygiene, not isolation. A child running as the same user can still read the
+  server's memory or environment. A sandbox is planned and not built.
+- **Audit.** Described under Policy gate. `agni audit verify` exits 1 when a
+  row has been changed.
 
 ## Plugins
 
@@ -202,7 +292,8 @@ per account, with the scopes it asks for and the capability policy:
 `free` (runs without asking), `approval` (asks first), or `off` (refused).
 Current entries are Agni's Gmail, the owner's Gmail, Agni's Calendar, the
 owner's Calendar, the owner's Drive, and the connectors Granola, Firecrawl,
-and Notion.
+and Notion. MCP tools are pinned to the definition the owner approved, and
+MCP server URLs are checked for private addresses before each connect.
 See [`plugins.md`](plugins.md).
 
 ## Home

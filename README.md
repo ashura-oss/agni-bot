@@ -20,7 +20,7 @@ listed in [`docs/architecture.md`](docs/architecture.md).
 
 | Path | What it is |
 | --- | --- |
-| `apps/server` | Bun + TypeScript core: WebSocket protocol, agent loop, model router, SQLite stores, daemon lifecycle, job queue. Its command line is the `agni` command. Runs on this Mac now, bb-1 later. |
+| `apps/server` | Bun + TypeScript core: WebSocket protocol, agent loop, policy gate, model router, SQLite stores, encrypted secrets vault, daemon lifecycle, job queue. Its command line is the `agni` command. Runs on this Mac now, bb-1 later. |
 | `apps/web` | React + Vite web client, a faithful port of the native Mac UI. Shares `@agni/client` with future shells. |
 | `apps/mac` | Native SwiftUI macOS client (`AgniApp` + `AgniKit`). Token in Keychain, resumable streaming. |
 | `apps/app` | Planned Tauri 2 client (macOS + Android). README only; no runnable code yet. |
@@ -97,10 +97,30 @@ kept in `localStorage`. `bun run pair` still prints a device token for the Mac
 app and CLI. For remote access, run `tailscale serve --bg 8787` and set
 `AGNI_PUBLIC_ORIGIN=https://<machine>.<tailnet>.ts.net` in `~/.agni/config.env`.
 
+The local server answers only the `Host` and `Origin` names it expects. Every
+route needs a paired device except the app shell, pairing, `/health` (liveness
+only), the WebSocket handshake, the OAuth callback, and share links. Pairing
+allows 5 attempts a minute per address and 20 a minute in total. The session
+cookie lasts 30 days and slides forward on each visit.
+
+Each main screen has its own address, so a reload keeps you on it and the back
+button works:
+
+- `/agent/<id>`: a bot's conversation
+- `/group/<id>`: a group channel
+- `/task/<id>`: one task
+- `/tasks` and `/tasks/<view>` (for example `/tasks/inbox`): the Tasks screen
+- `/settings` and `/settings/<section>`: Settings (`general`, `appearance`,
+  `plugins`, `approvals`, `spending`, `models`, `device`)
+
+An unknown id or view shows a not-found state and keeps the address you typed.
+The shell and the conversation are laid out for a 375 px phone screen.
+
 Useful commands:
 
 ```sh
 bun run check               # typecheck, web and client tests, server tests, and evals
+bun run check:security      # security gates; the scanners are installed outside the repo (see scripts/check-security.ts)
 bun run web:build           # production bundle in apps/web/dist
 bun run --filter @agni/client smoke   # headless client core against a live daemon
 bun run --filter @agni/web smoke:ui   # Playwright smoke (needs AGNI_URL/AGNI_TOKEN
@@ -149,6 +169,29 @@ Turn jobs run on the daemon's job pool (`AGNI_JOB_CONCURRENCY`, default 2). The 
 (so any client sees it live) and completion raises a `notify` frame. Failures
 retry with backoff, then land as `failed` with a notification.
 
+### Pause, spend limits, and the audit log
+
+```sh
+agni pause                 # pause every bot: running work stops and nothing new starts
+agni resume                # start again (a bot you turned off stays off)
+agni policy caps           # show the run limits
+agni policy caps set --wall-minutes 45 --delegations 3   # change some of them
+agni audit verify          # check the audit log's hash chain; exits 1 if a row was changed
+```
+
+Spend caps are checked before every model call. The defaults are $2 a day
+across all bots, $1 a day for any one bot, and $0.50 per job. A run that reaches
+a cap stops and tells you why, and you can let that run go on once. Change the
+caps in the app, under Settings → Spending. Run limits default to 30 minutes of
+run time (not counting time spent waiting for you), 4 delegations at once, 10
+self-scheduled jobs per bot, and 10 wakes per request. Prices, and the date each
+came from, are in `apps/server/src/models/prices.ts`.
+
+The audit log records policy decisions, approvals, taint changes, pause and cap
+changes. Each row holds the hash of the row before it, so a changed row breaks
+the chain. The architecture is described in
+[`docs/architecture.md`](docs/architecture.md), "Policy gate".
+
 ### Passwords and other secrets
 
 When a command needs the owner's password (`sudo`, `ssh`, `ssh-add`, git over
@@ -168,8 +211,10 @@ never returned to the model, written to the transcript, or logged.
 
 The secret never goes on the command line or into the environment. It is written
 to a 0600 file in a private temp directory, and a 0700 askpass script prints it to
-the command. The directory is removed when the command exits. Output is scrubbed of the
-exact value before it reaches the model.
+the command. The directory is removed when the command exits. The shell tool then
+removes the exact value, and simple variants of it, from the command's output. That
+scrub is not complete: a command that changes its output, such as `| rev` or `xxd`,
+can hide the value. Your approval of each shell command is the control that matters.
 
 **On a Mac, the operating system can ask instead.** `run_privileged` takes an
 `auth` mode:
@@ -368,6 +413,10 @@ operating system's credential store: Windows Credential Manager, the macOS
 Keychain, or a Linux Secret Service. `config.env` then holds only settings, and
 `AGNI_SECRETS_MODE=vault` is recorded in it by `agni setup`.
 
+`AGNI_KEYSTORE` (`auto`, `bun-secrets` or `passphrase`) chooses the keystore, and
+`auto` is the default. A vault remembers which keystore made it. A different choice is
+refused rather than guessed.
+
 - **No usable keystore** (headless Linux with no Secret Service, no Credential
   Manager): `agni setup` says why and how to enable the vault later, then uses
   *file mode*: credentials stay in `config.env`, readable only by you (mode 600,
@@ -394,7 +443,7 @@ Keychain, or a Linux Secret Service. `config.env` then holds only settings, and
   `AGNI_SECRETS_MODE=vault` to use the vault there.
 
 Everything lives under `AGNI_HOME` (default `~/.agni`): `config.env`,
-`providers.json`, `plugins.json`, `data/agni.sqlite` (with `backups/`, `share/`,
+`providers.json`, `plugins.json`, `vault.bin` (vault mode), `data/agni.sqlite` (with `backups/`, `share/`,
 `attachments/`, `chatgpt/`), `scratch/`, `skills/`, `logs/agni.log`, and
 `run/agni.pid`. Old files are moved there automatically on first run. Per-file
 overrides (`AGNI_DB_PATH`, `AGNI_PID_PATH`, `AGNI_LOG_PATH`, `AGNI_PLUGINS_PATH`,
@@ -426,8 +475,11 @@ P0–P2 is the "faster than Hermes and usable daily" milestone.
   `PROTOCOL_VERSION` on breaking changes and update `docs/protocol.md`.
 - Free-first routing. Provider keys live server-side only — never in the repo,
   never in the apps.
-- Anything that shells out, writes files outside scratch, sends mail, or pays
-  money is approval-gated before it is implemented.
+- Every tool call is checked by the policy engine (`apps/server/src/policy/engine.ts`)
+  before it runs. Anything that shells out, writes files outside scratch, sends
+  mail, or pays money needs the owner's approval. The one exception is a send from
+  Agni's own mailbox, which runs without asking in a run that has read nothing
+  from outside.
 - No IDE features, ever. Repo-shaped work is planned for ACP harnesses (P3), not built.
 - `bun run typecheck`, `bun run test`, and `bun run test:web` pass before a change is called done. `bun run check` runs them with the evals.
 
