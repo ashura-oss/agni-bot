@@ -12,7 +12,10 @@
  *   - the value itself (and its trimmed form, for a value read from a file);
  *   - base64 and base64url of the whole value, with and without padding;
  *   - the `encodeURIComponent` form (a key inside a URL);
- *   - the JSON-escaped form (a key with quotes or newlines inside a JSON frame);
+ *   - the JSON-escaped form, one level deep (a key with quotes or newlines inside a JSON frame) and two
+ *     levels deep (the same key inside JSON text that is itself a string of a JSON frame: a tool's args or
+ *     result). Both only where escaping changes the value, so a value with no quote, backslash or control
+ *     character adds neither. The forms belong to the value: they are held, queued, staged and released with it;
  *   - the base64 of the value inside a longer string, at each of the three
  *     byte alignments (the part of the encoding the neighbouring bytes cannot
  *     change), in the standard and URL-safe alphabets.
@@ -83,6 +86,9 @@ function embeddedBase64(bytes: Buffer, lead: 0 | 1 | 2): string[] {
     .map((encoded) => encoded.slice(skip, encoded.length - trailing));
 }
 
+/** `text` as it appears between the quotes of a JSON string. */
+const jsonEscaped = (text: string): string => JSON.stringify(text).slice(1, -1);
+
 function variantsOf(value: string): string[] {
   const forms = new Set<string>();
   const add = (form: string): void => {
@@ -99,7 +105,13 @@ function variantsOf(value: string): string[] {
     add(b64.replace(/=+$/, ""));
     add(bytes.toString("base64url"));
     add(encodeURIComponent(base));
-    add(JSON.stringify(base).slice(1, -1));
+    // How the value looks inside a JSON string (a frame, a document), and inside a JSON string that is itself
+    // inside a JSON string (a tool's args or result, which hold serialized JSON). Escaping changes a value that has
+    // a quote, a backslash or a control character, so the raw form no longer matches; when it does not change,
+    // `add` takes the form again and the set drops it.
+    const once = jsonEscaped(base);
+    add(once);
+    add(jsonEscaped(once));
     for (const lead of [0, 1, 2] as const) for (const form of embeddedBase64(bytes, lead)) add(form);
   }
   return [...forms];
@@ -217,7 +229,9 @@ export const RETIRED_PER_SLOT = 32;
  * however many slots there are (one per plugin, account and connection). It is small on purpose,
  * because every retired value adds about fifty forms that each `redact` call scans for: at 2,000 a
  * `redact()` of a 100 KB frame measured 56 ms, so the bound is 512 (per slot
- * 32 still covers ten refreshes, and many slots rarely all have full queues). It is about a twentieth
+ * 32 still covers ten refreshes, and many slots rarely all have full queues). With the two JSON-escaped
+ * forms, 512 values that all hold a quote, a backslash and a newline (the worst case) measured about 47 ms
+ * for a 100 KB frame, against about 39 ms before the second form and about 21 ms for 512 plain values. It is about a twentieth
  * of `MAX_SECRETS`, so the live values of the vault, the environment and every store always fit.
  */
 export const RETIRED_MAX = 512;
