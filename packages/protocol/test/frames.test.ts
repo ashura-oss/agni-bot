@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import {
   JobInfoSchema,
   PROTOCOL_VERSION,
@@ -295,5 +296,111 @@ describe("envelope helpers", () => {
   test("version guard", () => {
     expect(isSupportedVersion(PROTOCOL_VERSION)).toBe(true);
     expect(isSupportedVersion(PROTOCOL_VERSION - 1)).toBe(false);
+  });
+});
+
+describe("Sprint 2 frames (additive)", () => {
+  test("approval.request still parses without the new fields, and with them", () => {
+    const base = { type: "approval.request", seq: 1, requestID: "apr_1", action: "do it", preview: "preview", buttons: ["once", "reject"] };
+    expect(parseServerFrame(base).ok).toBe(true);
+    expect(parseServerFrame({
+      ...base,
+      source: [{ kind: "web", label: "example.com/offers" }, { kind: "scheduled" }],
+      tier: 2,
+      expiresAt: "2026-11-16T12:10:00.000Z",
+      truncated: true,
+    }).ok).toBe(true);
+  });
+
+  test("approval.request rejects an unknown source kind and a tier outside 0-3", () => {
+    const base = { type: "approval.request", seq: 1, requestID: "apr_1", action: "a", preview: "p", buttons: ["once"] };
+    expect(parseServerFrame({ ...base, source: [{ kind: "carrier-pigeon" }] }).ok).toBe(false);
+    expect(parseServerFrame({ ...base, tier: 4 }).ok).toBe(false);
+  });
+
+  test("approval.full needs a request id", () => {
+    expect(parseClientFrame({ type: "approval.full", requestID: "apr_1" }).ok).toBe(true);
+    expect(parseClientFrame({ type: "approval.full" }).ok).toBe(false);
+  });
+
+  test("policy.pause reads with no fields, pauses, or addresses one bot", () => {
+    expect(parseClientFrame({ type: "policy.pause" }).ok).toBe(true);
+    expect(parseClientFrame({ type: "policy.pause", paused: true }).ok).toBe(true);
+    expect(parseClientFrame({ type: "policy.pause", paused: false, agentID: "researcher" }).ok).toBe(true);
+    expect(parseClientFrame({ type: "policy.pause", paused: "yes" }).ok).toBe(false);
+  });
+
+  test("agent.enabled.set needs both fields", () => {
+    expect(parseClientFrame({ type: "agent.enabled.set", agentID: "researcher", enabled: false }).ok).toBe(true);
+    expect(parseClientFrame({ type: "agent.enabled.set", agentID: "researcher" }).ok).toBe(false);
+  });
+
+  test("spend.caps.set takes positive dollars or null, and leaves out what it does not change", () => {
+    expect(parseClientFrame({ type: "spend.caps.set", dayUsd: 2 }).ok).toBe(true);
+    expect(parseClientFrame({ type: "spend.caps.set", perJobUsd: null }).ok).toBe(true);
+    expect(parseClientFrame({ type: "spend.caps.set" }).ok).toBe(true);
+    expect(parseClientFrame({ type: "spend.caps.set", dayUsd: 0 }).ok).toBe(false);
+    expect(parseClientFrame({ type: "spend.caps.set", dayUsd: -1 }).ok).toBe(false);
+    expect(parseClientFrame({ type: "spend.caps.set", dayUsd: "2" }).ok).toBe(false);
+  });
+
+  test("an agent and an approval rule may carry the new optional fields", () => {
+    expect(parseServerFrame({ type: "agents.update", seq: 1, agents: [{ id: "ea", name: "Agni", enabled: false }] }).ok).toBe(true);
+    expect(parseServerFrame({
+      type: "approval.rules.list.ok", seq: 1,
+      rules: [{ id: "rul_1", agentID: "ea", agentName: "Agni", toolName: "write_file", target: "resource:reports/*", createdAt: "2026-11-16T00:00:00.000Z", resourcePattern: "reports/*" }],
+    }).ok).toBe(true);
+  });
+
+  test("policy.pause.ok and spend.status.ok parse", () => {
+    expect(parseServerFrame({ type: "policy.pause.ok", seq: 1, paused: false, stopped: 0, bots: [{ agentID: "ea", name: "Agni", enabled: true, runningTurns: 0, scheduledJobs: 0 }] }).ok).toBe(true);
+    expect(parseServerFrame({ type: "spend.status.ok", seq: 1, day: "2026-11-16", resetsAt: "2026-11-17T00:00:00.000Z", timeZone: "UTC", caps: { dayUsd: 2, perBotDayUsd: null, perJobUsd: 0.5 }, daySpentUsd: 0, bots: [], unpricedCalls: 0 }).ok).toBe(true);
+    expect(parseServerFrame({ type: "approval.full.ok", seq: 1, requestID: "apr_1", text: "everything" }).ok).toBe(true);
+  });
+
+  test("spend.status.ok carries the run caps when it has them, and parses without them", () => {
+    const base = { type: "spend.status.ok", seq: 1, day: "2026-11-16", resetsAt: "2026-11-17T00:00:00.000Z", timeZone: "UTC", caps: { dayUsd: 2, perBotDayUsd: 1, perJobUsd: 0.5 }, daySpentUsd: 0, bots: [], unpricedCalls: 0 };
+    const runCaps = { rootJobWallMinutes: 30, maxConcurrentDelegations: 4, maxSelfScheduledJobsPerBot: 10, maxWakesPerRequest: 10 };
+    const withCaps = parseServerFrame({ ...base, runCaps });
+    expect(withCaps.ok).toBe(true);
+    if (withCaps.ok && withCaps.frame.type === "spend.status.ok") expect(withCaps.frame.runCaps).toEqual(runCaps);
+    expect(parseServerFrame(base).ok).toBe(true);
+    // A run cap is a positive number, and the counts are whole numbers.
+    expect(parseServerFrame({ ...base, runCaps: { ...runCaps, rootJobWallMinutes: 0 } }).ok).toBe(false);
+    expect(parseServerFrame({ ...base, runCaps: { ...runCaps, maxWakesPerRequest: 1.5 } }).ok).toBe(false);
+    expect(parseServerFrame({ ...base, runCaps: { ...runCaps, maxConcurrentDelegations: -1 } }).ok).toBe(false);
+    expect(parseServerFrame({ ...base, runCaps: { rootJobWallMinutes: 30 } }).ok).toBe(false);
+  });
+
+  test("spend.continue needs a run key; spend.stopped and spend.continue.ok parse", () => {
+    expect(parseClientFrame({ type: "spend.continue", runKey: "agent:ea" }).ok).toBe(true);
+    expect(parseClientFrame({ type: "spend.continue" }).ok).toBe(false);
+    expect(parseClientFrame({ type: "spend.continue", runKey: "" }).ok).toBe(false);
+    expect(parseServerFrame({ type: "spend.stopped", seq: 1, runKey: "agent:ea", agentId: "ea", scope: "day", reason: "over_cap", spentUsd: 2, capUsd: 2, message: "stopped" }).ok).toBe(true);
+    expect(parseServerFrame({ type: "spend.stopped", seq: 1, runKey: "agent:ea", scope: "week", reason: "over_cap", spentUsd: 2, capUsd: 2, message: "stopped" }).ok).toBe(false);
+    expect(parseServerFrame({ type: "spend.continue.ok", seq: 1, runKey: "agent:ea", grantedUsd: 0.5 }).ok).toBe(true);
+    expect(parseServerFrame({ type: "spend.continue.ok", seq: 1, runKey: "agent:ea", grantedUsd: 0 }).ok).toBe(false);
+  });
+
+  test("an error frame may name the card an approve.reply was refused for", () => {
+    const base = { type: "error", seq: 3, code: "unknown_request", message: "gone" };
+    const named = parseServerFrame({ ...base, requestID: "apr_1" });
+    expect(named.ok).toBe(true);
+    if (named.ok && named.frame.type === "error") expect(named.frame.requestID).toBe("apr_1");
+    const plain = parseServerFrame(base);
+    expect(plain.ok).toBe(true);
+    if (plain.ok && plain.frame.type === "error") expect(plain.frame.requestID).toBeUndefined();
+    expect(parseServerFrame({ ...base, requestID: 5 }).ok).toBe(false);
+  });
+
+  test("the fixtures carry an error frame with a requestID", () => {
+    const fixtures = JSON.parse(readFileSync(new URL("../fixtures/frames.json", import.meta.url), "utf8")) as { server: Array<{ type: string; requestID?: string }> };
+    const named = fixtures.server.filter((frame) => frame.type === "error" && typeof frame.requestID === "string");
+    expect(named.length).toBeGreaterThan(0);
+    for (const frame of named) {
+      const parsed = parseServerFrame(frame);
+      expect(parsed.ok).toBe(true);
+      if (parsed.ok && parsed.frame.type === "error") expect(parsed.frame.requestID).toBe(frame.requestID);
+    }
   });
 });

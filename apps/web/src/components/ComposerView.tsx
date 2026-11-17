@@ -2,13 +2,13 @@
  * A full-width, bottom-anchored chat composer with slash commands above it.
  * Enter sends; Shift-Enter inserts a newline; the composer stays a single quiet capsule.
  */
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import { ArrowUp, Plus, UserRound, Paperclip, X } from "lucide-react";
 import { useAppModel, useAppSnapshot } from "../state/use-app-model";
 import { copyText } from "./bits";
 import { shortcutLabel } from "../state/display";
 
-import { MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, type AttachmentInfo } from "@agni/client";
+import { MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, safeLine, type AttachmentInfo } from "@agni/client";
 
 interface DraftAttachment { id: string; file: File; preview?: string; uploaded?: AttachmentInfo; }
 
@@ -38,6 +38,11 @@ export function ComposerView() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const focusToken = useRef(snapshot.focusComposerToken);
   const isStreaming = snapshot.conversation.isStreaming;
+  // A bot that is off cannot answer, and while every bot is paused a message waits: the box says which.
+  const botName = safeLine(model.agent?.name ?? "New Bot", 80);
+  const botOff = model.agent ? model.isBotOff(model.agent.id) : false;
+  const allPaused = snapshot.policy.pause?.paused === true;
+  const offHintID = useId();
   // A message the daemon refused (too long) comes back: the text returns to the box and the
   // reason is shown, unless the owner has already started something new.
   const rejected = snapshot.rejectedDraft;
@@ -127,7 +132,8 @@ export function ComposerView() {
   };
 
   const submit = async () => {
-    if (sendingRef.current || (!trimmed && attachments.length === 0)) return;
+    // A bot that is off gets nothing: the bar above the box says so and offers Turn on.
+    if (botOff || sendingRef.current || (!trimmed && attachments.length === 0)) return;
     // Only recognised slash commands are consumed; paths and unknown commands remain messages.
     if (trimmed.startsWith("/") && filtered[0] && attachments.length === 0) {
       filtered[0].action(); setDraft(""); model.updateTypingState(false); return;
@@ -250,6 +256,15 @@ export function ComposerView() {
         </>
       ) : null}
 
+      {botOff && model.agent ? (
+        <div className="composer-off-bar">
+          <span id={offHintID}>{`${botName} is off. Turn ${botName} on to get a reply.`}</span>
+          <button type="button" className="btn small" onClick={() => model.setBotEnabled(model.agent!.id, true)}>
+            Turn on
+          </button>
+        </div>
+      ) : null}
+
       <div className="composer-row">
         <button
           type="button"
@@ -277,8 +292,16 @@ export function ComposerView() {
             model.updateTypingState(event.target.value.trim().length > 0);
           }}
           onKeyDown={onKeyDown}
-          placeholder={isStreaming ? `Message ${model.agent?.name ?? "New Bot"} — working…` : `Message ${model.agent?.name ?? "New Bot"}`}
-          aria-label={isStreaming ? `Message ${model.agent?.name ?? "New Bot"}; send stop to interrupt` : `Message ${model.agent?.name ?? "New Bot"}`}
+          placeholder={
+            botOff
+              ? `${botName} is off. Turn ${botName} on to get a reply.`
+              : allPaused
+                ? "Bots are paused. Your message will wait until you resume."
+                : isStreaming
+                  ? `Message ${botName} — working…`
+                  : `Message ${botName}`
+          }
+          aria-label={isStreaming ? `Message ${botName}; send stop to interrupt` : `Message ${botName}`}
         />
 
         {isStreaming ? (
@@ -298,7 +321,8 @@ export function ComposerView() {
         <button
           type="button"
           className="composer-send"
-          disabled={sending || (trimmed.length === 0 && attachments.length === 0)}
+          disabled={sending || botOff || (trimmed.length === 0 && attachments.length === 0)}
+          aria-describedby={botOff ? offHintID : undefined}
           title="Send (Enter); new line (Shift+Enter)"
           aria-label="Send"
           onClick={() => void submit()}

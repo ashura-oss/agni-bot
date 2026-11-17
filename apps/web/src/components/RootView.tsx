@@ -22,6 +22,7 @@ import { ConnectionBanner } from "./ConnectionBanner";
 import { NotFoundView } from "./NotFoundView";
 import { RouteLoadingView } from "./RouteLoadingView";
 import { GroupView } from "./GroupView";
+import { PauseBanner, PolicyAnnouncer } from "./PolicyControls";
 
 export function RootView() {
   const model = useAppModel();
@@ -114,6 +115,7 @@ export function RootView() {
       style={appearanceVariables(snapshot.appearance, prefersDark, model.agent?.color, backgroundURL) as CSSProperties}
     >
       {snapshot.screen === "pairing" ? <PairingView /> : <ChatView />}
+      <PolicyAnnouncer />
       {snapshot.isAgentSwitcherPresented ? <AgentSwitcherView /> : null}
       {snapshot.isSettingsPresented && snapshot.screen !== "pairing" ? <SettingsView /> : null}
       {snapshot.isDebugPresented && snapshot.screen !== "pairing" ? <DebugView /> : null}
@@ -148,6 +150,7 @@ function ChatView() {
         ) : (
           <>
             <ThreadHeader onToggleSidebar={toggleSidebar} />
+            <PauseBanner />
             <ConnectionBanner />
             <ThreadView />
           </>

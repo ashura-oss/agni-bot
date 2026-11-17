@@ -7,8 +7,10 @@
  *   shutdown        the server is stopping
  *   device_revoked  the device that started the turn was revoked or logged out
  *   timeout         the turn ran out of time
+ *   paused          the owner paused all bots
+ *   agent_off       the owner turned this turn's bot off
  */
-export const ABORT_REASONS = ["owner_stop", "shutdown", "device_revoked", "timeout"] as const;
+export const ABORT_REASONS = ["owner_stop", "shutdown", "device_revoked", "timeout", "paused", "agent_off"] as const;
 export type AbortReason = (typeof ABORT_REASONS)[number];
 
 /** The reason a signal was aborted with, when it is one of ours. */

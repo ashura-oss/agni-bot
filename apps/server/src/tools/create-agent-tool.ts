@@ -12,6 +12,7 @@ import { personaInfo, mentionRoster, getPersona, DEFAULT_AGENT_TOOLS, IMPLICIT_A
 import { createAgentPersona } from "../agent/creation";
 import { nowISO } from "../util/ids";
 import { MAX_AGENT_NAME_CHARS } from "../agent/identity";
+import { CLOSURE_WORDING_REFUSAL, closureWording } from "../agent/closure";
 import type { ToolRegistry } from "./registry";
 
 export interface CreateAgentToolDeps {
@@ -47,6 +48,7 @@ export function registerCreateAgentTool(registry: ToolRegistry, deps: CreateAgen
     timeoutMs: 2_000,
     handler: async (args: Record<string, unknown>, ctx) => {
       if (ctx.peerInput) return { error: "not done: this turn started from another agent's message" };
+      if ([args.name, args.role, args.prompt].some((text) => typeof text === "string" && closureWording(text))) return { error: CLOSURE_WORDING_REFUSAL };
       const db = deps.db;
       const known = registry.list().map((tool) => tool.name);
       // M19: a new bot never exceeds its creator's tools or memory scope.

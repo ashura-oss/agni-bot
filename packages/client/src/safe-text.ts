@@ -9,10 +9,11 @@
  *
  * Cards draw their fields as React text: never HTML, never markdown.
  */
-/** Code point ranges: C0 and C1 controls, soft hyphen, bidi marks and overrides, zero-width and invisible characters, tags. */
+/** Code point ranges: C0 and C1 controls, soft hyphen, the combining grapheme joiner, bidi marks and overrides, zero-width and invisible characters, the Hangul fillers, variation selectors, tags. The same set as the daemon's `agent/card-text.ts`. */
 const UNSAFE_RANGES: ReadonlyArray<readonly [number, number]> = [
-  [0x0000, 0x001f], [0x007f, 0x009f], [0x00ad, 0x00ad], [0x061c, 0x061c], [0x180e, 0x180e],
-  [0x200b, 0x200f], [0x2028, 0x202e], [0x2060, 0x206f], [0xfeff, 0xfeff], [0xfff9, 0xfffb], [0xe0000, 0xe007f],
+  [0x0000, 0x001f], [0x007f, 0x009f], [0x00ad, 0x00ad], [0x034f, 0x034f], [0x061c, 0x061c], [0x115f, 0x1160], [0x180e, 0x180e],
+  [0x200b, 0x200f], [0x2028, 0x202e], [0x2060, 0x206f], [0x3164, 0x3164], [0xfe00, 0xfe0f], [0xfeff, 0xfeff], [0xffa0, 0xffa0],
+  [0xfff9, 0xfffb], [0xe0000, 0xe007f], [0xe0100, 0xe01ef],
 ];
 const UNSAFE_CHARS = new RegExp(
   UNSAFE_RANGES.map(([from, to]) => `[${String.fromCodePoint(from)}-${String.fromCodePoint(to)}]`).join("|"),

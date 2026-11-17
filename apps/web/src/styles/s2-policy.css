@@ -1,0 +1,487 @@
+/* Sprint 2: the policy core in the app. -----------------------------------------
+ * Approval cards, the full-text dialog, the budget stop, pause and off, spending.
+ * Colour comes from the tokens only (the appearance system sets them at runtime).
+ * Loaded last. Phone rules at the bottom keep every control at 44px and the header
+ * inside 375px.
+ */
+
+/* Approval card -------------------------------------------------------------- */
+
+.approval-card .card-heading .approval-expiry {
+  flex: 0 0 auto;
+  color: var(--ink-tertiary);
+  font-size: var(--text-caption);
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+/* The whole preview, scrolled inside its box, the way the daemon wrote it. */
+.approval-card .approval-preview {
+  max-height: min(36vh, 300px);
+  border-left: 3px solid var(--hairline);
+  background: var(--canvas);
+  color: var(--ink);
+}
+
+.approval-full-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.approval-full-hint {
+  color: var(--ink-secondary);
+  font-size: var(--text-meta);
+}
+
+.approval-notice {
+  margin: 0;
+  padding-left: 10px;
+  border-left: 3px solid var(--ember);
+  color: var(--ink);
+  font-size: var(--text-meta);
+  line-height: 1.45;
+}
+
+.approval-expired {
+  margin: 0;
+  color: var(--ink-secondary);
+  font-size: var(--text-meta);
+  line-height: 1.5;
+}
+
+.approval-card.expired {
+  opacity: 0.85;
+}
+
+/* A button that is not available yet stays in the tab order and says why. */
+.btn[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn[aria-disabled="true"]:hover {
+  background: var(--surface);
+}
+
+.btn.primary[aria-disabled="true"]:hover {
+  background: var(--ember);
+}
+
+.approval-full-dialog {
+  width: min(720px, 100%);
+}
+
+.approval-full-dialog h2.approval-full-title {
+  font-size: var(--text-title);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.approval-full-dialog h2.approval-full-title:focus {
+  outline: none;
+}
+
+.approval-full-body {
+  max-height: min(55vh, 460px);
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--row-radius);
+  background: var(--canvas);
+}
+
+.approval-full-text {
+  margin: 0;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--text-code);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.approval-full-status {
+  margin: 0;
+  color: var(--ink-secondary);
+  font-size: var(--text-meta);
+}
+
+.approval-full-status .btn {
+  margin-top: 8px;
+}
+
+.approval-full-actions {
+  flex-wrap: wrap;
+}
+
+@media (max-width: 720px) {
+  .approval-card .btn,
+  .approval-full-dialog .btn {
+    min-height: var(--touch-target);
+  }
+
+  .approval-card .card-actions {
+    flex-wrap: wrap;
+  }
+
+  .approval-card .card-actions .btn {
+    flex: 1 1 auto;
+  }
+
+  .approval-card .approval-preview {
+    max-height: 30vh;
+  }
+
+  .approval-full-actions .btn {
+    flex: 1 1 auto;
+  }
+}
+
+/* Header: pause all and today's spend ---------------------------------------- */
+
+.policy-pause,
+.spend-chip {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--ink-secondary);
+  font-size: var(--text-meta);
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.policy-pause:hover,
+.spend-chip:hover {
+  background: var(--surface-raised);
+  color: var(--ink);
+}
+
+/* Paused is said in words (the label) and drawn: the ember edge is the only colour. */
+.policy-pause.on {
+  border-color: var(--ember);
+  color: var(--ink);
+}
+
+.spend-chip {
+  font-variant-numeric: tabular-nums;
+}
+
+.spend-chip-lead {
+  margin-right: 0.25em;
+}
+
+.spend-chip[data-level="warn"] {
+  border-color: var(--amber);
+  color: var(--ink);
+}
+
+.spend-chip[data-level="full"] {
+  border-color: var(--ember);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.spend-chip[data-level="unknown"] {
+  color: var(--ink-tertiary);
+}
+
+/* Under the header while every bot is paused; same place and look as the connection banner. */
+.pause-banner {
+  position: absolute;
+  top: 64px;
+  left: 50%;
+  z-index: 19;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: max-content;
+  max-width: calc(100% - 28px);
+  padding: 8px 12px;
+  border: 1px solid var(--ember);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--ink);
+  font-size: var(--text-meta);
+  transform: translateX(-50%);
+}
+
+.pause-banner > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.pause-banner .btn {
+  flex: 0 0 auto;
+}
+
+.pause-banner ~ .connection-banner {
+  top: 116px;
+}
+
+/* A narrow chat column (a small window, or the profile or details panel open beside it): the centred
+   agent pill would sit on top of the new controls, so it moves left and the pause button is the icon alone. */
+@media (min-width: 721px) and (max-width: 1119px) {
+  .thread-header {
+    justify-content: flex-start;
+  }
+
+  .thread-header .agent-pill {
+    position: static;
+    transform: none;
+  }
+
+  .thread-header .policy-pause {
+    justify-content: center;
+    width: 34px;
+    padding: 0;
+  }
+
+  .thread-header .policy-pause-text {
+    display: none;
+  }
+}
+
+@media (min-width: 721px) {
+  .thread-header[data-panel] {
+    justify-content: flex-start;
+  }
+
+  .thread-header[data-panel] .agent-pill {
+    position: static;
+    transform: none;
+  }
+
+  .thread-header[data-panel] .policy-pause {
+    justify-content: center;
+    width: 34px;
+    padding: 0;
+  }
+
+  .thread-header[data-panel] .policy-pause-text {
+    display: none;
+  }
+}
+
+/* One bot on or off: the top of its profile --------------------------------- */
+
+.bot-power {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--hairline);
+  font-size: var(--text-body);
+}
+
+.sidebar-off-tag {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  color: var(--ink-secondary);
+  font-size: var(--text-caption);
+  line-height: 1.4;
+}
+
+.composer-off-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--card-radius);
+  background: var(--surface);
+  color: var(--ink-secondary);
+  font-size: var(--text-meta);
+}
+
+/* A run a spending limit stopped ---------------------------------------------- */
+
+.budget-stop-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px;
+  border: 1px solid var(--ember);
+  border-radius: 16px;
+  background: var(--surface);
+}
+
+
+.budget-stop-done {
+  margin: 0;
+  color: var(--ink-secondary);
+  font-size: var(--text-meta);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.budget-stop-done {
+  color: var(--ink);
+}
+
+/* Settings, Spending ------------------------------------------------------------ */
+
+.spending-bots {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.spending-bots li {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--ink-secondary);
+  font-size: var(--text-meta);
+  font-variant-numeric: tabular-nums;
+}
+
+.spending-form {
+  gap: 14px;
+}
+
+/* The run limits are read-only: same rows as the per-bot list, and the command wraps on a phone. */
+.run-limits-group .settings-note {
+  overflow-wrap: anywhere;
+}
+
+.spending-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.spending-field label {
+  font-size: var(--text-meta);
+}
+
+.spending-input {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  color: var(--ink-secondary);
+}
+
+.spending-error {
+  padding-left: 8px;
+  border-left: 3px solid var(--ember);
+  color: var(--ink);
+  font-size: var(--text-meta);
+}
+
+.spending-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.spending-saved {
+  color: var(--ink-secondary);
+  font-size: var(--text-meta);
+}
+
+/* Phone: every new control is a 44px target, and the header fits 375px ---------- */
+
+@media (max-width: 720px) {
+  .thread-header {
+    gap: 4px;
+  }
+
+  .policy-pause {
+    justify-content: center;
+    width: var(--touch-target);
+    height: var(--touch-target);
+    padding: 0;
+    border-radius: 50%;
+  }
+
+  .policy-pause-text,
+  .spend-chip-lead {
+    display: none;
+  }
+
+  /* The header is: menu, pause, the agent pill in the middle, today's spend, more. The pause button goes
+     next to the menu, the pill gets a narrower cap, and the spend chip stacks its two halves. */
+  .thread-header .header-menu {
+    order: -2;
+  }
+
+  .thread-header .policy-pause {
+    order: -1;
+  }
+
+  .thread-header .agent-pill {
+    min-width: 0;
+    max-width: 110px;
+  }
+
+  .spend-chip {
+    min-width: var(--touch-target);
+    min-height: var(--touch-target);
+    padding: 0 8px;
+    justify-content: center;
+    font-size: var(--text-caption);
+    line-height: 1.15;
+    text-align: center;
+  }
+
+  .spend-chip-body {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .spend-chip-tail {
+    display: none;
+  }
+
+  .pause-banner {
+    top: calc(var(--safe-top) + 60px);
+    border-radius: var(--card-radius);
+  }
+
+  .pause-banner .btn,
+  .budget-stop-card .btn,
+  .composer-off-bar .btn,
+  .bot-power .btn,
+  .spending-actions .btn {
+    min-height: var(--touch-target);
+  }
+
+  .budget-stop-card .card-actions {
+    flex-wrap: wrap;
+  }
+
+  .budget-stop-card .card-actions .btn {
+    flex: 1 1 auto;
+  }
+
+  .spending-input .text-input {
+    min-height: var(--touch-target);
+    font-size: 16px;
+  }
+
+  .bot-power {
+    min-height: var(--touch-target);
+  }
+
+  .sidebar-off-tag {
+    padding: 2px 8px;
+  }
+}

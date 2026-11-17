@@ -15,6 +15,7 @@ import { createUpdateAgentTool } from "../src/tools/update-agent-tool";
 import { registerCreateAgentTool } from "../src/tools/create-agent-tool";
 import { ToolRegistry } from "../src/tools/registry";
 import { createJobTools } from "../src/tools/jobs-tool";
+import { fullCapabilities } from "./policy-fixture";
 
 const provider: ProviderConfig = { id: "peer-review", label: "Peer review", baseUrl: "https://test.local/v1", apiKey: "test", model: "mock" };
 const settings = { firstTokenTimeoutMs: 1000, turnTimeoutMs: 5000 };
@@ -75,6 +76,7 @@ describe("peer influenced input boundaries", () => {
     await runTaskTurn(db, router, settings, {
       threadID: thread.id, text: "Owner answer to delegated question", persona: defaultResolvedPersona(db),
       delegation: { taskID: "tsk_resume", ownerAgentID: "researcher", parentAgentID: "ea", parentChannelID: "main" },
+      policy: { capabilities: fullCapabilities(db) },
       emit: (frame) => emitted.push(frame as unknown as Record<string, unknown>), signal: new AbortController().signal,
     });
     const refusalResult = emitted.find((frame) => frame.type === "tool.end" && String(frame.preview).includes("not saved: this turn started from another agent's message"));

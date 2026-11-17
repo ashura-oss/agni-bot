@@ -10,8 +10,13 @@ import type { Database } from "bun:sqlite";
 import type { ToolRegistry } from "./registry";
 import { getAgentMemory, type AgentMemoryRow } from "../stores/agent-memories";
 import { canonicalAgentID, resolvePersona } from "../agent/personas";
-import { DEFAULT_VISIBILITY, redactForCaller, type RedactedText } from "../agent/visibility";
+import { DEFAULT_VISIBILITY, MISSING_AGENT_VISIBILITY, redactForCaller, type RedactedText } from "../agent/visibility";
+import { redactRowForCaller } from "../agent/channel-visibility";
+import { getChannel } from "../stores/channels";
 import { searchTranscripts } from "../stores/transcripts";
+
+/** The most messages one `expand` of a range returns. */
+const MAX_EXPANDED_MESSAGES = 50;
 
 /**
  * A fact as this caller may read it. Two rules apply: the fact's own `private`
@@ -21,11 +26,12 @@ import { searchTranscripts } from "../stores/transcripts";
  */
 function redactMemory(db: Database, row: AgentMemoryRow, callerAgentID: string): RedactedText {
   const owner = row.agent_id ?? "";
-  const visibility = owner ? resolvePersona(db, owner)?.visibility ?? DEFAULT_VISIBILITY : DEFAULT_VISIBILITY;
-  if (row.visibility === "private" && (row.agent_id ?? "ea") !== canonicalAgentID(callerAgentID)) {
+  const visibility = owner ? resolvePersona(db, owner)?.visibility ?? MISSING_AGENT_VISIBILITY : DEFAULT_VISIBILITY;
+  const caller = canonicalAgentID(callerAgentID);
+  if (row.visibility === "private" && canonicalAgentID(row.agent_id ?? "ea") !== caller) {
     return { text: null, redacted: true, mode: "private" };
   }
-  return redactForCaller(row.content, owner, callerAgentID, visibility);
+  return redactForCaller(row.content, owner ? canonicalAgentID(owner) : owner, caller, visibility);
 }
 
 export interface ExpandToolDeps {
@@ -78,43 +84,36 @@ export function registerExpandTool(registry: ToolRegistry, deps: ExpandToolDeps)
         };
       }
 
-      // kind=messages: the turns around a message, verbatim.
+      // kind=messages: the turns around a message, as the caller may read them.
       const around = Math.min(20, Math.max(1, Math.floor(Number(input.around ?? 5))));
       const anchor = deps.db
         .query<{ id: string; channel_id: string }, [string]>("SELECT id, channel_id FROM channel_messages WHERE id = ?")
         .get(id);
       if (!anchor) throw new Error(`no message ${id}`);
+      // created_at is an ISO string: compare it as a time, never as a number.
       const rows = deps.db
-        .query<{ id: string; from_type: string; from_id: string; text: string; created_at: string; channel_id: string }, [string, string, number, string, number]>(
+        .query<{ id: string; from_type: string; from_id: string; text: string; created_at: string; channel_id: string }, [string, string, number, string, number, number]>(
           `SELECT id, from_type, from_id, text, created_at, channel_id
            FROM channel_messages
-           WHERE channel_id = ? AND created_at BETWEEN
-             (SELECT created_at FROM channel_messages WHERE id = ?) - ?
+           WHERE channel_id = ? AND unixepoch(created_at) BETWEEN
+             (SELECT unixepoch(created_at) FROM channel_messages WHERE id = ?) - ?
              AND
-             (SELECT created_at FROM channel_messages WHERE id = ?) + ?
-           ORDER BY created_at ASC`,
+             (SELECT unixepoch(created_at) FROM channel_messages WHERE id = ?) + ?
+           ORDER BY created_at ASC
+           LIMIT ?`,
         )
-        .all(anchor.channel_id, id, around * 60, id, around * 60);
-      // A private agent's channel is not expandable from outside.
-      const channelOwner = deps.db
-        .query<{ agent_id: string | null }, [string]>("SELECT agent_id FROM channels WHERE id = ?")
-        .get(anchor.channel_id)?.agent_id ?? "";
-      const visibility = channelOwner ? resolvePersona(deps.db, channelOwner)?.visibility ?? DEFAULT_VISIBILITY : DEFAULT_VISIBILITY;
-      const allowed = visibility === "private" && channelOwner !== deps.currentAgentID;
-      return {
-        kind: "messages",
-        channelID: anchor.channel_id,
-        redacted: allowed,
-        messages: allowed
-          ? []
-          : rows.map((row) => ({
-              id: row.id,
-              from: row.from_id,
-              fromType: row.from_type,
-              text: row.text.slice(0, 2_000),
-              createdAt: row.created_at,
-            })),
-      };
+        .all(anchor.channel_id, id, around * 60, id, around * 60, MAX_EXPANDED_MESSAGES);
+      const channel = getChannel(deps.db, anchor.channel_id);
+      const cap = (text: string): string => text.slice(0, 2_000);
+      const messages: Array<{ id: string; from: string; fromType: string; text: string; createdAt: string }> = [];
+      let redacted = false;
+      // Row by row: a bot that belongs to the channel reads it in full; anyone else reads each line through the bot that wrote it.
+      for (const row of rows) {
+        const view = redactRowForCaller(deps.db, channel, row, cap(row.text), deps.currentAgentID);
+        redacted ||= view.redacted;
+        if (view.text !== null) messages.push({ id: row.id, from: row.from_id, fromType: row.from_type, text: view.text, createdAt: row.created_at });
+      }
+      return { kind: "messages", channelID: anchor.channel_id, redacted, messages };
     },
   });
 

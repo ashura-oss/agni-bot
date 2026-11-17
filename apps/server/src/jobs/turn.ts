@@ -14,10 +14,14 @@
 import type { Database } from "bun:sqlite";
 import type { ServerFrameBody } from "@agni/protocol";
 import { runTaskTurn, isThreadActive, type TaskTurnSettings } from "../agent/task-loop";
-import { canonicalAgentID, defaultResolvedPersona, getPersona, resolvePersona, type ResolvedPersona } from "../agent/personas";
-import { DEFAULT_VISIBILITY, RESULT_MAX_CHARS, redactResultForCaller } from "../agent/visibility";
+import { canonicalAgentID, getPersona, resolvePersona, type ResolvedPersona } from "../agent/personas";
+import { DEFAULT_VISIBILITY, MISSING_AGENT_VISIBILITY, RESULT_MAX_CHARS, redactResultForCaller } from "../agent/visibility";
 import { rootGuardrail } from "../agent/guardrails";
-import { ApprovalBroker } from "../agent/approval-broker";
+import { asksWhenClean } from "../policy/metadata";
+import { readTaint, unknownTaint } from "../policy/context";
+import { carriedRoot, packCarried, readCarried, saveTaskTaint, storedCarried, taskTaint, type Carried } from "../policy/carry";
+import { denialScope } from "../policy/denials";
+import type { TaintSource } from "../policy/types";
 import type { Router } from "../models/router";
 import { getThread } from "../stores/threads";
 import { ensureDMChannel } from "../stores/channels";
@@ -32,15 +36,16 @@ import {
   setDelegationThread,
   taskInfo,
   trackRunningDelegation,
-  briefChainID,
+  briefCarried,
 } from "../stores/tasks";
 import { saveArtifact } from "../stores/artifacts";
 import { scheduleTagger } from "./tagger";
 import { nextDailyRun, nextIntervalRun } from "./schedule";
 import { peerEnvelope } from "../agent/peer-message";
 import type { PeerIntent } from "@agni/protocol";
-import { JobGiveUp, type JobRunner } from "./runner";
+import { JobGiveUp, type JobContext, type JobRunner } from "./runner";
 import { nowISO } from "../util/ids";
+import { postWakeLimitNotice, takeWakePlace, wakeLimitNotice, wakeScope } from "./wake-limit";
 
 /** How long a wake first waits when the parent's thread is busy; doubles per deferral. */
 const WAKE_RETRY_MS = 1_500;
@@ -49,8 +54,6 @@ const WAKE_RETRY_MAX_MS = 60_000;
 export const MAX_WAKE_DEFERRALS = 40;
 /** Tools whose effect a retry would repeat even though they are not approval-gated. */
 const NON_IDEMPOTENT_TOOLS = new Set(["mail_send", "run_privileged", "delegate_task"]);
-// requiresApproval reads no broker state, so one inert instance serves the check.
-const gatePolicy = new ApprovalBroker(null as never);
 /** Daily-cap notices already sent, `${agentID}:${day}`. */
 const capNotified = new Set<string>();
 
@@ -90,13 +93,38 @@ export interface TurnJobPayload {
   deferrals?: number;
   /** H23: delegation depth of this turn; 1 = root, each delegate_task hop adds one. */
   depth?: number;
-  /** The completions a coalesced wake carries. */
+  /**
+   * The completions a coalesced wake carries. Each holds what that task's run read from outside text, and the `Carried` fields of the
+   * chain it was delegated in (`ownerOnly`, `narrowed`, `capabilities`), which `readCarried` folds into the wake. Missing or unreadable: the worst.
+   */
   results?: Array<{
     taskID: string;
     agentID: string;
     summary: string;
     redacted: boolean;
+    taint?: unknown;
+    ownerOnly?: unknown;
+    narrowed?: unknown;
+    capabilities?: unknown;
   }>;
+  /**
+   * What the run that made this job hands it: the fields of `Carried` (`policy/carry.ts`), written by the server (`job_schedule`,
+   * `delegate_task`, a wake, a resumed task, the CLI's `job add`), never taken from a tool's arguments, and read back with `readCarried`.
+   * A field that is missing or unreadable says the worst: `taint` what the sender had read, `capabilities` the tools a narrowed or
+   * delegated run may call (the inert ones only), `ownerOnly` the owner's own work (false), `denialRoot` the refusal scope the job keeps,
+   * `rootTurnID`/`rootJob` the request it belongs to, `clockKey` the clock a delegated child shares with its parent.
+   */
+  taint?: unknown;
+  narrowed?: unknown;
+  capabilities?: unknown;
+  ownerOnly?: unknown;
+  rootTurnID?: string;
+  rootJob?: string | null;
+  denialRoot?: string;
+  clockKey?: string;
+  allowedDomains?: unknown;
+  /** The run a delegation counts against (see `delegate_task`'s cap on running delegations). */
+  rootKey?: string;
   /** The channel the turn's result belongs to. */
   channelID?: string;
   /** How the request is written to the durable log. */
@@ -112,7 +140,7 @@ export interface TurnJobDeps {
 }
 
 export function registerTurnJob(runner: JobRunner, deps: TurnJobDeps): void {
-  runner.register("turn", async (job: JobRow) => {
+  runner.register("turn", async (job: JobRow, ctx: JobContext) => {
     const payload = parseJobPayload<TurnJobPayload>(job);
 
     // DEL-006: a wake turn tells the parent agent that a delegated task
@@ -132,7 +160,7 @@ export function registerTurnJob(runner: JobRunner, deps: TurnJobDeps): void {
           job.id,
         ]);
         const delay = Math.min(WAKE_RETRY_MS * 2 ** (deferrals - 1), WAKE_RETRY_MAX_MS);
-        return { result: "deferred: the parent thread is busy", nextRunAt: new Date(Date.now() + delay).toISOString() };
+        return { result: "deferred: the parent thread is busy", nextRunAt: new Date(Date.now() + delay).toISOString(), deferred: true };
       }
       // S1-21: a result the parent already read through delegate_wait or
       // task_status was reported in that turn. Announcing it again would make
@@ -141,11 +169,26 @@ export function registerTurnJob(runner: JobRunner, deps: TurnJobDeps): void {
       if (unread.length === 0) return { result: "skipped: the parent already read this result" };
       payload.results = unread;
       payload.text = buildWakeText(unread);
+      // At most so many wakes per request run a model turn (S2-09): the delegate, wake, delegate chain has no time bound of its own.
+      const place = takeWakePlace(deps.db, job, payload);
+      if (!place.ok) {
+        const bot = ctx.agentID === null ? undefined : resolvePersona(deps.db, ctx.agentID);
+        const name = bot?.name ?? payload.agentID ?? "The bot";
+        postWakeLimitNotice(deps.db, deps.emit, {
+          threadID: parentThreadID,
+          channelID: payload.channelID || (bot ? agentChannelID(deps.db, bot.id) : undefined),
+          agentID: bot?.id ?? payload.agentID ?? "ea",
+          text: wakeLimitNotice(name, place.limit, unread.map((item) => item.taskID)),
+        });
+        return { result: `not run: the request reached its wake limit of ${place.limit}` };
+      }
     }
 
     const text = payload.text?.trim();
     if (!text) throw new Error("turn job payload has no text");
     const delegationTaskID = payload.delegationTaskID?.trim() || null;
+    // A delegated child's own job is a brief, like its wake and its resume: one with no `narrowed` field (written before it existed) reads as cut.
+    const carried = readCarried(payload, { brief: delegationTaskID !== null });
     if (delegationTaskID) {
       // A cancelled task must not run, even if its job was already claimed.
       if (isDelegationCancelled(deps.db, delegationTaskID)) return { result: "cancelled" };
@@ -153,7 +196,10 @@ export function registerTurnJob(runner: JobRunner, deps: TurnJobDeps): void {
       announceTask(deps, delegationTaskID);
     }
 
-    const persona = (payload.agentID ? resolvePersona(deps.db, payload.agentID) : undefined) ?? defaultResolvedPersona(deps.db);
+    // The bot the runner resolved and checked against the pause switch: what was checked is what runs. The payload
+    // is not read for it again, so a spelling the first lookup tolerated cannot land on a different bot the second time.
+    const persona = ctx.agentID === null ? undefined : resolvePersona(deps.db, ctx.agentID);
+    if (!persona) throw new Error("turn job has no bot to run as");
     const capped = payload.wakeKey ? null : dailyCapReached(deps, persona);
     if (capped) {
       if (delegationTaskID) setDelegationState(deps.db, delegationTaskID, "failed", capped);
@@ -188,17 +234,29 @@ export function registerTurnJob(runner: JobRunner, deps: TurnJobDeps): void {
 
     const startedAt = nowISO();
     let result: Awaited<ReturnType<typeof runTurn>>;
+    // The task has a record of what it read from the moment it starts, and keeps it whatever happens next. A retry (or a run resumed after
+    // the owner's answer) starts with all of it: what any earlier try read, not only what its sender had.
+    if (delegationTaskID) saveTaskTaint(deps.db, delegationTaskID, carried.taint);
+    const startTaint = delegationTaskID ? taskTaint(deps.db, delegationTaskID) : carried.taint;
     try {
-      result = await runTurn(deps, payload, persona, threadID, conversation, text, job.attempts > 1);
+      result = await runTurn(deps, payload, carried, startTaint, persona, threadID, conversation, text, job.attempts > 1, job.id, job.run_at);
     } catch (error) {
       // S1-12: a cancelled task ends here, whatever the aborted turn threw.
       if (delegationTaskID && isDelegationCancelled(deps.db, delegationTaskID)) return { result: "cancelled" };
       throw giveUpIfSideEffects(deps.db, threadID, startedAt, error instanceof Error ? error.message : String(error)) ?? error;
+    } finally {
+      // Whatever the run did, its task has a record; one that never got one reads as tainted. (What the run read is
+      // saved as it is read, so a run that failed keeps it.)
+      if (delegationTaskID && deps.db.query<{ taint: string | null }, [string]>("SELECT taint FROM tasks WHERE id = ?").get(delegationTaskID)?.taint == null) {
+        saveTaskTaint(deps.db, delegationTaskID, [unknownTaint("a task that ended with no record of what it read")]);
+      }
     }
 
     // S1-12: the owner cancelled while the child ran. The cancelled state, not
     // this turn's outcome, is the task's truth: no result, no wake, no notify.
     if (delegationTaskID && isDelegationCancelled(deps.db, delegationTaskID)) return { result: "cancelled" };
+    // What this task's run read from outside text stays with the task, for the bot that reads its result.
+    if (delegationTaskID) saveTaskTaint(deps.db, delegationTaskID, result.taint);
 
     // S1-13: a scheduled run whose gated action was denied or never approved did
     // not do that work. Never record it as done, whatever the model then said.
@@ -217,6 +275,13 @@ export function registerTurnJob(runner: JobRunner, deps: TurnJobDeps): void {
       return { result: "waiting for the owner" };
     }
 
+    if (result.endedBy === "wall_time") {
+      // The time limit is the owner's number, and a retry keeps the clock of the first try, so it would be stopped again.
+      // The stop message already told the owner why, so the runner does not add a notice of its own.
+      const message = "stopped: the time limit for this task ran out";
+      if (delegationTaskID) setDelegationState(deps.db, delegationTaskID, "failed", message);
+      throw new JobGiveUp(`not done: ${message}`, true);
+    }
     if (result.stopReason !== "end") {
       // runTaskTurn already reported the failure as frames; a non-end stop
       // is a failed job so the runner retries it honestly.
@@ -290,13 +355,13 @@ function giveUpIfSideEffects(db: Database, threadID: string, since: string, mess
     .query<{ tool_name: string; args: string }, [string, string]>(
       `SELECT tool_name, args FROM tool_calls
        WHERE thread_id = ? AND created_at >= ?
-         AND (error IS NULL OR error NOT IN ('approval_rejected', 'approval_expired', 'tool_not_allowed', 'domain_not_allowed'))`,
+         AND (error IS NULL OR error NOT IN ('approval_rejected', 'approval_expired', 'tool_not_allowed', 'domain_not_allowed', 'cannot_show'))`,
     )
     .all(threadID, since);
   const acted = calls.find((call) => {
     let args: Record<string, unknown> = {};
     try { args = JSON.parse(call.args) as Record<string, unknown>; } catch { /* treat as no args */ }
-    return NON_IDEMPOTENT_TOOLS.has(call.tool_name) || gatePolicy.requiresApproval(call.tool_name, args);
+    return NON_IDEMPOTENT_TOOLS.has(call.tool_name) || asksWhenClean(call.tool_name, args);
   });
   return acted ? new JobGiveUp(`${message}; not retried because it already ran ${acted.tool_name}`) : null;
 }
@@ -485,6 +550,18 @@ export function buildWakeText(results: Array<{ taskID: string; agentID: string; 
   ].join("\n");
 }
 
+/** A wake is told about finished tasks; if one of them read outside text, so has the bot that reads it. */
+function wakeTaint(db: Database, results: TurnJobPayload["results"]): TaintSource[] {
+  const out: TaintSource[] = [];
+  for (const item of results ?? []) {
+    // A result with no taint record reads as tainted.
+    if (readTaint(item.taint).length === 0) continue;
+    const name = resolvePersona(db, item.agentID)?.name ?? item.agentID;
+    out.push({ kind: "peer", label: name.slice(0, 60), tool: "wake", at: nowISO() });
+  }
+  return out;
+}
+
 function buildWakeLogText(results: Array<{ taskID: string; agentID: string; summary: string; redacted: boolean }>): string {
   const lines = results.map((result) => result.redacted
     ? `- Task ${result.taskID} (${result.agentID}) finished. Its result is private to that agent; open its chat to read it.`
@@ -511,14 +588,26 @@ function wakeParent(deps: TurnJobDeps, taskID: string, summary: string, parentDe
   const parentAgentID = task.parent_agent_id;
   if (!parentThreadID || !parentAgentID) return; // nobody to wake
   const owner = task.owner_agent_id ?? "";
-  const visibility = owner ? resolvePersona(deps.db, owner)?.visibility ?? DEFAULT_VISIBILITY : DEFAULT_VISIBILITY;
+  const visibility = owner ? resolvePersona(deps.db, owner)?.visibility ?? MISSING_AGENT_VISIBILITY : DEFAULT_VISIBILITY;
   const visible = redactResultForCaller(summary, owner, parentAgentID, visibility);
-  const wakeKey = `wake:${parentThreadID}`;
+  // One wake per parent thread and per run: results of different requests never share a wake, so a wake belongs
+  // to one root (what was refused there holds in it) and has the one clock of its own. The refusal scope alone is not the
+  // run: every fire of a recurring job holds the same one, and its wakes would coalesce into one counted under the first
+  // fire's wake scope. The wake scope (`wake-limit.ts`) names the run, so it is part of the key.
+  const carried = packCarried(briefCarried(task.brief), "wake");
+  const root = carriedRoot(carried);
+  const wakeKey = `wake:${parentThreadID}:${root ? denialScope(root) : "unrooted"}:${wakeScope({ ...root, threadID: parentThreadID })}`;
   const item = {
     taskID: task.id,
     agentID: owner,
     summary: visible.text ?? "",
     redacted: visible.redacted,
+    taint: taskTaint(deps.db, task.id),
+    // The wake is a link of the chain the task was delegated in: it is the owner's only if every task it is told about is, and it is cut to the
+    // tools of the run that delegated if that run was (a narrowed run does not get more done through its own wake than it could itself).
+    ownerOnly: carried.ownerOnly,
+    narrowed: carried.narrowed,
+    ...(carried.capabilities !== null ? { capabilities: carried.capabilities } : {}),
   };
   claimResultDelivery(deps.db, task.id, () => {
     const existing = findQueuedJobByPayloadKey(deps.db, "turn", wakeKey);
@@ -536,7 +625,8 @@ function wakeParent(deps: TurnJobDeps, taskID: string, summary: string, parentDe
         inputRole: "system",
         wakeKey,
         depth: parentDepth,
-        chainID: briefChainID(task.brief),
+        // The wake is part of the request and the chain the task came from: what the owner refused there is refused here (S2-07).
+        ...storedCarried(carried),
         results: [item],
       },
     });
@@ -562,12 +652,16 @@ function announceTask(deps: TurnJobDeps, taskID: string): void {
 async function runTurn(
   deps: TurnJobDeps,
   payload: TurnJobPayload,
+  carried: Carried,
+  startTaint: readonly TaintSource[],
   persona: ResolvedPersona,
   threadID: string,
   conversation: ConversationRow | undefined,
   text: string,
   retry = false,
-): Promise<{ turnID: string; text: string; stopReason: string }> {
+  jobID?: string,
+  jobSlot?: string,
+): Promise<{ turnID: string; text: string; stopReason: string; taint: TaintSource[]; endedBy?: "wall_time" }> {
   const controller = new AbortController();
   const delegationTaskID = payload.delegationTaskID?.trim() || null;
   const task = delegationTaskID ? getTask(deps.db, delegationTaskID) : null;
@@ -587,8 +681,21 @@ async function runTurn(
       carrySummary: conversation?.summary ?? null,
       // H23: the depth travels in the payload, so a delegated job does not restart at 1.
       guardrail: { ...rootGuardrail(persona.id, payload.chainID), depth: Math.max(1, Math.trunc(payload.depth ?? 1)) },
+      ...(payload.wakeKey ? { wake: true } : {}),
+      policy: {
+        // Everything the job carries, read back failing closed (`readCarried`): what its sender had read (a wake adds what the results it is told
+        // about read), the request and refusal scope it belongs to, the tools it is cut down to, and whether it is the owner's own work. A delegated
+        // child is on its parent's clock; a wake, a resumed task and any other job start their own, and a retry keeps the one its run started
+        // (`jobs.run_clock_key`).
+        ...carried,
+        taint: [...startTaint, ...wakeTaint(deps.db, payload.results)],
+        ...(jobSlot ? { jobSlot } : {}),
+        jobID: jobID ?? null,
+      },
       facts: payload.facts,
       ...(channelID ? { channelID } : {}),
+      // The web limits of the routine that asked for the job, which every fire keeps.
+      ...(carried.allowedDomains ? { allowedDomains: carried.allowedDomains } : {}),
       ...(payload.inputRole ? { inputRole: payload.inputRole } : {}),
       ...(retry ? { reuseInput: true } : {}),
       ...(payload.peer ? { peer: payload.peer } : {}),
@@ -604,7 +711,7 @@ async function runTurn(
           }
         : {}),
     });
-    return { turnID: result.turnID, text: result.text, stopReason: result.stopReason };
+    return { turnID: result.turnID, text: result.text, stopReason: result.stopReason, taint: result.taint, ...(result.endedBy ? { endedBy: result.endedBy } : {}) };
   } finally {
     untrack();
   }

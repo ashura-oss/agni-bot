@@ -48,3 +48,23 @@ describe("safe text for cards", () => {
     expect(safeLine(once)).toBe(once);
   });
 });
+
+describe("characters that draw nothing (carried item: invisible characters on cards)", () => {
+  // Built from code points so no hidden character sits in this file.
+  const hidden: Array<[string, number, string]> = [
+    ["the combining grapheme joiner", 0x034f, String.raw`\u034F`],
+    ["a Hangul choseong filler", 0x115f, String.raw`\u115F`],
+    ["a Hangul jungseong filler", 0x1160, String.raw`\u1160`],
+    ["the Hangul filler", 0x3164, String.raw`\u3164`],
+    ["the halfwidth Hangul filler", 0xffa0, String.raw`\uFFA0`],
+    ["a variation selector", 0xfe0f, String.raw`\uFE0F`],
+    ["a supplementary variation selector", 0xe0100, String.raw`\u{E0100}`],
+  ];
+  for (const [name, code, escaped] of hidden) {
+    test(`${name} is shown as a visible escape`, () => {
+      const ch = String.fromCodePoint(code);
+      expect(safeLine(`a${ch}b`)).toBe(`a${escaped}b`);
+      expect(safeText(`a${ch}b`)).toBe(`a${escaped}b`);
+    });
+  }
+});

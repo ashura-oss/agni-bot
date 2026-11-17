@@ -1,0 +1,182 @@
+/**
+ * The run clock (S2-09): what the root job's time limit measures.
+ *
+ * A clock belongs to a *run*: a chat turn, or a job, and everything the run delegated (a delegated
+ * child carries its parent's clock key). It is not the same thing as the root the owner's refusals
+ * belong to: a wake, a task resumed after the owner answered, and a job's next scheduled run keep the
+ * refusals of the request they came from but each start a clock of their own. Each scheduled run of a job has
+ * its own clock (`startJobClock`); a retry of that run keeps the clock the run started.
+ *
+ * The time the owner spends deciding (an approval card, a question, a password prompt) is not the run's
+ * time, as it is not the turn timer's (`TurnTimer`): those waits are written down here, per clock, so the
+ * limit still excludes them in a later turn of the same run (a retry, a delegated child).
+ *
+ * Every read fails closed: a clock that is missing or unreadable is `null`, and the caller stops the run.
+ */
+import type { Database } from "bun:sqlite";
+import { log } from "../log";
+import { newID } from "../util/ids";
+import { MAX_ROOT_JOB_WALL_MS } from "../stores/policy-settings";
+import { BACKGROUND_OWNER_WAIT_MS } from "./pending-cards";
+
+/** The longest one wait on the owner can last (a background card's); an open wait counts for no more, so a dead process cannot make a run free. */
+export const OPEN_WAIT_CAP_MS = BACKGROUND_OWNER_WAIT_MS;
+/** Clocks older than this are dropped when a new one starts. It is the longest time limit the owner can set, so no run outlives its clock. */
+const KEEP_CLOCKS_MS = MAX_ROOT_JOB_WALL_MS;
+
+/**
+ * Start the clock named `key`. A key that is already started keeps its first start. Never throws: a clock that could
+ * not be written is read as unknown, which stops the run.
+ */
+export function startClock(db: Database, key: string, nowMs: number = Date.now()): void {
+  try {
+    const at = new Date(nowMs).toISOString();
+    db.transaction(() => {
+      db.run("INSERT OR IGNORE INTO run_clocks (clock_key, started_at) VALUES (?, ?)", [key, at]);
+      // The index on started_at keeps this cheap on every start.
+      const cutoff = new Date(nowMs - KEEP_CLOCKS_MS).toISOString();
+      db.run("DELETE FROM run_clock_waits WHERE clock_key IN (SELECT clock_key FROM run_clocks WHERE started_at < ?)", [cutoff]);
+      db.run("DELETE FROM run_clocks WHERE started_at < ?", [cutoff]);
+    })();
+  } catch (error) {
+    log.warn(`run clock ${key} could not be started: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/**
+ * Start the clock of one scheduled run of a job, and return its key. Every run has a clock of its own, named for the job
+ * and the slot it was scheduled for (`slot`: the job's `run_at` when the run's clock started), so a delegated child that is
+ * still running when the job's next slot starts stays on the clock of the run it belongs to.
+ *
+ * The key is written on the job (`jobs.run_clock_key`) before the clock starts, and the runner clears it when it moves the job
+ * to its next slot. A retry of the same run finds the key and keeps that clock. A first try that failed before its clock started
+ * (a busy thread, a crash) left none, so its retry starts one for its own slot: it must not take the newest clock of the
+ * job, which is the previous run's.
+ *
+ * Fails closed. A key that cannot be read, or a new one that cannot be written, would leave a retry unable to find this run's
+ * clock and give it a fresh one, so no clock is started: the key returned names none, `readClock` reads it as unknown and the
+ * run is stopped before its first step.
+ */
+export function startJobClock(db: Database, jobID: string, slot: string, nowMs: number = Date.now()): string {
+  let stored: string | null;
+  try {
+    stored = db.query<{ run_clock_key: string | null }, [string]>("SELECT run_clock_key FROM jobs WHERE id = ?").get(jobID)?.run_clock_key ?? null;
+  } catch (error) {
+    log.warn(`run clock of job ${jobID} could not be looked up, so the run is stopped: ${error instanceof Error ? error.message : String(error)}`);
+    return unavailableClockKey(jobID, slot);
+  }
+  // A key whose clock was dropped as too old starts again now: the clock is the run's, and the run is long over.
+  const key = stored || `${jobID}@${slot}`;
+  if (!stored) {
+    try {
+      db.run("UPDATE jobs SET run_clock_key = ? WHERE id = ?", [key, jobID]);
+    } catch (error) {
+      log.warn(`run clock ${key} could not be recorded on its job, so the run is stopped: ${error instanceof Error ? error.message : String(error)}`);
+      return unavailableClockKey(jobID, slot);
+    }
+  }
+  startClock(db, key, nowMs);
+  return key;
+}
+
+/** The key of a clock that was never started: it reads as unknown, which stops the run (`checkWallTime`). */
+const unavailableClockKey = (jobID: string, slot: string): string => `unavailable:${jobID}@${slot}`;
+
+/**
+ * The run is now waiting on the owner. Returns the function that ends the wait. A wait that could not be
+ * written is simply not taken off, so the run is stopped sooner, never later.
+ */
+export function beginOwnerWait(db: Database, key: string, nowMs: number = Date.now()): () => void {
+  const id = newID("rcw");
+  try {
+    db.run("INSERT INTO run_clock_waits (id, clock_key, started_at) VALUES (?, ?, ?)", [id, key, new Date(nowMs).toISOString()]);
+  } catch (error) {
+    log.warn(`run clock ${key}: a wait on the owner could not be recorded: ${error instanceof Error ? error.message : String(error)}`);
+    return () => undefined;
+  }
+  let ended = false;
+  return () => {
+    if (ended) return;
+    ended = true;
+    try {
+      db.run("UPDATE run_clock_waits SET ended_at = ? WHERE id = ?", [new Date().toISOString(), id]);
+    } catch (error) {
+      log.warn(`run clock ${key}: the end of a wait on the owner could not be recorded: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+}
+
+/**
+ * At boot no wait on the owner is still going (the cards and questions lived in the dead process): end every open wait
+ * at `at`. Left open, it would count for the longest a wait can last, and a job retried after a crash would get that
+ * time free. Returns how many were closed. Never throws.
+ */
+export function closeOpenWaits(db: Database, at: string = new Date().toISOString()): number {
+  try {
+    return db.run("UPDATE run_clock_waits SET ended_at = ? WHERE ended_at IS NULL", [at]).changes;
+  } catch (error) {
+    log.warn(`run clock: the waits a dead process left open could not be closed: ${error instanceof Error ? error.message : String(error)}`);
+    return 0;
+  }
+}
+
+/** Hold the turn's timer and take the wait off the run's clock until the returned function is called. */
+export function holdForOwner(db: Database, key: string, timer: { hold(): () => void }): () => void {
+  const release = timer.hold();
+  const endWait = beginOwnerWait(db, key);
+  return () => {
+    endWait();
+    release();
+  };
+}
+
+export interface ClockReading {
+  startedAtMs: number;
+  /** Time spent waiting on the owner since the start, with overlapping waits counted once. */
+  waitedMs: number;
+}
+
+/** When the clock started and how much of the time since was the owner's. Null when either cannot be read. */
+export function readClock(db: Database, key: string, nowMs: number = Date.now()): ClockReading | null {
+  try {
+    const clock = db.query<{ started_at: string }, [string]>("SELECT started_at FROM run_clocks WHERE clock_key = ?").get(key);
+    const startedAtMs = clock ? Date.parse(clock.started_at) : Number.NaN;
+    if (!Number.isFinite(startedAtMs)) return null;
+    // OPEN ITEM (security note, recorded not redesigned): waits are kept per clock, not per turn, so one member of a run
+    // (a delegated child) waiting on the owner takes that time off the clock its siblings share. The bound: each member
+    // is also held by its own turn timer (`TurnTimer`, which a hold pauses only for that turn) and the cap on delegations
+    // at once, and one wait lasts at most OPEN_WAIT_CAP_MS. Per-turn waits would need the member's id on every wait row.
+    const rows = db.query<{ started_at: string; ended_at: string | null }, [string]>("SELECT started_at, ended_at FROM run_clock_waits WHERE clock_key = ?").all(key);
+    const spans: Array<[number, number]> = [];
+    for (const row of rows) {
+      const from = Date.parse(row.started_at);
+      const to = row.ended_at === null ? from + OPEN_WAIT_CAP_MS : Date.parse(row.ended_at);
+      if (!Number.isFinite(from) || !Number.isFinite(to)) return null;
+      const start = Math.max(from, startedAtMs);
+      const end = Math.min(to, nowMs);
+      if (end > start) spans.push([start, end]);
+    }
+    return { startedAtMs, waitedMs: unionLength(spans) };
+  } catch {
+    return null;
+  }
+}
+
+/** The total length covered by the spans, an overlap counted once. */
+function unionLength(spans: Array<[number, number]>): number {
+  spans.sort((a, b) => a[0] - b[0]);
+  let total = 0;
+  let from = Number.NEGATIVE_INFINITY;
+  let to = Number.NEGATIVE_INFINITY;
+  for (const [start, end] of spans) {
+    if (start > to) {
+      if (to > from) total += to - from;
+      from = start;
+      to = end;
+    } else if (end > to) {
+      to = end;
+    }
+  }
+  if (to > from) total += to - from;
+  return total;
+}

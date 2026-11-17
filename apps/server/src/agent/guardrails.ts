@@ -12,7 +12,10 @@
  * (they are runtime metadata), so they never disturb the stable system prefix
  * that providers cache.
  */
+import type { Database } from "bun:sqlite";
+import { RUN_CAP_DEFAULTS, getRunCaps } from "../stores/policy-settings";
 import { newID } from "../util/ids";
+import { readClock } from "./run-clock";
 
 /**
  * How deep a chain of delegated turns may run. Root turn is depth 1, so two
@@ -23,6 +26,57 @@ export const MAX_DEPTH = 3;
 export const MAX_CHAIN_STEPS = 48;
 /** Maximum tool steps a delegated (depth > 1) turn may take. */
 export const MAX_DELEGATED_STEPS = 24;
+
+/*
+ * Run caps (D2, S2-09). The numbers are the owner's settings (`policy_settings`);
+ * these are the defaults and the getters that read the live value. The task
+ * loop and the delegation and job tools enforce them with the checks below.
+ */
+/** How long one root job (a request and everything it delegated) may run, ms. */
+export const DEFAULT_ROOT_JOB_WALL_MS = RUN_CAP_DEFAULTS.rootJobWallMs;
+/** How many delegations may be running at once under one root job. */
+export const DEFAULT_MAX_CONCURRENT_DELEGATIONS = RUN_CAP_DEFAULTS.maxConcurrentDelegations;
+/** How many self-scheduled jobs one bot may have active at once. */
+export const DEFAULT_MAX_SELF_SCHEDULED_JOBS = RUN_CAP_DEFAULTS.maxSelfScheduledJobsPerBot;
+
+export const rootJobWallMs = (db: Database): number => getRunCaps(db).rootJobWallMs;
+export const maxConcurrentDelegations = (db: Database): number => getRunCaps(db).maxConcurrentDelegations;
+export const maxSelfScheduledJobs = (db: Database): number => getRunCaps(db).maxSelfScheduledJobsPerBot;
+
+/** True once a root job that started at `startedAtMs` has used up its wall time. */
+export function wallTimeExceeded(startedAtMs: number, nowMs: number, wallMs: number): boolean {
+  return nowMs - startedAtMs >= wallMs;
+}
+
+/** True when one more delegation may start under a root job that has `running` going already. */
+export function canStartDelegation(running: number, max: number): boolean {
+  return running < max;
+}
+
+/** True when a bot with `active` self-scheduled jobs may schedule one more. */
+export function canSelfSchedule(active: number, max: number): boolean {
+  return active < max;
+}
+
+/** `unknown`: the clock or the cap could not be read, so the run may not go on. */
+export type WallTimeVerdict = { ok: true } | { ok: false; reason: "expired" | "unknown"; wallMs: number | null };
+
+/**
+ * May the run on clock `clockKey` take another step? A chat turn or a job, and everything delegated under it,
+ * share one clock (`run-clock.ts`). The time the owner spent deciding is not counted. Fails closed.
+ */
+export function checkWallTime(db: Database, clockKey: string, nowMs: number = Date.now()): WallTimeVerdict {
+  let wallMs: number;
+  try {
+    wallMs = rootJobWallMs(db);
+  } catch {
+    return { ok: false, reason: "unknown", wallMs: null };
+  }
+  const clock = readClock(db, clockKey, nowMs);
+  if (clock === null) return { ok: false, reason: "unknown", wallMs };
+  return wallTimeExceeded(clock.startedAtMs, nowMs - clock.waitedMs, wallMs) ? { ok: false, reason: "expired", wallMs } : { ok: true };
+}
+
 /** Maximum characters of handoff summary text carried between agents. */
 export const MAX_HANDOFF_SUMMARY_CHARS = 1_200;
 /** Maximum characters of durable fact text injected into a prompt prefix. */
@@ -113,9 +167,12 @@ export function clampFactPrefix(facts: string[]): string {
   return joined.length > MAX_FACT_PREFIX_CHARS ? `${joined.slice(0, MAX_FACT_PREFIX_CHARS)}…` : joined;
 }
 
+/** Why a guardrail stopped work. The last three are the run caps (S2-09): the caller picks the wording. */
+export type GuardrailCode = "depth_ceiling" | "chain_ceiling" | "wall_time" | "fan_out" | "self_scheduled";
+
 export class GuardrailError extends Error {
-  readonly code: "depth_ceiling" | "chain_ceiling";
-  constructor(message: string, code: "depth_ceiling" | "chain_ceiling") {
+  readonly code: GuardrailCode;
+  constructor(message: string, code: GuardrailCode) {
     super(message);
     this.name = "GuardrailError";
     this.code = code;

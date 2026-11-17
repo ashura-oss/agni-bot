@@ -142,7 +142,10 @@ export function isPrivateAddress(address: string): boolean {
   // ::, ::1, and IPv4-compatible ::a.b.c.d (0.0.0.x is covered by the 0/8 rule)
   if (h.slice(0, 6).every((x) => x === 0)) return isPrivateV4(v4(h[6]!, h[7]!));
   if (h.slice(0, 5).every((x) => x === 0) && h[5] === 0xffff) return isPrivateV4(v4(h[6]!, h[7]!)); // ::ffff:a.b.c.d
-  if (h[0] === 0x64 && h[1] === 0xff9b && h.slice(2, 6).every((x) => x === 0)) return isPrivateV4(v4(h[6]!, h[7]!)); // NAT64
+  if (h[0] === 0x64 && h[1] === 0xff9b && h.slice(2, 6).every((x) => x === 0)) return isPrivateV4(v4(h[6]!, h[7]!)); // NAT64 64:ff9b::/96
+  if (h[0] === 0x64 && h[1] === 0xff9b && h[2] === 1) return true; // local-use NAT64 64:ff9b:1::/48 (RFC 8215): never globally reachable, and it can embed any private v4
+  if (h.slice(0, 4).every((x) => x === 0) && h[4] === 0xffff && h[5] === 0) return isPrivateV4(v4(h[6]!, h[7]!)); // IPv4-translated ::ffff:0:a.b.c.d
+  if (h[0] === 0x2002) return isPrivateV4(v4(h[1]!, h[2]!)); // 6to4 2002:aabb:ccdd::/48 carries the IPv4 address in hextets 1 and 2
   return (h[0]! & 0xfe00) === 0xfc00 || (h[0]! & 0xffc0) === 0xfe80 || (h[0]! & 0xffc0) === 0xfec0 || (h[0]! & 0xff00) === 0xff00;
 }
 

@@ -61,9 +61,11 @@ export interface RecallFactArgs {
    * model asked for the best match on purpose.
    */
   minScore?: number;
+  /** An explicit recall by the model may read notes kept from outside text. Anything injected into a prompt may not. */
+  includeUntrusted?: boolean;
 }
 export interface RecallFactResult {
-  facts: { id: string; fact: string; summary: string | null; tags: string | null; score?: number }[];
+  facts: { id: string; fact: string; summary: string | null; tags: string | null; score?: number; /** A note the bot kept from outside text. Reading it marks the run. */ fromOutside?: true }[];
   /** True when the best match was under the threshold and nothing was injected. */
   belowThreshold?: boolean;
 }
@@ -82,6 +84,7 @@ export function recallFact(db: Database, args: RecallFactArgs): RecallFactResult
       agentID: args.agentID ?? null,
       callerAgentID: args.callerAgentID ?? null,
       limit,
+      includeUntrusted: args.includeUntrusted,
     });
     // A fact that was recalled is a fact that was used: the ranking inputs
     // have to move, or the formula is decoration.
@@ -99,6 +102,7 @@ export function recallFact(db: Database, args: RecallFactArgs): RecallFactResult
         summary: null,
         tags: hit.row.tags,
         score: Number(hit.score.toFixed(4)),
+        ...(hit.row.source === "untrusted" ? { fromOutside: true as const } : {}),
       })),
     };
   }
@@ -108,8 +112,9 @@ export function recallFact(db: Database, args: RecallFactArgs): RecallFactResult
     limit,
     callerAgentID: args.callerAgentID ?? null,
     pinned: true,
+    excludeUntrusted: !args.includeUntrusted,
   });
-  return { facts: rows.map((row) => ({ id: row.id, fact: row.content, summary: null, tags: row.tags })) };
+  return { facts: rows.map((row) => ({ id: row.id, fact: row.content, summary: null, tags: row.tags, ...(row.source === "untrusted" ? { fromOutside: true as const } : {}) })) };
 }
 
 export interface ForgetFactArgs { id: string }

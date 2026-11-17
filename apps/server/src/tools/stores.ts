@@ -46,14 +46,17 @@ export interface MemoryWriteResult {
   text: string;
 }
 
-export function memoryWrite(db: Database, args: MemoryWriteArgs): MemoryWriteResult {
+export function memoryWrite(db: Database, args: MemoryWriteArgs & { untrustedForAgentID?: string | null }): MemoryWriteResult {
+  // A run that read outside text keeps what it writes as the bot's own note about outside text, never as a fact about the owner.
+  const untrusted = args.untrustedForAgentID !== undefined;
   const row = putAgentMemory(db, {
-    scope: "global_user",
-    agentID: null,
+    scope: untrusted ? "agent" : "global_user",
+    agentID: untrusted ? args.untrustedForAgentID : null,
     keySlug: slugForMemory(args.text),
     type: "fact",
     content: args.text,
     tags: args.tags,
+    ...(untrusted ? { source: "untrusted" } : {}),
   });
   return { id: row.id, text: row.content };
 }

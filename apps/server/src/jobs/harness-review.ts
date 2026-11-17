@@ -57,7 +57,8 @@ export interface Proposal {
 export function toolUsage(db: Database, since: string): UsageReport {
   const turnRow = db
     .query<{ turns: number; timeouts: number }, [string]>(
-      `SELECT COUNT(*) AS turns, COALESCE(SUM(stop_reason = 'timeout'), 0) AS timeouts
+      // A turn the run's time limit ended also says "timeout" to the protocol, but a model that is too slow did not cause it.
+      `SELECT COUNT(*) AS turns, COALESCE(SUM(stop_reason = 'timeout' AND ended_by IS NOT 'wall_time'), 0) AS timeouts
        FROM turns WHERE started_at >= ? AND state = 'done'`,
     )
     .get(since) ?? { turns: 0, timeouts: 0 };

@@ -7,6 +7,8 @@
  * Shell/files/Gmail arrive later with their approval flows.
  */
 import { normalizeArgs, validateArgs } from "./validate-args";
+import type { ToolMeta } from "../policy/tool-meta";
+import type { RunContext } from "../policy/types";
 
 export interface ToolContext {
   threadID: string;
@@ -18,6 +20,12 @@ export interface ToolContext {
    * refuse to run in that case.
    */
   peerInput?: boolean;
+  /**
+   * The run this call belongs to: who started it and what outside text it has read.
+   * The policy engine has already judged the call; tools use it for the refusals
+   * that are part of their own contract (a tainted run may not change a schedule).
+   */
+  run?: RunContext;
   /**
    * Agent-to-agent chain metadata. Absent for a root turn; populated for
    * delegated work so tools (notably `handoff`) can refuse or behave
@@ -35,6 +43,12 @@ export interface ToolContext {
   };
   /** Routine egress: true when a URL's host is on the run's allowlist. Absent outside routines. */
   hostAllowed?: (url: URL) => boolean;
+  /**
+   * The owner answered this very call's approval card with a yes. Set by the loop from the gate's answer, never from the
+   * call's arguments. A tool whose own rule would refuse the call (a repeating job asked for by a run that is not the owner's
+   * own clean turn) reads it as the owner's say-so; it is false for any call the owner was not asked about.
+   */
+  ownerApproved?: boolean;
 }
 
 export type ToolKind = "static" | "dynamic";
@@ -46,6 +60,13 @@ export interface ToolDefinition<Args = unknown, Result = unknown> {
   schema: unknown;
   timeoutMs: number;
   kind?: ToolKind;
+  /** What the policy engine should know about this tool when it is not in the central table (a connector tool). */
+  meta?: ToolMeta;
+  /**
+   * What the schema cannot say: why these arguments can never be run (a working directory outside scratch), or
+   * null. Checked with the schema before the call is judged, so a refused call never raises an approval card.
+   */
+  validate?: (args: Record<string, unknown>, bot?: string) => string | null;
   handler: (args: Args, ctx: ToolContext) => Promise<Result>;
 }
 
@@ -82,9 +103,12 @@ export class ToolRegistry {
    * Why `args` would be refused for the named tool, or null when they are
    * acceptable (or the tool is unknown: that is the caller's own check).
    */
-  validateArgs(name: string, args: unknown): string | null {
+  validateArgs(name: string, args: unknown, bot?: string): string | null {
     const tool = this.tools.get(name);
-    return tool ? validateArgs(tool.schema, args) : null;
+    if (!tool) return null;
+    const broken = validateArgs(tool.schema, args);
+    if (broken) return broken;
+    return tool.validate && typeof args === "object" && args !== null && !Array.isArray(args) ? tool.validate(args as Record<string, unknown>, bot) : null;
   }
 
   get(name: string): ToolDefinition<never, unknown> | undefined {

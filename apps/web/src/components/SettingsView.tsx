@@ -16,6 +16,7 @@ import {
   Settings,
   ShieldCheck,
   UserRound,
+  Wallet,
 } from "lucide-react";
 import type { PluginInfo, ProviderStatus } from "@agni/client";
 import { useAppModel, useAppSnapshot } from "../state/use-app-model";
@@ -25,6 +26,7 @@ import { ConfigurePluginView } from "./ConfigurePluginView";
 import { ChatGPTConnectionView } from "./ChatGPTConnectionView";
 import { AppearanceView } from "./AppearanceView";
 import { ApprovalRulesView } from "./ApprovalRulesView";
+import { SpendingView } from "./SpendingView";
 import { useDialog } from "./use-dialog";
 import { providerLabel } from "../state/display";
 import type { SettingsSection } from "../state/router";
@@ -55,6 +57,12 @@ const SECTIONS: { id: Section; title: string; icon: typeof Settings; subtitle: s
     title: "Always allow",
     icon: ShieldCheck,
     subtitle: "Actions you chose to always allow. Revoke one and the bot asks again next time.",
+  },
+  {
+    id: "spending",
+    title: "Spending",
+    icon: Wallet,
+    subtitle: "What the bots spent today, and the limits that stop a run.",
   },
   {
     id: "models",
@@ -133,6 +141,7 @@ export function SettingsView() {
           {section === "appearance" ? <AppearanceView /> : null}
           {section === "plugins" ? <PluginsSection onConnect={setConnectingPlugin} /> : null}
           {section === "approvals" ? <ApprovalRulesView /> : null}
+          {section === "spending" ? <SpendingView /> : null}
           {section === "models" ? (
             <ModelsSection
               onAdd={() => {

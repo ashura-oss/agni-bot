@@ -22,6 +22,7 @@ import {
 } from "@agni/protocol";
 import { defaultPersona, getPersona, personaInfo, mentionRoster, defaultResolvedPersona, resolvePersona, canonicalAgentID, updatePersona } from "../agent/personas";
 import { createAgentPersona } from "../agent/creation";
+import { escapeUnsafe } from "../agent/card-text";
 import { answerFormAndWake } from "../agent/form-broker";
 import { getForm } from "../stores/forms";
 import { renameAgent } from "../agent/identity";
@@ -73,11 +74,11 @@ import {
   type AgentMemoryRow,
 } from "../stores/agent-memories";
 import { getConflict, listConflicts, resolveConflict } from "../stores/conflicts";
-import { appendChannelMessage, channelAgentIDs, createGroupChannel, ensureDMChannel, getChannel, listGroupChannels, type ChannelRow } from "../stores/channels";
+import { appendChannelMessage, channelAgentIDs, createGroupChannel, ensureDMChannel, getChannel, listGroupChannels, setChannelMessageTurn, type ChannelRow } from "../stores/channels";
 import { groupContextBlock, groupHistory, groupResponder } from "../agent/group";
 import { canonicalURL, saveLink, searchLinks } from "../stores/links";
 import { buildShareDocument, publishShare, shareBaseURL } from "../share/document";
-import { createTask, createTaskList, editTask, getTask, listTaskActivity, listTaskLists, listTasks, setTaskStatus, snoozeTask, cancelDelegation, clearPendingQuestion, setDelegationJob, setDelegationState, taskInfo, briefChainID } from "../stores/tasks";
+import { createTask, createTaskList, editTask, getTask, listTaskActivity, listTaskLists, listTasks, setTaskStatus, snoozeTask, cancelDelegation, clearPendingQuestion, setDelegationJob, setDelegationState, taskInfo, briefCarried } from "../stores/tasks";
 import { fetchPage } from "../tools/fetch-url";
 import { scheduleTaskReminder } from "../jobs/task-reminders";
 import type { PluginService } from "../plugins/service";
@@ -92,9 +93,27 @@ import { activateAppearanceProfile, deleteAppearanceProfile, listAppearanceProfi
 import { getRoutineByJobID, listRuns, updateRoutineState } from "../stores/routines";
 import { normalizeAllowedDomains } from "../routines/egress";
 import { deleteRoutineJob } from "../tools/routines-tool";
-import { removeSubscription, saveSubscription, type PushService } from "../push/web-push";
+import { removeSubscription, saveSubscription, subscriptionProblem, type PushService } from "../push/web-push";
 import { getProactivity, setProactivity } from "../stores/proactivity";
 import { listApprovalRules, revokeApprovalRule } from "../stores/approval-rules";
+import { loadCardMeta } from "../agent/pending-cards";
+import { audit } from "../policy/audit-sink";
+import { packCarried, storedCarried, taskTaint } from "../policy/carry";
+import { forgetOpened, fullTextWasCut, mustOpenFirst, wasFullOpened } from "./approval-full";
+import { isRunPaused } from "../policy/pause";
+import { redact } from "../util/redact";
+import {
+  handleAgentEnabled,
+  handleApprovalFull,
+  handlePolicyPause,
+  handleSpendCapsSet,
+  handleSpendContinue,
+  handleSpendStatus,
+  pauseStateBody,
+  pauseStateIsNonDefault,
+  withEnabledFlags,
+  type PolicyFrameDeps,
+} from "./policy-frames";
 
 export interface Session {
   id: string;
@@ -220,6 +239,18 @@ export async function dispatch(deps: DispatchDeps, session: Session, raw: string
       return handleApprovalRulesList(deps);
     case "approval.rule.revoke":
       return handleApprovalRuleRevoke(deps, session, frame);
+    case "approval.full":
+      return handleApprovalFull(policyDeps(deps, session), frame);
+    case "policy.pause":
+      return handlePolicyPause(policyDeps(deps, session), frame);
+    case "agent.enabled.set":
+      return handleAgentEnabled(policyDeps(deps, session), frame);
+    case "spend.status":
+      return handleSpendStatus(policyDeps(deps, session));
+    case "spend.caps.set":
+      return handleSpendCapsSet(policyDeps(deps, session), frame);
+    case "spend.continue":
+      return handleSpendContinue(policyDeps(deps, session), frame);
     case "task.list":
       return handleTaskList(deps, session, frame);
     case "task.create":
@@ -290,6 +321,11 @@ export async function dispatch(deps: DispatchDeps, session: Session, raw: string
       return handleAgentCreate(deps, session, frame);
     case "push.subscribe":
       if (!requireAuth(deps, session)) return;
+      {
+        // The server will POST to this address: refuse one that is not https at a public host, or whose keys are malformed.
+        const problem = subscriptionProblem(frame.subscription);
+        if (problem) return sendError(deps, session, "bad_subscription", problem);
+      }
       saveSubscription(deps.db, session.device!.id, frame.subscription);
       return;
     case "push.unsubscribe":
@@ -352,7 +388,9 @@ function handleHello(deps: DispatchDeps, session: Session, frame: Extract<Client
       lastSeq: deps.frameLog.seq + 1,
     }, { replay: false });
     deps.send(hello);
-    deps.emit({ type: "agents.update", agents: personaInfo(deps.db), mentions: mentionRoster(deps.db) });
+    deps.emit({ type: "agents.update", agents: withEnabledFlags(deps.db, personaInfo(deps.db)), mentions: withEnabledFlags(deps.db, mentionRoster(deps.db)) });
+    // Only a state that is not the default is worth sending unasked; a client can read it with `policy.pause`.
+    if (pauseStateIsNonDefault(deps.db)) deps.reply(pauseStateBody(deps.db));
     // A reconnect must not lose a password prompt that is still waiting.
     for (const pendingSecret of listPendingSecrets()) {
       deps.reply({
@@ -373,7 +411,17 @@ function handleHello(deps: DispatchDeps, session: Session, frame: Extract<Client
     ).all(PROCESS_STARTED_AT)) {
       if (!cardIsLive(deps.db, approval.thread_id, approval.turn_id)) continue;
       // The same buttons the broker offered: no "always" where the call cannot be remembered.
-      deps.reply({ type: "approval.request", requestID: approval.id, action: approval.action, preview: approval.preview, buttons: replayButtons(deps.db, approval) });
+      // The card as it was raised: the same source, risk, expiry and cut flag, when the loop saved them.
+      const meta = loadCardMeta(deps.db, approval.id);
+      deps.reply({
+        type: "approval.request", requestID: approval.id, action: approval.action, preview: approval.preview,
+        // A card the engine said cannot be remembered (a run that had read outside text) never gains "always" on replay.
+        buttons: meta?.canRemember === false ? ["once", "reject"] : replayButtons(deps.db, approval),
+        ...(meta?.source ? { source: meta.source } : {}),
+        ...(meta?.tier !== undefined ? { tier: meta.tier } : {}),
+        ...(meta?.expiresAt ? { expiresAt: meta.expiresAt } : {}),
+        ...(meta?.truncated !== undefined ? { truncated: meta.truncated } : {}),
+      });
     }
     for (const { id } of deps.db.query<{ id: string }, [string]>(
       "SELECT id FROM forms WHERE status = 'pending' AND created_at >= ? ORDER BY created_at",
@@ -509,6 +557,24 @@ function targetThread(
     const conversation = getConversation(deps.db, frame.conversationID);
     return conversation ? activeSession(deps.db, conversation) : null;
   }
+  const agentID = routedAgentID(deps, session, frame, text);
+  const conversation = agentID ? conversationOfAgent(deps.db, agentID) : null;
+  return conversation ? activeSession(deps.db, conversation) : null;
+}
+
+/**
+ * The bot a message is for, worked out the way the turn will route it: the thread's or conversation's bot
+ * when the frame names one, else a group's floor rule, an @mention, the frame's own bot, the channel's bot,
+ * then the connection's. Null only when a named thread or conversation does not exist.
+ */
+function routedAgentID(
+  deps: DispatchDeps,
+  session: Session,
+  frame: Extract<ClientFrame, { type: "msg.send" }>,
+  text: string,
+): string | null {
+  if (frame.threadID) return getThread(deps.db, frame.threadID)?.agent_id ?? null;
+  if (frame.conversationID) return getConversation(deps.db, frame.conversationID)?.agent_id ?? null;
   const group = groupOf(deps.db, frame.channelId);
   const mention = group ? groupResponder(deps.db, group, text) : resolveAgentMention(deps.db, text);
   const channelAgent = frame.channelId === "main"
@@ -518,9 +584,7 @@ function targetThread(
       : frame.channelId
         ? getChannel(deps.db, frame.channelId)?.agent_id
         : undefined;
-  const agentID = canonicalAgentID(mention?.agentID ?? frame.toAgentId ?? channelAgent ?? session.agentID);
-  const conversation = conversationOfAgent(deps.db, agentID);
-  return conversation ? activeSession(deps.db, conversation) : null;
+  return canonicalAgentID(mention?.agentID ?? frame.toAgentId ?? channelAgent ?? session.agentID);
 }
 
 /**
@@ -536,6 +600,15 @@ function dispatchUserMessage(
   text: string,
   rowIDs: string[],
 ): void {
+  // S2-13: nothing starts while everything is paused, and nothing goes to a bot that is off.
+  const verdict = isRunPaused({ agentID: routedAgentID(deps, session, frame, text) });
+  if (verdict.paused) {
+    if (verdict.scope === "all") return holdUntilResumed(deps, session, frame, text, rowIDs);
+    forgetOwnerMessages(deps.db, rowIDs);
+    const agentID = routedAgentID(deps, session, frame, text);
+    const name = (agentID ? resolvePersona(deps.db, agentID)?.name : undefined) ?? "That bot";
+    return sendError(deps, session, "agent_off", `${name} is off. Turn ${name} on to get a reply.`);
+  }
   const thread = targetThread(deps, session, frame, text);
   if (thread && (isThreadActive(thread.id) || startingThreads.has(thread.id))) {
     const queues = threadQueues.get(deps.db) ?? new Map<string, QueuedMessage[]>();
@@ -566,14 +639,65 @@ function dispatchUserMessage(
 }
 
 /**
+ * Messages that arrived while everything was paused, oldest first. Each keeps its own deps, so the pause
+ * watcher can start them on resume without a connection. The words are also on disk (`queued_messages`),
+ * so a restart while paused starts them from the boot replay, which holds them again until resume.
+ */
+const heldMessages = new WeakMap<Database, QueuedMessage[]>();
+
+function holdUntilResumed(
+  deps: DispatchDeps,
+  session: Session,
+  frame: Extract<ClientFrame, { type: "msg.send" }>,
+  text: string,
+  rowIDs: string[],
+): void {
+  // Nothing is running to stop, so a stop typed now has no meaning later: it is not kept.
+  if (isStopCommand(text)) return forgetOwnerMessages(deps.db, rowIDs);
+  const held = heldMessages.get(deps.db) ?? [];
+  // A boot replay of a message already held (the same row) must not be held twice.
+  if (!held.some((message) => message.rowIDs.some((id) => rowIDs.includes(id)))) held.push({ deps, frame, session, text, rowIDs });
+  heldMessages.set(deps.db, held);
+  deps.emit({
+    type: "status.update",
+    channelId: frame.channelId ?? "main",
+    agentId: frame.toAgentId,
+    text: "Waiting: bots are paused. Your message will be answered when you resume.",
+    transient: true,
+  });
+}
+
+/** Start the messages held while paused, oldest first. Safe to call when nothing is held or while still paused. */
+export function releaseHeldMessages(db: Database): number {
+  const held = heldMessages.get(db);
+  if (!held || held.length === 0 || isRunPaused({ agentID: null }).scope === "all") return 0;
+  heldMessages.delete(db);
+  for (const message of held) dispatchUserMessage(message.deps, message.session, message.frame, message.text, message.rowIDs);
+  return held.length;
+}
+
+/**
  * A revoked device's words must not run, nor ride a turn credited to another
  * device. Drops every queued message whose device is revoked, from every
  * thread, and forgets its on-disk copy. Returns how many.
  */
 export function purgeRevokedQueues(db: Database): number {
-  const queues = threadQueues.get(db);
-  if (!queues) return 0;
   let dropped = 0;
+  const held = heldMessages.get(db);
+  if (held) {
+    const keep = held.filter((message) => {
+      const revoked = message.session.device !== undefined && isDeviceRevoked(db, message.session.device.id);
+      if (revoked) {
+        forgetOwnerMessages(db, message.rowIDs);
+        dropped += 1;
+      }
+      return !revoked;
+    });
+    if (keep.length === 0) heldMessages.delete(db);
+    else heldMessages.set(db, keep);
+  }
+  const queues = threadQueues.get(db);
+  if (!queues) return dropped;
   for (const [threadID, queue] of queues) {
     const keep = queue.filter((message) => {
       const revoked = message.session.device !== undefined && isDeviceRevoked(db, message.session.device.id);
@@ -600,14 +724,26 @@ function drainThreadQueue(deps: DispatchDeps, threadID: string): void {
   if (!queues || !queue || queue.length === 0) return;
   let next = queue.shift()!;
   // A burst sent while the last turn ran becomes one turn, not one per message.
-  while (mergeable(next) && queue[0] && mergeable(queue[0])) {
+  while (mergeable(next) && queue[0] && mergeable(queue[0]) && keepsRouting(next.deps.db, next, queue[0])) {
     const more = queue.shift()!;
-    next = { ...more, text: `${next.text}\n\n${more.text}`, rowIDs: [...next.rowIDs, ...more.rowIDs] };
+    // The same bot named again is dropped from the text; the first message's mention already routes the burst.
+    const addition = resolveAgentMention(deps.db, more.text)?.text ?? more.text;
+    next = { ...more, text: `${next.text}\n\n${addition}`, rowIDs: [...next.rowIDs, ...more.rowIDs] };
   }
   if (queue.length === 0) queues.delete(threadID);
   // A stop that somehow landed in the queue still means "stop", not a turn.
   if (isStopCommand(next.text)) return forgetOwnerMessages(deps.db, next.rowIDs);
   dispatchUserMessage(next.deps, next.session, next.frame, next.text, next.rowIDs);
+}
+
+/**
+ * A message that starts with an @mention is for that bot, and the mention only routes while it opens the
+ * text. Merged behind an earlier message it would sit in the middle and the burst would go to the wrong
+ * bot, so a mention joins only a burst that already opens with the same mention.
+ */
+function keepsRouting(db: Database, earlier: QueuedMessage, later: QueuedMessage): boolean {
+  const mentioned = resolveAgentMention(db, later.text)?.agentID;
+  return mentioned === undefined || mentioned === resolveAgentMention(db, earlier.text)?.agentID;
 }
 
 /** Plain chat merges; files, stops and explicit remembers stay their own turn (GATE-003). */
@@ -827,14 +963,16 @@ async function runUserMessage(
     });
   }
   if (!attachments.length && (isCapture(routedText) || isStoreQuery(routedText))) {
-    detach(deps, session, "capture", captureMessage(deps, session, thread, persona.id, routedText));
+    detach(deps, session, "capture", captureMessage(deps, session, thread, persona.id, routedText, userMessageID));
     return;
   }
   const turnID = newID("trn");
+  // The owner's row names the turn it started, so a reload can show how that turn ended even if it wrote nothing.
+  if (userMessageID) setChannelMessageTurn(deps.db, userMessageID, turnID);
   const controller = new AbortController();
   // Server-wide, not per connection: the turn outlives this socket and any
   // device may cancel it.
-  registerTurn(turnID, thread.id, controller, session.device?.id);
+  registerTurn(turnID, thread.id, controller, session.device?.id, persona.id);
   const turnSettings = {
     firstTokenTimeoutMs: deps.config.firstTokenTimeoutMs,
     turnTimeoutMs: deps.config.turnTimeoutMs,
@@ -902,12 +1040,13 @@ function isStoreQuery(text: string): boolean {
   return /^\s*(search memory|search memories|search links|find saved links|what do you remember|list tasks|what tasks)\s*:?/i.test(text);
 }
 
-async function captureMessage(deps: DispatchDeps, session: Session, thread: ThreadRow, agentID: string, text: string): Promise<void> {
+async function captureMessage(deps: DispatchDeps, session: Session, thread: ThreadRow, agentID: string, text: string, userMessageID?: string): Promise<void> {
   const threadID = thread.id;
   const conversationID = thread.conversation_id ?? undefined;
   const turnID = newID("trn");
   try {
     createTurn(deps.db, { id: turnID, threadID, agentID });
+    if (userMessageID) setChannelMessageTurn(deps.db, userMessageID, turnID);
     appendMessage(deps.db, { threadID, turnID, role: "user", text });
     titleThreadFromFirstMessage(deps.db, threadID, text);
     deps.emit({ type: "turn.start", turnID, threadID, agentID, ...(conversationID ? { conversationID } : {}) });
@@ -1188,6 +1327,11 @@ function handleTaskAnswer(deps: DispatchDeps, session: Session, frame: Extract<C
   appendMessage(deps.db, { threadID: childThreadID, role: "user", text: answer });
   clearPendingQuestion(deps.db, task.id);
   setDelegationState(deps.db, task.id, "running");
+  // The resumed run goes on as the first run did, from the brief and the task's record (S2-06): the chain it started in (so a stopped chain stays
+  // stopped), the request it was started under (so what the owner refused there is refused here), what it had read so far, the tools it was
+  // cut down to, and whose chain it is: the owner's answer does not make it the owner's own work. It does not carry the request's clock: the
+  // owner's wait is not run time, and the resumed run has its own 30 minutes.
+  const carried = packCarried(briefCarried(task.brief), "resume", { taint: taskTaint(deps.db, task.id) });
   const job = enqueueJob(deps.db, {
     kind: "turn",
     payload: {
@@ -1196,9 +1340,7 @@ function handleTaskAnswer(deps: DispatchDeps, session: Session, frame: Extract<C
       text: answer,
       notify: false,
       delegationTaskID: task.id,
-      // The answer resumes the task inside the chain it started in, so a
-      // stopped chain stays stopped.
-      chainID: briefChainID(task.brief),
+      ...storedCarried(carried),
     },
   });
   setDelegationJob(deps.db, task.id, job.id);
@@ -1214,6 +1356,8 @@ async function handleBindDirect(deps: DispatchDeps, session: Session, frame: Ext
   if (!requireAuth(deps, session)) return;
   const persona = resolvePersona(deps.db, frame.agentID);
   if (!persona) return sendError(deps, session, "unknown_agent", `no agent ${frame.agentID}`);
+  // Binding may roll the block over, which summarises it with the model.
+  if (refuseIfStopped(deps, session, persona.id)) return;
   const conversation = ensureConversation(deps.db, persona.id);
   const result = await rolloverIfNeeded(rolloverDeps(deps), conversation);
   const thread = getThread(deps.db, result.threadID);
@@ -1279,6 +1423,8 @@ async function handleSessionNew(
   if (!requireAuth(deps, session)) return;
   const conversation = getConversation(deps.db, frame.conversationID);
   if (!conversation) return sendError(deps, session, "unknown_conversation", `no conversation ${frame.conversationID}`);
+  // Closing a block summarises it with the model, so it is work like any other.
+  if (refuseIfStopped(deps, session, conversation.agent_id)) return;
   const result = await rotateById(rolloverDeps(deps), conversation.id, "manual");
   // Stream state, not a reply: every client renders the same boundary.
   deps.emit({ type: "session.start", conversationID: result.conversationID, sessionID: result.threadID, reason: "manual" });
@@ -1353,28 +1499,52 @@ function handleApproveReply(
   frame: Extract<ClientFrame, { type: "approve.reply" }>,
 ): void {
   if (!requireAuth(deps, session)) return;
-  const row = deps.db.query<{ status: string; thread_id: string | null; turn_id: string | null }, [string]>(
-    "SELECT status, thread_id, turn_id FROM approvals WHERE id = ?",
+  const row = deps.db.query<{ status: string; thread_id: string | null; turn_id: string | null; tool_name: string | null; action: string }, [string]>(
+    "SELECT status, thread_id, turn_id, tool_name, action FROM approvals WHERE id = ?",
   ).get(frame.requestID);
   if (!row) {
-    sendError(deps, session, "unknown_request", `no pending approval ${frame.requestID}`);
+    sendError(deps, session, "unknown_request", `no pending approval ${frame.requestID}`, frame.requestID);
     return;
   }
   if (row.status !== "pending") {
-    sendError(deps, session, "unknown_request", CARD_EXPIRED);
+    sendError(deps, session, "unknown_request", CARD_EXPIRED, frame.requestID);
     return;
   }
   if (!cardIsLive(deps.db, row.thread_id, row.turn_id)) {
     // Pending, but the turn that asked is gone: nothing would run on an "Allow".
     deps.db.run("UPDATE approvals SET status = 'expired', decided_at = ? WHERE id = ? AND status = 'pending'", [nowISO(), frame.requestID]);
     deps.emit({ type: "approval.closed", requestID: frame.requestID, kind: "approval", reason: "expired" });
-    sendError(deps, session, "unknown_request", CARD_EXPIRED);
+    sendError(deps, session, "unknown_request", CARD_EXPIRED, frame.requestID);
     return;
+  }
+  // A card marked truncated hides part of the call, or is too long to take in at a glance: it is not allowed until its full text was opened
+  // (the web app is to lock Allow the same way, S2-6; this is the server's own line, for any client). Deny is always possible. Fail closed.
+  if (frame.decision !== "reject" && mustOpenFirst(deps.db, frame.requestID) && !wasFullOpened(frame.requestID)) {
+    sendError(deps, session, "approval_not_opened", "This card is marked as too long to read at a glance. Open its full text (approval.full) before you allow it. The card is still waiting.", frame.requestID);
+    return;
+  }
+  // The full text that was opened came back cut at the size limit: the owner read the start of the call, not the call. No allow; Deny works.
+  if (frame.decision !== "reject" && fullTextWasCut(frame.requestID)) {
+    sendError(deps, session, "approval_text_cut", "The full text of this card is longer than can be shown, so it was cut and you have not seen all of it. It cannot be allowed. You can deny it, and ask for a smaller call. The card is still waiting.", frame.requestID);
+    return;
+  }
+  // The answer goes on the audit record before it takes effect: a log that is down leaves the card waiting.
+  try {
+    audit({
+      kind: "approval.decided",
+      actor: session.device?.id ?? "unknown",
+      ...(row.turn_id ? { turnID: row.turn_id } : {}),
+      detail: { requestID: frame.requestID, decision: frame.decision, toolName: row.tool_name, action: redact(row.action).slice(0, 300) },
+    });
+  } catch (error) {
+    log.error("approval answer not recorded: the audit log is down", error);
+    return sendError(deps, session, "internal", "Your answer could not be written to the audit log, so it was not applied. The card is still waiting.", frame.requestID);
   }
   deps.db.run(
     "UPDATE approvals SET status = 'decided', decision = ?, decided_at = ? WHERE id = ? AND status = 'pending'",
     [frame.decision, nowISO(), frame.requestID],
   );
+  forgetOpened(frame.requestID);
   resolveApprovalWaiter(frame.requestID, frame.decision);
   // Every device drops the card, not only the one that answered.
   deps.emit({ type: "approval.closed", requestID: frame.requestID, kind: "approval", reason: "decided" });
@@ -1551,6 +1721,7 @@ function handleJobSet(
       break;
     }
   }
+  recordConfigChange(session, "job.set", { jobID: job.id, kind: job.kind, action: frame.action });
   // The write answers with the fresh list, so toggles never drift from truth.
   deps.reply({ type: "job.list.ok", jobs: jobSnapshot(deps.db, 50) });
 }
@@ -1571,6 +1742,7 @@ function handleRoutineDomainsSet(
     return sendError(deps, session, "invalid_domains", error instanceof Error ? error.message : String(error));
   }
   updateRoutineState(deps.db, routine.id, { allowedDomains: domains });
+  recordConfigChange(session, "routine.domains.set", { routineID: routine.id, jobID: job!.id, domains });
   deps.reply({ type: "job.list.ok", jobs: jobSnapshot(deps.db, 50) });
 }
 
@@ -1588,6 +1760,7 @@ function handleJobDelete(
   if (!deleted) {
     return sendError(deps, session, "job_running", `task ${job.id} is running and cannot be deleted yet`);
   }
+  recordConfigChange(session, "job.delete", { jobID: job.id, kind: job.kind });
   deps.reply({ type: "job.list.ok", jobs: jobSnapshot(deps.db, 50) });
 }
 
@@ -1596,10 +1769,13 @@ function handleApprovalRulesList(deps: DispatchDeps): void {
   const rules = listApprovalRules(deps.db).map((rule) => ({
     id: rule.id,
     agentID: rule.agentID,
-    agentName: resolvePersona(deps.db, rule.agentID)?.name ?? null,
-    toolName: rule.toolName,
-    target: rule.target,
+    // A target is what the model asked for (a path, a recipient list) and a bot may have named itself: shown as escapes.
+    agentName: ((name) => (name === undefined ? null : escapeUnsafe(name)))(resolvePersona(deps.db, rule.agentID)?.name),
+    toolName: escapeUnsafe(rule.toolName),
+    target: escapeUnsafe(rule.target),
     createdAt: rule.createdAt,
+    ...(rule.resourcePattern ? { resourcePattern: escapeUnsafe(rule.resourcePattern) } : {}),
+    ...(rule.account ? { account: rule.account } : {}),
   }));
   deps.reply({ type: "approval.rules.list.ok", rules });
 }
@@ -1627,6 +1803,8 @@ async function handleProviderAdd(
     sendError(deps, session, result.code, result.message);
     return;
   }
+  // The key is never recorded, only which provider and model.
+  recordConfigChange(session, "provider.add", { providerID: frame.providerID, model: frame.model ?? null, label: frame.label ?? null });
   deps.reply({ type: "provider.add.ok", providers: result.providers });
 }
 
@@ -1640,6 +1818,7 @@ async function handleProviderModelSet(
     try {
       if (!deps.chatgpt) throw new ChatGPTAuthError("ChatGPT sign-in is unavailable on this daemon.");
       await deps.chatgpt.setModel(frame.model);
+      recordConfigChange(session, "provider.model.set", { providerID: frame.providerID, model: frame.model });
       deps.reply({ type: "provider.add.ok", providers: deps.router.status() });
     } catch (error) { sendError(deps, session, "provider_auth", error instanceof ChatGPTAuthError ? error.message : "Could not update the ChatGPT model."); }
     return;
@@ -1649,6 +1828,7 @@ async function handleProviderModelSet(
     sendError(deps, session, result.code, result.message);
     return;
   }
+  recordConfigChange(session, "provider.model.set", { providerID: frame.providerID, model: frame.model });
   deps.reply({ type: "provider.add.ok", providers: result.providers });
 }
 
@@ -1686,6 +1866,9 @@ async function handleProviderAuth(
     else if (frame.type === "provider.auth.disconnect") await auth.disconnect(frame.accountID);
     else if (frame.type === "provider.auth.select") await auth.select(frame.accountID);
     else if (frame.type === "provider.auth.acknowledge") await auth.acknowledge(frame.accountID);
+    if (frame.type === "provider.auth.disconnect" || frame.type === "provider.auth.select") {
+      recordConfigChange(session, frame.type, { providerID: "chatgpt", accountID: frame.accountID });
+    }
     deps.reply({ type: "provider.auth.state", providerID: "chatgpt", connection: auth.state() });
   } catch (error) {
     sendError(deps, session, "provider_auth", error instanceof ChatGPTAuthError ? error.message : "ChatGPT connection could not be updated. Please try again.");
@@ -1836,14 +2019,55 @@ function requireAuth(deps: DispatchDeps, session: Session): boolean {
  * slot: they reuse the current seq, which every authed socket has already
  * received, so a client's lastSeq never skips a frame it has not seen.
  */
-function sendError(deps: DispatchDeps, _session: Session, code: string, message: string): void {
-  deps.send(errorFrame(deps.frameLog, code, message));
+/**
+ * For a request that would call the model for a bot without going through a chat message: say no when
+ * everything is paused (or the pause state cannot be read) or that bot is off. True when it refused.
+ */
+function refuseIfStopped(deps: DispatchDeps, session: Session, agentID: string): boolean {
+  const verdict = isRunPaused({ agentID });
+  if (!verdict.paused) return false;
+  if (verdict.scope === "bot") {
+    const name = resolvePersona(deps.db, agentID)?.name ?? "That bot";
+    sendError(deps, session, "agent_off", `${name} is off. Turn ${name} on first.`);
+  } else {
+    sendError(deps, session, "paused", "All bots are paused. Resume them first.");
+  }
+  return true;
+}
+
+/** What the policy frame handlers need from this connection. */
+function policyDeps(deps: DispatchDeps, session: Session): PolicyFrameDeps {
+  return {
+    db: deps.db,
+    emit: (body) => deps.emit(body),
+    reply: (body) => deps.reply(body),
+    error: (code, message) => sendError(deps, session, code, message),
+    actor: session.device?.id ?? "unknown",
+    releaseHeld: () => void releaseHeldMessages(deps.db),
+  };
+}
+
+/**
+ * A change to settings goes on the audit record (secrets never do: callers pass only names and ids). A log
+ * that is down must not stop the owner changing a setting; a change that widens what bots may do
+ * (a rule, a cap, turning a bot on) records first and fails closed where it is made.
+ */
+function recordConfigChange(session: Session, kind: string, detail: Record<string, unknown>): void {
+  try {
+    audit({ kind: `config.${kind}`, actor: session.device?.id ?? "unknown", detail });
+  } catch (error) {
+    log.warn(`audit: could not record config change ${kind}`, error);
+  }
+}
+
+function sendError(deps: DispatchDeps, _session: Session, code: string, message: string, requestID?: string): void {
+  deps.send(errorFrame(deps.frameLog, code, message, requestID));
   log.debug(`error frame → ${code}: ${message}`);
 }
 
-export function errorFrame(frameLog: FrameLog, code: string, message: string): ServerFrame {
+export function errorFrame(frameLog: FrameLog, code: string, message: string, requestID?: string): ServerFrame {
   // shortcut: seq 1 before any frame exists, since the schema needs a positive seq.
-  return { type: "error", code, message, seq: Math.max(1, frameLog.seq) };
+  return { type: "error", code, message, seq: Math.max(1, frameLog.seq), ...(requestID ? { requestID } : {}) };
 }
 
 /** Run a promise off the frame's path; a failure is logged and answered, never fatal. */
@@ -1972,7 +2196,8 @@ function handleAgentCreate(
       },
       [],
     );
-    deps.emit({ type: "agents.update", agents: personaInfo(deps.db), mentions: mentionRoster(deps.db) });
+    deps.emit({ type: "agents.update", agents: withEnabledFlags(deps.db, personaInfo(deps.db)), mentions: withEnabledFlags(deps.db, mentionRoster(deps.db)) });
+    recordConfigChange(session, "agent.create", { agentID: created.id, name: created.name, role: created.role });
     deps.reply({
       type: "agent.updated",
       agentId: created.id,

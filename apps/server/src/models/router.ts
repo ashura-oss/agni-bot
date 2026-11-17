@@ -10,6 +10,7 @@ import type { HealthTracker } from "./health";
 import { log } from "../log";
 import { chatGPTEnabled, type ChatGPTAuth } from "./chatgpt-auth";
 import { streamChatGPT } from "./chatgpt-responses";
+import { estimateTokens, type PricedUsageEvent } from "./prices";
 import { recordModelUsage } from "./usage-hook";
 
 export class RouterError extends Error {
@@ -39,6 +40,67 @@ export class MidStreamError extends Error {
     this.name = "MidStreamError";
     this.provider = provider;
   }
+}
+
+/** What the gate is told about a call, before any request is sent. */
+export interface RouteGateCall {
+  agentID?: string;
+  jobID?: string;
+  rootJobID?: string;
+  kind?: "turn" | "side";
+  purpose?: string;
+}
+
+export type RouteGateDecision =
+  | { ok: true }
+  | { ok: false; reason: string; message: string; detail?: Record<string, unknown> };
+
+export type RouteGate = (call: RouteGateCall) => RouteGateDecision;
+
+/** Raised when the gate refuses a call: nothing was sent to any provider. */
+export class RouteRefusedError extends Error {
+  constructor(readonly reason: string, message: string, readonly detail: Record<string, unknown> = {}) {
+    super(message);
+    this.name = "RouteRefusedError";
+  }
+}
+
+let routeGate: RouteGate | null = null;
+
+/**
+ * Install the one check that runs before every model call (spend caps, pause,
+ * attribution; S2-3 installs it at startup). With no gate (tests) every call
+ * goes through. Pass null to remove it.
+ */
+export function setRouteGate(gate: RouteGate | null): void {
+  routeGate = gate;
+}
+
+/** Run the gate once per route; a gate that throws refuses the call (fails closed). */
+function consultGate(options: RouteOptions): void {
+  const gate = routeGate;
+  if (!gate) return;
+  let decision: RouteGateDecision;
+  try {
+    decision = gate({ agentID: options.agentID, jobID: options.jobID, rootJobID: options.rootJobID, kind: options.kind, purpose: options.purpose });
+  } catch (error) {
+    throw new RouteRefusedError("gate_failed", `the model-call gate failed (${error instanceof Error ? error.message : String(error)}); refusing the call`);
+  }
+  if (!decision.ok) throw new RouteRefusedError(decision.reason, decision.message, decision.detail);
+}
+
+/** Rough prompt size for a call that failed before the provider reported usage. */
+function estimateInputTokens(messages: ChatMessage[], tools: ToolSpec[] | undefined): number {
+  let tokens = tools?.length ? estimateTokens(JSON.stringify(tools)) : 0;
+  for (const message of messages) tokens += estimateTokens(message.content) + 4;
+  return tokens;
+}
+
+/** Rough size of what a call produced: its text, its reasoning and its tool-call arguments. */
+function estimateOutputTokens(result: ChatResult): number {
+  let tokens = estimateTokens(result.text) + estimateTokens(result.reasoning ?? "");
+  for (const call of result.toolCalls ?? []) tokens += estimateTokens(`${call.function.name}${call.function.arguments}`);
+  return tokens;
 }
 
 /**
@@ -82,6 +144,10 @@ export interface RouteResult {
   latencyMs: number;
   inputTokens?: number;
   outputTokens?: number;
+  /** Prompt tokens the provider served from its cache (part of `inputTokens`), when it said. */
+  cachedInputTokens?: number;
+  /** What the provider says the call cost in US dollars, when it says (OpenRouter). */
+  reportedCostUsd?: number;
   attempts: number;
   /** Structured tool calls the model emitted (task lane). */
   toolCalls?: import("./client").ToolCall[];
@@ -137,6 +203,8 @@ export class Router {
     const response = await this.fetchFn(`${provider.baseUrl.replace(/\/$/, "")}/models`, {
       headers: { Authorization: `Bearer ${provider.apiKey}` },
       signal: AbortSignal.timeout(10_000),
+      // The request carries the provider key: a redirect is an error, never followed.
+      redirect: "error",
     });
     if (!response.ok) throw new Error(`Provider model list returned HTTP ${response.status}.`);
     const payload = await response.json() as { data?: Array<{ id?: unknown }> };
@@ -163,6 +231,7 @@ export class Router {
   }
 
   async route(options: RouteOptions): Promise<RouteResult> {
+    consultGate(options);
     if (this.activeRoutes >= this.maxConcurrentRoutes) throw new RouterBusyError(this.maxConcurrentRoutes);
     this.activeRoutes += 1;
     try {
@@ -220,18 +289,25 @@ export class Router {
           } finally { lease?.release(); }
           this.health.markSuccess(provider.id);
           const latencyMs = Date.now() - beganAt;
-          recordModelUsage({
+          // A provider that reports no usage at all is priced from what was sent and what streamed back, so
+          // one such call is a small estimate in the ledger and not an unknown cost that blocks the day.
+          const noUsage = result.inputTokens === undefined && result.outputTokens === undefined && result.reportedCostUsd === undefined;
+          const usageEvent: PricedUsageEvent = {
             provider: provider.id,
             model: provider.model,
-            inputTokens: result.inputTokens,
-            outputTokens: result.outputTokens,
+            inputTokens: noUsage ? estimateInputTokens(options.messages, options.tools) : result.inputTokens,
+            outputTokens: noUsage ? estimateOutputTokens(result) : result.outputTokens,
+            cachedInputTokens: result.cachedInputTokens,
+            reportedCostUsd: result.reportedCostUsd,
+            ...(noUsage ? { estimated: true } : {}),
             latencyMs,
             purpose: options.purpose,
             agentID: options.agentID,
             jobID: options.jobID,
             rootJobID: options.rootJobID,
             kind: options.kind,
-          });
+          };
+          recordModelUsage(usageEvent);
           return {
             provider: provider.id,
             model: provider.model,
@@ -240,6 +316,8 @@ export class Router {
             latencyMs,
             inputTokens: result.inputTokens,
             outputTokens: result.outputTokens,
+            ...(result.cachedInputTokens !== undefined ? { cachedInputTokens: result.cachedInputTokens } : {}),
+            ...(result.reportedCostUsd !== undefined ? { reportedCostUsd: result.reportedCostUsd } : {}),
             attempts,
             ...(result.toolCalls ? { toolCalls: result.toolCalls } : {}),
             ...(result.reasoning ? { reasoning: result.reasoning } : {}),
@@ -249,6 +327,25 @@ export class Router {
         } catch (error) {
           const providerError =
             error instanceof ProviderError ? error : new ProviderError(String(error), { kind: "network" });
+          // Tokens the provider generated before the stream failed (or the owner stopped it) are billed:
+          // record them as an estimate, once for this attempt.
+          const generated = providerError.estimatedOutputTokens ?? 0;
+          if (generated > 0) {
+            const estimate: PricedUsageEvent = {
+              provider: provider.id,
+              model: provider.model,
+              inputTokens: estimateInputTokens(options.messages, options.tools),
+              outputTokens: generated,
+              latencyMs: Date.now() - beganAt,
+              purpose: options.purpose,
+              agentID: options.agentID,
+              jobID: options.jobID,
+              rootJobID: options.rootJobID,
+              kind: options.kind,
+              estimated: true,
+            };
+            recordModelUsage(estimate);
+          }
           if (providerError.kind === "aborted" || options.signal?.aborted) throw providerError;
           if (emitted) throw new MidStreamError(provider.id, providerError);
           if (provider.id === "chatgpt") {

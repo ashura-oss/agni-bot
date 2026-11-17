@@ -1,32 +1,32 @@
 /**
- * HITL approval broker. Only actions that can *destroy* state pause the loop:
- * destructive shell, writes outside the scratch tree, sends from the owner's
- * mailbox, and payment-style tools. Everything reversible runs free — reading,
- * research, memory, links, tasks, renames, and handoffs.
- *
- * Known reversible tools are listed in `FREE_TOOLS`: a prompt on every
- * reversible step trains the owner to click Allow without reading. Anything
- * not listed (a new tool, an MCP plugin tool) gates by default — a new
- * reversible tool must be added to `FREE_TOOLS` to run free.
+ * The approval card's mechanics. Whether a call needs the owner is the policy
+ * engine's decision (`policy/engine.ts`); this file only raises the card the
+ * engine asked for, waits for the answer, and writes it down.
  *
  * Approvals are durable: they live in the `approvals` table and are surfaced
  * to the client as `approval.request` frames. The decision is recorded and the
  * loop resumes (or aborts) once the client answers.
  *
  * "Always allow" is a standing rule (`stores/approval-rules.ts`): one bot, one
- * tool, one target, kept until the owner revokes it. Before a card is raised
- * an active matching rule answers instead, and that answer is still recorded as
- * an approval row so the audit trail shows what ran and which rule allowed it.
+ * tool, one target, kept until the owner revokes it. The engine looks rules up
+ * before it asks; a call a rule let through is still an approval row, so the
+ * audit trail shows what ran and which rule allowed it. The card offers
+ * "always" only when the engine said the call may be remembered, which it never
+ * does for a run that has read outside text.
  */
 import type { Database } from "bun:sqlite";
+import type { ApprovalSource } from "@agni/protocol";
 import { newID, nowISO } from "../util/ids";
-import { clip, entry, escapeUnsafe, quoted } from "./card-text";
+import { redact } from "../util/redact";
+import { clip, entry, escapeUnsafe, fitEntry } from "./card-text";
+import { CardNotShown, describeAction, previewAction } from "./card-preview";
+import { saveCardMeta } from "./pending-cards";
+import type { ApprovalCard, RiskKind, TaintKind } from "../policy/types";
+import { addApprovalRule, approvalTarget } from "../stores/approval-rules";
 
 export { clip };
-import { isReadOnlyCommand } from "../tools/bash";
-import { isOutsideScratch, resolveWritePath, scratchDir, writeTargetExists } from "../tools/write-file";
-import { MCP_FREE_TOOLS } from "../plugins/mcp";
-import { addApprovalRule, agentForTurn, approvalTarget, findApprovalRule } from "../stores/approval-rules";
+// The card's heading and body are drawn in `card-preview.ts`; they are re-exported here, where they have always been found.
+export { describeAction, previewAction };
 
 export type Decision = "once" | "always" | "reject";
 
@@ -73,16 +73,22 @@ export interface ApprovalRequest {
 
 export interface ApprovalBrokerDeps {
   db: Database;
-  emit: (frame: { type: "approval.request"; requestID: string; action: string; preview: string; buttons: Decision[] }) => void;
+  emit: (frame: {
+    type: "approval.request"; requestID: string; action: string; preview: string; buttons: Decision[];
+    /** What outside text the run had read, newest first. Left out for a run that read none. */
+    source?: ApprovalSource[];
+    /** How risky the call is (0-3). */
+    tier?: 0 | 1 | 2 | 3;
+    /** When the card stops waiting (ISO time). */
+    expiresAt?: string;
+    /**
+     * The owner must open the full text (`approval.full`) before allowing: the preview hides part of the call (it has a cut in it), or it
+     * is more than can be taken in at a glance (over 2,000 characters or 40 lines), though every character of it is there.
+     */
+    truncated?: boolean;
+  }) => void;
   /** Wait for a decision on a pending approval. */
   waitForDecision: (requestID: string, signal: AbortSignal) => Promise<Decision | null>;
-  /**
-   * Why a call's arguments break the tool's schema, or null (the registry's
-   * `validateArgs`). A call that fails never raises a card: the tool refuses
-   * it with an error that names the field, so the owner is not asked about
-   * an action that cannot run.
-   */
-  validate?: (toolName: string, args: Record<string, unknown>) => string | null;
   /**
    * A line the integration wants the owner to read with the card for this tool
    * (an MCP connector's own warning, say). Appended to the preview.
@@ -90,21 +96,40 @@ export interface ApprovalBrokerDeps {
   approvalNote?: (toolName: string) => string | undefined;
 }
 
-/** Tools that cannot destroy state or reach outside scratch. Everything else asks. */
-const FREE_TOOLS = new Set([
-  "ask", "say", "request_owner_input", "expand", "draft_email", "read_artifact", "scratch_read", "scratch_append",
-  // Only unlocks tools already on the agent's allowlist; each of those still gates on its own.
-  "load_tools",
-  "memory_search", "memory_write", "transcript_search", "links_search", "link_save",
-  "tasks_list", "task_create", "task_update", "task_status", "task_cancel",
-  "remember_fact", "recall_fact", "get_fact", "forget_fact",
-  // Confined to the scratch tree by the tools themselves.
-  "read_file", "grep", "glob",
-  "web_search", "web_fetch", "deep_research", "mail_search", "mail_read", "calendar_list", "drive_search", "drive_read",
-  "skills_list", "skills_load", "skills_resource",
-  "handoff", "delegate_task", "delegate_wait", "rename_agent", "create_agent", "update_agent", "share_thread",
-  "job_schedule", "job_list", "job_cancel", "routine_create", "routine_list", "routine_pause", "routine_delete",
-]);
+/** What the engine knows about the card, beyond the call itself. */
+export interface CardInfo {
+  card: ApprovalCard;
+  /** The bot's name for the card ("Ava read ..."); "A bot" when it is not known. */
+  botName?: string | null;
+  /** The bot whose turn this is: the scope of a rule if the owner says "always". */
+  agentID: string | null;
+  /** When the card stops waiting (ISO time), so the owner and the client see the same deadline the wait uses. */
+  expiresAt?: string;
+}
+
+/** The marks `clip` and `entry` leave where they cut something out. */
+const CUT_MARKS = /\s…\s\d+ chars omitted\s…\s|… \(\+\d+ chars\) …|\nArguments given: /;
+
+/** True when the preview has a part cut out of the middle. The owner must open the full text before allowing it. */
+export function previewIsCut(preview: string): boolean {
+  return CUT_MARKS.test(preview);
+}
+
+/**
+ * How much of a card the owner can take in at a glance: the most characters and lines a preview may have before the card is marked
+ * `truncated`. The web card's box is small, and a card the owner has not read to the end must not be allowed on a glance.
+ */
+export const FULL_VIEW_MAX_CHARS = 2_000;
+export const FULL_VIEW_MAX_LINES = 40;
+
+/**
+ * True when the preview is more than the owner takes in at a glance (over 2,000 characters or 40 lines). The card is then marked
+ * `truncated` even though nothing is cut: the flag means "the owner must open the full text before Allow", and `approval.full` answers
+ * with the whole preview (`ws/approval-full.ts`).
+ */
+export function previewNeedsFullView(preview: string): boolean {
+  return preview.length > FULL_VIEW_MAX_CHARS || preview.split("\n").length > FULL_VIEW_MAX_LINES;
+}
 
 export class ApprovalBroker {
   constructor(private readonly deps: ApprovalBrokerDeps) {}
@@ -117,43 +142,47 @@ export class ApprovalBroker {
     callID: string,
     args: Record<string, unknown>,
     signal: AbortSignal,
+    info?: CardInfo,
   ): Promise<Decision | null> {
-    const action = describeAction(toolName, args);
+    const action = redact(describeAction(toolName, args));
     const note = this.deps.approvalNote?.(toolName);
-    const preview = note ? `${previewAction(toolName, args)}\n\n${escapeUnsafe(note)}` : previewAction(toolName, args);
+    const bot = info?.botName?.trim() || "A bot";
+    // Throws (and nothing is stored or sent) when the call cannot be shown whole: the engine refuses such a call before it gets here.
+    const body = previewAction(toolName, args, bot, { card: info?.card, db: this.deps.db, agentID: info?.agentID });
+    const lead = info ? cardLead(info.card, bot) : "";
+    const preview = redact(`${lead}${note ? `${body}\n\n${escapeUnsafe(note)}` : body}`);
     const { db } = this.deps;
     const requestID = newID("apr");
-    // The rule's scope: this turn's bot, this tool, this exact target. Without
-    // a bot or a target there is nothing to scope a rule to, so we always ask.
-    const agentID = agentForTurn(db, threadID, turnID);
-    const target = approvalTarget(toolName, args);
-    const scope = agentID && target !== null ? { agentID, target } : null;
-
-    const rule = scope ? findApprovalRule(db, scope.agentID, toolName, scope.target) : null;
-    if (rule) {
-      const when = nowISO();
-      db.run(
-        `INSERT INTO approvals (id, thread_id, turn_id, action, preview, status, decision, call_id, tool_name, created_at, decided_at, rule_id)
-         VALUES (?, ?, ?, ?, ?, 'decided', 'always', ?, ?, ?, ?, ?)`,
-        [
-          requestID, threadID, turnID,
-          `${action} [auto-approved by standing rule ${rule.id}]`,
-          `${preview}
-
-Auto-approved by standing rule ${rule.id}: "Always allow" for ${rule.agentID} / ${rule.toolName}, given ${rule.createdAt}. Revoke the rule to be asked again.`,
-          callID, toolName, when, when, rule.id,
-        ],
-      );
-      return "always";
-    }
+    // The rule's scope: this turn's bot, this tool, this exact target. A card the
+    // engine said may not be remembered never offers "always".
+    const target = info?.card.canRemember && info.agentID ? approvalTarget(toolName, args) : null;
+    const scope = info?.agentID && target !== null ? { agentID: info.agentID, target } : null;
+    const truncated = previewIsCut(preview) || previewNeedsFullView(preview);
+    const source = info ? approvalSources(info.card) : [];
+    const tier = info ? info.card.tier : undefined;
+    const expiresAt = info?.expiresAt;
 
     db.run(
       `INSERT INTO approvals (id, thread_id, turn_id, action, preview, status, decision, call_id, tool_name, created_at)
        VALUES (?, ?, ?, ?, ?, 'pending', NULL, ?, ?, ?)`,
       [requestID, threadID, turnID, action, preview, callID, toolName, nowISO()],
     );
+    // What the card said besides its text, kept with the row so a card replayed on reconnect is the same card.
+    saveCardMeta(db, requestID, {
+      ...(source.length > 0 ? { source } : {}),
+      ...(tier !== undefined ? { tier } : {}),
+      ...(expiresAt ? { expiresAt } : {}),
+      truncated,
+      canRemember: scope !== null,
+    });
 
-    this.deps.emit({ type: "approval.request", requestID, action, preview, buttons: scope ? ["once", "always", "reject"] : ["once", "reject"] });
+    this.deps.emit({
+      type: "approval.request", requestID, action, preview, buttons: scope ? ["once", "always", "reject"] : ["once", "reject"],
+      ...(source.length > 0 ? { source } : {}),
+      ...(tier !== undefined ? { tier } : {}),
+      ...(expiresAt ? { expiresAt } : {}),
+      truncated,
+    });
 
     const decision = await this.deps.waitForDecision(requestID, signal);
     if (decision === "always" && scope) addApprovalRule(db, { ...scope, toolName, approvalID: requestID });
@@ -161,127 +190,105 @@ Auto-approved by standing rule ${rule.id}: "Always allow" for ${rule.agentID} / 
   }
 
   /**
-   * True only for actions that can destroy state — the owner's rule is "ask me
-   * about destructive things, and nothing else" (2026-10-19). Everything
-   * reversible is free: research, memory, links, tasks, renames, handoffs, and
-   * reads. Renaming in particular is a chat-driven identity change that used to
-   * stop the turn for a click; it no longer does. A tool this switch and
-   * `FREE_TOOLS` do not know gates.
+   * A call a standing rule let through is still an approval row, so the audit
+   * trail shows what ran and which rule allowed it.
    */
-  requiresApproval(toolName: string, args: Record<string, unknown>): boolean {
-    // A call the tool will refuse for its arguments is not worth a card; the
-    // tool's own check turns it into an error the model can fix.
-    if (this.deps?.validate?.(toolName, args)) return false;
-    switch (toolName) {
-      case "bash":
-        return !isReadOnlyCommand(String(args.command ?? ""), typeof args.cwd === "string" ? args.cwd : undefined);
-      case "write_file": {
-        // Writes outside the owner-declared scratch tree gate. Inside scratch,
-        // creating a new file is free; changing one that exists asks, whether
-        // it is replaced (a denied delete must not be doable as an overwrite)
-        // or appended to (an appended script is a changed script). A relative
-        // path means a path under scratch, as it does for the tool itself.
-        const path = typeof args.path === "string" ? args.path : "";
-        if (isOutsideScratch(path, scratchDir())) return true;
-        return writeTargetExists(path);
-      }
-      case "mail_send":
-        // Agni's own mailbox ("agent", also the default when omitted) is
-        // ungated (AGENTS.md amendment 2026-10-17); every other value gates.
-        return !(args.account === undefined || args.account === null || args.account === "agent");
-      case "calendar_create":
-      case "calendar_update":
-        // Same rule: Agni's own calendar is free, the owner's asks.
-        return !(args.account === undefined || args.account === null || args.account === "agent");
-      default:
-        return !FREE_TOOLS.has(toolName) && !MCP_FREE_TOOLS.has(toolName);
-    }
+  recordRuleApproval(
+    threadID: string, turnID: string, toolName: string, callID: string, args: Record<string, unknown>,
+    rule: { id: string; agentID: string; toolName: string; createdAt: string },
+  ): void {
+    const action = redact(describeAction(toolName, args));
+    const note = this.deps.approvalNote?.(toolName);
+    const body = recordedBody(toolName, args, { db: this.deps.db, agentID: rule.agentID });
+    const preview = redact(note ? `${body}
+
+${escapeUnsafe(note)}` : body);
+    const when = nowISO();
+    this.deps.db.run(
+      `INSERT INTO approvals (id, thread_id, turn_id, action, preview, status, decision, call_id, tool_name, created_at, decided_at, rule_id)
+       VALUES (?, ?, ?, ?, ?, 'decided', 'always', ?, ?, ?, ?, ?)`,
+      [
+        newID("apr"), threadID, turnID,
+        `${action} [auto-approved by standing rule ${rule.id}]`,
+        `${preview}
+
+Auto-approved by standing rule ${rule.id}: "Always allow" for ${rule.agentID} / ${rule.toolName}, given ${rule.createdAt}. Revoke the rule to be asked again.`,
+        callID, toolName, when, when, rule.id,
+      ],
+    );
   }
 }
-
-/** An argument for display. A missing one reads as "(not given)", never "?" or "undefined". */
-function shown(value: unknown, max = 400): string {
-  if (value === undefined || value === null || value === "") return "(not given)";
-  return escapeUnsafe(clip(typeof value === "string" ? value : JSON.stringify(value) ?? "(not given)", max));
-}
-
-/** The arguments with every long string cut in the middle (start and end kept), for the JSON view. */
-function boundedArgs(value: unknown, max: number): unknown {
-  if (typeof value === "string") return clip(value, max);
-  if (Array.isArray(value)) return value.map((item) => boundedArgs(item, max));
-  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, boundedArgs(item, max)]));
-  return value;
-}
-
-function describeAction(toolName: string, args: Record<string, unknown>): string {
-  switch (toolName) {
-    case "bash": return `run shell: ${shown(String(args.command ?? ""), 400)}`;
-    case "write_file": {
-      const path = typeof args.path === "string" ? args.path : "";
-      const exists = path !== "" && !isOutsideScratch(path, scratchDir()) && writeTargetExists(path);
-      const label = !exists ? "write file" : args.append === true ? "append to existing file" : "overwrite existing file";
-      return `${label}: ${shown(path)}`;
-    }
-    case "read_file": return `read file: ${shown(args.path)}`;
-    case "memory_write": return `save memory: ${entry(String(args.text ?? ""), 80)}`;
-    case "link_save": return `save link: ${shown(args.url)}`;
-    case "task_create": return `add task: ${shown(args.title)}`;
-    case "task_update": return `update task ${shown(args.id)}`;
-    case "mail_send": return `send email to ${Array.isArray(args.to) ? shown(args.to.map((to) => entry(to)).join(", ")) : shown(args.to)}: ${entry(String(args.subject ?? ""), 80)}`;
-    case "rename_agent": return args.agentId ? `rename ${shown(args.agentId)} to ${shown(args.name)}` : `rename the assistant to ${shown(args.name)}`;
-    default: return `${entry(toolName, 80)}(${escapeUnsafe(clip(JSON.stringify(args), 400))})`;
-  }
-}
-
-function previewAction(toolName: string, args: Record<string, unknown>): string {
-  if (toolName === "bash") return quoted(String(args.command ?? ""), 4_000);
-  if (toolName === "mail_send") return [...audienceLines(args), describeAction(toolName, args), "", quoted(String(args.body ?? ""), 4_000)].join("\n");
-  if (toolName === "write_file" && typeof args.path === "string") {
-    // The path the write really lands on: a relative path means under scratch,
-    // and a link is followed. This is also what "always allow" would remember.
-    const real = resolveWritePath(args.path);
-    return `${describeAction(toolName, args)}
-
-Resolved path: ${real === null || real === undefined ? "(cannot be resolved)" : entry(real, 1_000)}`;
-  }
-  return fullCall(toolName, args);
-}
-
-/** How much of a call's arguments the card shows: enough that padding cannot push anything out of sight. */
-const PREVIEW_ARGS_CHARS = 4_000;
-/** One string in the arguments view. */
-const PREVIEW_ARG_STRING_CHARS = 1_000;
 
 /**
- * A card for a tool that has no preview of its own: the whole call, not a cut
- * of its first and last 200 characters. Who the call reaches (recipients and
- * attendees) comes first, in plain lines, because an argument list long enough
- * to be cut would otherwise be able to hide them. A cut list also names every
- * argument and its size.
+ * What the audit row of a call a stored rule let through says of the call. A call that cannot be shown whole (too long for a card, or
+ * naming a routine that is not there) was never put on one (a rule answered, nobody was asked), but the row still records what ran:
+ * the reason it could not be shown, and the start and the end of it, cut in the middle and marked. The database is passed so a call
+ * drawn from it (resuming a routine) is shown the way a card shows it.
  */
-function fullCall(toolName: string, args: Record<string, unknown>): string {
-  const json = escapeUnsafe(JSON.stringify(boundedArgs(args, PREVIEW_ARG_STRING_CHARS), null, 2) ?? "{}", true);
-  const sizes = Object.entries(args).map(([name, value]) => `${entry(name, 80)} (${(typeof value === "string" ? value : JSON.stringify(value) ?? "").length} chars)`);
-  const body = json.length > PREVIEW_ARGS_CHARS ? `${clip(json, PREVIEW_ARGS_CHARS)}\n\nArguments given: ${sizes.join(", ")}` : json;
-  return [...audienceLines(args), `${entry(toolName, 80)} with these arguments:`, "", body].join("\n");
+function recordedBody(toolName: string, args: Record<string, unknown>, options: { db: Database; agentID: string }): string {
+  try {
+    return previewAction(toolName, args, "A bot", options);
+  } catch (error) {
+    const why = error instanceof CardNotShown ? entry(error.message, 300) : "could not be drawn";
+    return `${describeAction(toolName, args)}\n\n(${why}; the start and the end are kept)\n${escapeUnsafe(clip(JSON.stringify(args, null, 2) ?? "{}", 4_000), true)}`;
+  }
 }
 
-/** Argument names that hold the people a call reaches. */
-const AUDIENCE_KEYS: ReadonlyArray<readonly [string, string]> = [
-  ["to", "To"], ["cc", "Cc"], ["bcc", "Bcc"], ["attendees", "Attendees"],
-  ["recipients", "Recipients"], ["emails", "Emails"], ["invitees", "Invitees"], ["guests", "Guests"], ["participants", "Participants"],
-];
-const AUDIENCE_SHOWN = 50;
+/** The protocol's name for each kind of outside text a run can have read. */
+const SOURCE_KIND: Record<TaintKind, ApprovalSource["kind"]> = {
+  web: "web", email: "email", peer: "agent", attachment: "attachment", mcp: "connector", routine: "scheduled", scheduled: "scheduled", history: "unknown", unknown: "unknown",
+};
 
-/** The people a call reaches, one line per kind with how many there are, ahead of everything else. */
-function audienceLines(args: Record<string, unknown>): string[] {
-  const out: string[] = [];
-  for (const [key, label] of AUDIENCE_KEYS) {
-    const value = args[key];
-    const names = Array.isArray(value) ? value : typeof value === "string" && value ? [value] : [];
-    if (names.length === 0) continue;
-    const more = names.length > AUDIENCE_SHOWN ? `, … (+${names.length - AUDIENCE_SHOWN} more)` : "";
-    out.push(`${label} (${names.length}): ${names.slice(0, AUDIENCE_SHOWN).map((name) => entry(name)).join(", ")}${more}`);
+/** The card's sources as the frame carries them: newest first, one line each, hidden characters shown as escapes (a label is a page title or a sender name: outside text). */
+function approvalSources(card: ApprovalCard): ApprovalSource[] {
+  return card.sources.slice(0, 20).map((source) => ({ kind: SOURCE_KIND[source.kind] ?? "unknown", ...(source.label ? { label: fitEntry(source.label, 300) } : {}) }));
+}
+
+const RISK_LINE: Record<RiskKind, string> = {
+  undoable: "Risk: changes something you can undo",
+  egress: "Risk: sends data out of this app",
+  irreversible: "Risk: cannot be undone",
+  either: "Risk: sends data out of this app, or changes something you cannot undo",
+  command: "Risk: runs a command on this computer",
+  standing: "Risk: starts work that repeats by itself, with no further question, until you cancel it",
+};
+
+const SOURCE_LINE: Record<string, (bot: string, label: string) => string> = {
+  web: (bot, label) => `${bot} read a web page earlier in this task: ${label}`,
+  email: (bot, label) => `${bot} read an email earlier in this task: ${label}`,
+  peer: (bot, label) => `${bot} read a reply from ${label} earlier in this task.`,
+  attachment: (bot, label) => `${bot} read an attached file earlier in this task: ${label}`,
+  mcp: (bot, label) => `${bot} read ${label} earlier in this task.`,
+  routine: () => "This task started from saved routine state, not from you.",
+  scheduled: () => "This task started from a scheduled job, not from you.",
+  history: (bot) => `${bot} is carrying on a conversation in which an earlier run read outside content.`,
+  unknown: (bot) => `${bot} read outside content earlier in this task.`,
+};
+
+/**
+ * The lines above the call on a card that the engine added: where the outside
+ * content came from, how risky the call is, and why there is no "always".
+ * The labels are outside text (a page title, a sender), so each goes through the card text escape here, whatever was done to it when it was taken.
+ */
+function cardLead(card: ApprovalCard, bot: string): string {
+  const lines: string[] = [];
+  // First: the owner said no to something in this run, and this command may reach it (policy/engine.ts).
+  if (card.refusedRun) lines.push(escapeUnsafe(card.refusedRun));
+  if (card.standingRule) lines.push(escapeUnsafe(card.standingRule));
+  if (card.standingTainted) lines.push("If you approve, every run of this job starts with the restrictions of the outside content this task read: it may not change bots, schedules or rules, and it asks you before it sends anything out.");
+  if (card.standingNarrowed) lines.push("If you approve, every run of this job runs with the tools of the run that asked, not with everything this bot can use.");
+  const [newest, ...older] = card.sources;
+  if (newest) {
+    const say = SOURCE_LINE[newest.kind] ?? SOURCE_LINE.unknown!;
+    lines.push(`${say(bot, entry(newest.label, 300))}${older.length > 0 ? ` (and ${older.length} more)` : ""}`);
   }
-  return out;
+  lines.push(RISK_LINE[card.risk]);
+  if (card.unnamedDestinations.length > 0) {
+    lines.push(`Not named by you: ${card.unnamedDestinations.map((destination) => entry(destination, 200)).join(", ")}`);
+    lines.push("This destination is not in your messages or your approved list.");
+  }
+  if (newest) lines.push("\"Always allow\" is off: this task used outside content.");
+  if (card.refusedRun) lines.push("\"Always allow\" is off: you refused something in this task.");
+  if (card.standingRule) lines.push("\"Always allow\" is off: work that starts again on its own is always put to you.");
+  return `${lines.join("\n")}\n\n`;
 }

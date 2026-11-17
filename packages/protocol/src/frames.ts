@@ -55,6 +55,11 @@ export const AgentInfoSchema = z.object({
    * `private` (a receipt only), `summary` (one line) or `shared` (full text).
    */
   visibility: z.enum(["private", "summary", "shared"]).optional(),
+  /**
+   * False when the owner turned this bot off (`agent.enabled.set`). Absent means on, so older
+   * servers and clients agree. Additive in v2.
+   */
+  enabled: z.boolean().optional(),
 });
 export type AgentInfo = z.infer<typeof AgentInfoSchema>;
 
@@ -142,8 +147,10 @@ export const MessageInfoSchema = z.object({
   uiHint: z.string().optional(),
   /**
    * How the turn that produced an assistant message ended (`end`, `cancelled`,
-   * `error`, `timeout`, `budget`, ...); absent for other roles and for a turn
-   * still running. Additive in v2.
+   * `error`, `timeout`, `budget`, ...); absent for a turn still running. On the
+   * owner's own message it is set only when that message's turn ended without
+   * writing a reply, so a stop before any text can be shown after a reload.
+   * Additive in v2.
    */
   stopReason: z.string().optional(),
 });
@@ -253,8 +260,60 @@ export const ApprovalRuleInfoSchema = z.object({
   toolName: z.string(),
   target: z.string(),
   createdAt: z.string(),
+  /**
+   * Set when the rule matches by resource pattern (a path, address or host with `*` wildcards)
+   * instead of one exact target. Still one bot and one tool. Additive in v2.
+   */
+  resourcePattern: z.string().optional(),
+  /** On a mail pattern rule: the mailbox it is for (the agent's own or the owner's). Additive in v2. */
+  account: z.enum(["agent", "owner"]).optional(),
 });
 export type ApprovalRuleInfo = z.infer<typeof ApprovalRuleInfoSchema>;
+
+/**
+ * What untrusted input a run read before an approval card was raised, newest first: the line
+ * "Ava read a web page earlier in this task: example.com/offers". `label` is already one clean line
+ * (a host and path without the query, an address and subject, a bot name); clients show it as text.
+ * Additive in v2.
+ */
+export const APPROVAL_SOURCE_KINDS = ["web", "email", "agent", "attachment", "connector", "scheduled", "unknown"] as const;
+export const ApprovalSourceSchema = z.object({
+  kind: z.enum(APPROVAL_SOURCE_KINDS),
+  label: z.string().max(300).optional(),
+});
+export type ApprovalSource = z.infer<typeof ApprovalSourceSchema>;
+
+/** One bot in a `policy.pause.ok`: whether it is on, and what turning it off would stop. */
+export const BotPauseStateSchema = z.object({
+  agentID: z.string().min(1),
+  name: z.string(),
+  enabled: z.boolean(),
+  /** Turns of this bot running right now (the "Ava's 2 running tasks will stop" count). */
+  runningTurns: z.number().int().nonnegative(),
+  /** Queued or recurring jobs of this bot that would be skipped while it is off. */
+  scheduledJobs: z.number().int().nonnegative(),
+});
+export type BotPauseState = z.infer<typeof BotPauseStateSchema>;
+
+/** The three spend caps in USD; null means no cap. */
+export const SpendCapsSchema = z.object({
+  dayUsd: z.number().positive().nullable(),
+  perBotDayUsd: z.number().positive().nullable(),
+  perJobUsd: z.number().positive().nullable(),
+});
+export type SpendCaps = z.infer<typeof SpendCapsSchema>;
+
+/**
+ * The run limits the owner sets with `agni policy caps set`. Read-only on the wire: no frame changes them.
+ * The time limit is in minutes (the unit the command takes); the three counts are whole numbers.
+ */
+export const RunCapsSchema = z.object({
+  rootJobWallMinutes: z.number().positive(),
+  maxConcurrentDelegations: z.number().int().positive(),
+  maxSelfScheduledJobsPerBot: z.number().int().positive(),
+  maxWakesPerRequest: z.number().int().positive(),
+});
+export type RunCapsInfo = z.infer<typeof RunCapsSchema>;
 
 export const TaskStatusSchema = z.enum(["open", "done", "snoozed"]);
 export const TaskWorkflowStatusSchema = z.enum(["not_started", "in_progress", "ai_review"]);
@@ -440,6 +499,7 @@ export const ClientFrameSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("approve.reply"),
     requestID: z.string().min(1),
+    /** An allow to a card marked `truncated` is refused (`error` `approval_not_opened`) until `approval.full` was answered for it; `reject` always works. */
     decision: DecisionSchema,
   }),
   /**
@@ -510,6 +570,40 @@ export const ClientFrameSchema = z.discriminatedUnion("type", [
    * `not_found` when the id is unknown or already revoked. Additive in v2.
    */
   z.object({ type: z.literal("approval.rule.revoke"), id: z.string().min(1) }),
+  /**
+   * The full text behind an approval card whose preview was cut (`approval.request.truncated`);
+   * answered by `approval.full.ok`, or by an error `not_found` when the card is gone. Additive in v2.
+   */
+  z.object({ type: z.literal("approval.full"), requestID: z.string().min(1) }),
+  /**
+   * Pause or resume every bot, or read the pause state. `paused` true stops running work and starts
+   * nothing new, false resumes (bots turned off stay off); omit it to just read. With `agentID` it
+   * means that one bot: the same as `agent.enabled.set` with `enabled: !paused`. Answered by a
+   * broadcast `policy.pause.ok`. Additive in v2.
+   */
+  z.object({ type: z.literal("policy.pause"), paused: z.boolean().optional(), agentID: z.string().min(1).optional() }),
+  /** Turn one bot on or off. Off stops its running turns and skips its jobs; answered by `policy.pause.ok`. Additive in v2. */
+  z.object({ type: z.literal("agent.enabled.set"), agentID: z.string().min(1), enabled: z.boolean() }),
+  /** Read today's spend against the caps; answered by `spend.status.ok`. Additive in v2. */
+  z.object({ type: z.literal("spend.status") }),
+  /**
+   * Change any of the spend caps (a number of dollars above zero, or null for none); fields left out
+   * keep their value. Answered by a broadcast `spend.status.ok`, or an error `bad_cap`. Additive in v2.
+   */
+  z.object({
+    type: z.literal("spend.caps.set"),
+    dayUsd: z.number().positive().max(1_000_000).nullable().optional(),
+    perBotDayUsd: z.number().positive().max(1_000_000).nullable().optional(),
+    perJobUsd: z.number().positive().max(1_000_000).nullable().optional(),
+  }),
+  /**
+   * Owner-only: let a run that a spend cap stopped go on, once. `runKey` is the one `spend.stopped` named. Adds
+   * one allowance (the per-task cap, or $0.50 when that is off) for that run and that cap only; the limit itself
+   * does not change. Answered by `spend.continue.ok`, or an error `not_found` when that run was not stopped (or
+   * the server restarted since). The run does not restart by itself: the next message, or the job's retry, goes
+   * through. Bots and tools cannot send this. Additive in v2.
+   */
+  z.object({ type: z.literal("spend.continue"), runKey: z.string().min(1).max(200) }),
   /** Owner-only: replace a routine's web domain allowlist (additive v2). Bots cannot send this. */
   z.object({ type: z.literal("routine.domains.set"), jobID: z.string().min(1), domains: z.array(z.string().max(253)).max(20) }),
   /** Delete a task unless it is currently running. */
@@ -760,6 +854,14 @@ export const ServerFrameSchema = z.discriminatedUnion("type", [
     action: z.string(),
     preview: z.string(),
     buttons: z.array(DecisionSchema).min(1),
+    /** What untrusted input the run read before this call, newest first. Absent when it read none. Additive in v2. */
+    source: z.array(ApprovalSourceSchema).max(20).optional(),
+    /** How risky the call is: 1 undoable change, 2 sends data out or cannot be undone, 3 runs a command. Additive in v2. */
+    tier: z.number().int().min(0).max(3).optional(),
+    /** When the card expires (ISO time). Past it, the answer is no. Chat 10 minutes, background 30. Additive in v2. */
+    expiresAt: z.string().optional(),
+    /** The preview hides part of the call; the client asks for `approval.full` and the owner reads it before Allow. Additive in v2. */
+    truncated: z.boolean().optional(),
   }),
   /**
    * An `approval.request` or `form.request` card is no longer actionable:
@@ -881,6 +983,59 @@ export const ServerFrameSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("approval.rules.list.ok"), seq, rules: z.array(ApprovalRuleInfoSchema) }),
   /** Answer to `approval.rule.revoke`; addressed to the requester, not replayed. */
   z.object({ type: z.literal("approval.rule.revoke.ok"), seq, id: z.string() }),
+  /** Answer to `approval.full`; addressed to the requester, not replayed. `cut` is true when even this text hit the size limit. */
+  z.object({ type: z.literal("approval.full.ok"), seq, requestID: z.string(), text: z.string(), cut: z.boolean().optional() }),
+  /**
+   * The pause state: all bots paused or not, and every bot with its on/off state and what turning it off
+   * stops. Broadcast when it changes and sent to a client after hello; `stopped` is how many running
+   * turns the change that caused this frame stopped (0 for a read or a hello). Replayable. Additive in v2.
+   */
+  z.object({
+    type: z.literal("policy.pause.ok"),
+    seq,
+    paused: z.boolean(),
+    changedAt: z.string().optional(),
+    stopped: z.number().int().nonnegative(),
+    bots: z.array(BotPauseStateSchema),
+  }),
+  /**
+   * Today's spend against the caps (local day), answering `spend.status` and broadcast after
+   * `spend.caps.set`. `daySpentUsd` and the bots' `spentUsd` count priced calls only;
+   * `unpricedCalls` says how many calls had no price. `runCaps` is the owner's run limits, shown read-only;
+   * it is left out when the daemon could not read them. Additive in v2.
+   */
+  z.object({
+    type: z.literal("spend.status.ok"),
+    seq,
+    day: z.string(),
+    resetsAt: z.string(),
+    timeZone: z.string(),
+    caps: SpendCapsSchema,
+    daySpentUsd: z.number().nonnegative(),
+    bots: z.array(z.object({ agentID: z.string(), spentUsd: z.number().nonnegative(), capUsd: z.number().positive().nullable() })),
+    unpricedCalls: z.number().int().nonnegative(),
+    runCaps: RunCapsSchema.optional(),
+  }),
+  /**
+   * A run was stopped because spending reached a cap (or could not be counted). `message` is the notice the owner
+   * sees in the chat (the same words, three lines); the rest lets a client draw the "Raise ... limit" and
+   * "Continue once" buttons. `scope` is the cap that stopped it: all bots today, one bot today, or this task.
+   * `reason` is `over_cap`, `cost_unknown` (spend that could not be priced is in the scope) or `budget_unreadable`.
+   * `runKey` goes back in `spend.continue`. Additive in v2.
+   */
+  z.object({
+    type: z.literal("spend.stopped"),
+    seq,
+    runKey: z.string(),
+    agentId: z.string().optional(),
+    scope: z.enum(["day", "bot", "job"]),
+    reason: z.enum(["over_cap", "cost_unknown", "budget_unreadable"]),
+    spentUsd: z.number().nonnegative(),
+    capUsd: z.number().nonnegative(),
+    message: z.string(),
+  }),
+  /** Answer to `spend.continue`: how many dollars the run may spend on top of its caps. Addressed to the requester. Additive in v2. */
+  z.object({ type: z.literal("spend.continue.ok"), seq, runKey: z.string(), grantedUsd: z.number().positive() }),
   z.object({ type: z.literal("task.list.ok"), seq, tasks: z.array(TaskInfoSchema), lists: z.array(TaskListInfoSchema).optional() }),
   z.object({ type: z.literal("task.create.ok"), seq, task: TaskInfoSchema }),
   z.object({ type: z.literal("task.list.create.ok"), seq, lists: z.array(TaskListInfoSchema) }),
@@ -992,7 +1147,15 @@ export const ServerFrameSchema = z.discriminatedUnion("type", [
     /** What other agents may see of its work, when the change touched it. */
     visibility: z.enum(["private", "summary", "shared"]).optional(),
   }),
-  z.object({ type: z.literal("error"), seq, code: z.string(), message: z.string(), retryAfter: z.number().optional() }),
+  z.object({
+    type: z.literal("error"),
+    seq,
+    code: z.string(),
+    message: z.string(),
+    retryAfter: z.number().optional(),
+    /** The card an `approve.reply` was refused for (`approval_not_opened`, `approval_text_cut`, `unknown_request`, `internal`). Absent on every other error. Additive in v2. */
+    requestID: z.string().optional(),
+  }),
   /** Phase 2 (additive): the VAPID public key a client subscribes to Web Push with. */
   z.object({ type: z.literal("push.vapid"), seq, publicKey: z.string() }),
   /** Phase 2 (additive): a bot's proactivity settings (reply to `agent.proactivity`). */

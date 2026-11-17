@@ -11,6 +11,7 @@ import { appendTaskNote, listTaskNotes, MAX_TASK_NOTES } from "../src/stores/tas
 import { runTaskTurn } from "../src/agent/task-loop";
 import { resolvePersona, updatePersona } from "../src/agent/personas";
 import { createThread } from "../src/stores/threads";
+import { fullCapabilities } from "./policy-fixture";
 
 let db: Database | undefined;
 afterEach(() => { db?.close(); db = undefined; });
@@ -63,6 +64,7 @@ describe("task scratchpad", () => {
     await runTaskTurn(db, router, settings, {
       ...base, threadID: createThread(db, persona.id).id,
       delegation: { taskID: task.id, ownerAgentID: "researcher", parentAgentID: "ea", parentChannelID: null },
+      policy: { capabilities: fullCapabilities(db) },
     });
     expect(bodies[1]).toContain("scratch_append");
   });

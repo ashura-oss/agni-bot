@@ -5,6 +5,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { openDatabase } from "../src/db";
 import { JobRunner } from "../src/jobs/runner";
+import { insertRoutine } from "../src/stores/routines";
 import { claimDueJob, enqueueJob, finishJob, getJob, requeueJob, requeueStuckJobs, setJobEnabled, wakeJob } from "../src/stores/jobs";
 
 let db: Database | undefined;
@@ -12,7 +13,14 @@ afterEach(() => { db?.close(); db = undefined; });
 
 describe("P2: Run now on a paused job runs it exactly once and leaves it paused", () => {
   const paused = (database: Database) => {
-    const job = enqueueJob(database, { kind: "routine", payload: {}, runAt: new Date(Date.now() + 3_600_000).toISOString() });
+    // A routine job names a routine whose bot exists: the runner will not start one that does not.
+    const job = enqueueJob(database, { kind: "routine", payload: { routineID: "rtn_int5" }, runAt: new Date(Date.now() + 3_600_000).toISOString() });
+    const now = new Date().toISOString();
+    insertRoutine(database, {
+      id: "rtn_int5", jobID: job.id, agentID: "ea", name: "Check", prompt: "p", cron: "0 9 * * *", timezone: "UTC",
+      misfire: "run_once", preflight: { kind: "none" }, maxTokens: 1000, maxExecutionMs: 1000, allowedDomains: [], threadID: null,
+      lastStateHash: null, stateContext: null, successStreak: 0, failureStreak: 0, createdAt: now, updatedAt: now,
+    });
     setJobEnabled(database, job.id, false);
     return job;
   };

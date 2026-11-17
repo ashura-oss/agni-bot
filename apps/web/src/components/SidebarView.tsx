@@ -88,6 +88,7 @@ export function SidebarView({ onCollapse, collapsed = false }: { onCollapse?: ()
         <span className="sidebar-row-text">
           <span className="sidebar-row-top">
             <span className="sidebar-row-title">{agent.name}</span>
+            {model.isBotOff(agent.id) ? <span className="sidebar-off-tag">Off</span> : null}
             {preview ? <time className="sidebar-row-time" dateTime={preview.updatedAt}>{new Date(preview.updatedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</time> : null}
             {writtenRole(agent.role) ? <span className="sidebar-tag-chip">{writtenRole(agent.role)}</span> : null}
           </span>

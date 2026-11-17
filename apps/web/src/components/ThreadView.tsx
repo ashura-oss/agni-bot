@@ -4,14 +4,12 @@
  * and system notes centre, because they belong to the thread, not a person.
  */
 import { useEffect, useRef, useState } from "react";
-import { Hand, KeyRound, Mail, MessageCircleQuestion } from "lucide-react";
+import { KeyRound, Mail, MessageCircleQuestion } from "lucide-react";
 import {
-  decisionTitle,
   format,
   safeLine,
   safeText,
   type AgentInfo,
-  type ApprovalRow,
   type ChatMessage,
   type FormRow,
   type SecretRow,
@@ -19,6 +17,8 @@ import {
 import { useAppModel, useAppSnapshot } from "../state/use-app-model";
 import { MessageRowView } from "./MessageRowView";
 import { ComposerView } from "./ComposerView";
+import { ApprovalCard } from "./ApprovalCardView";
+import { BudgetStopCard } from "./BudgetStopCard";
 import { copyText } from "./bits";
 
 export function ThreadView() {
@@ -249,15 +249,27 @@ function PendingInbox() {
   const approvals = snapshot.conversation.openApprovals;
   const forms = snapshot.conversation.openForms;
   const secrets = snapshot.conversation.openSecrets;
-  if (approvals.length === 0 && forms.length === 0 && secrets.length === 0) return null;
+  // A run a spending limit stopped is shown where that bot talks (a notice with no bot goes to the open chat).
+  const stops = snapshot.policy.stops.filter((stop) => stop.agentID === null || stop.agentID === snapshot.conversation.agentID);
+  const empty = approvals.length === 0 && forms.length === 0 && secrets.length === 0 && stops.length === 0;
   return (
-    <div className="pending-inbox">
+    <>
+      {/* Always drawn, so a screen reader hears a card arrive. Focus is not moved: the owner may be typing. */}
+      <span className="visually-hidden" role="status">
+        {approvals.length > 0 ? `${approvals.length === 1 ? "An approval is" : `${approvals.length} approvals are`} waiting for you.` : ""}
+      </span>
+      {empty ? null : (
+    <div className="pending-inbox" role="region" aria-label="Waiting for you">
+      {stops.map((stop) => (
+        <BudgetStopCard key={`${stop.runKey}:${stop.spentUsd}`} stop={stop} />
+      ))}
       {approvals.map((approval) => (
         <ApprovalCard
           key={approval.id}
           approval={approval}
           requester={model.cardRequesterName(approval.agentID)}
           onAnswer={(decision) => model.answer(approval, decision)}
+          onOpenFull={() => model.openApprovalFull(approval)}
         />
       ))}
       {forms.map((form) => (
@@ -272,40 +284,8 @@ function PendingInbox() {
         />
       ))}
     </div>
-  );
-}
-
-function ApprovalCard({
-  approval,
-  requester,
-  onAnswer,
-}: {
-  approval: ApprovalRow;
-  /** The bot that asked, or null when the frames did not say: never the product's name. */
-  requester: string | null;
-  onAnswer: (decision: string) => void;
-}) {
-  return (
-    <div className="approval-card">
-      <div className="card-heading">
-        <Hand size={12} color="var(--ember)" />
-        {requester ? `${requester} wants to run something` : "A bot wants to run something"}
-      </div>
-      <div className="approval-action">{safeLine(approval.action, 800)}</div>
-      {approval.preview.length > 0 ? <div className="approval-preview">{safeText(approval.preview)}</div> : null}
-      <div className="card-actions">
-        {approval.decisions.map((decision) => (
-          <button
-            key={decision}
-            type="button"
-            className={`btn small${decision === "once" ? " primary" : ""}`}
-            onClick={() => onAnswer(decision)}
-          >
-            {decisionTitle(decision)}
-          </button>
-        ))}
-      </div>
-    </div>
+      )}
+    </>
   );
 }
 

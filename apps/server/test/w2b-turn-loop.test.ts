@@ -374,10 +374,11 @@ describe("W2-B review 3: an approval card shows the whole call", () => {
     expect(card.preview.split("\n")[0]).toBe("To (2): a@example.com, b@evil.example");
   });
 
-  test("arguments past 4,000 characters are cut in the middle with the argument names and sizes listed", async () => {
+  test("arguments past 4,000 characters are all shown whole: nothing is cut, and the attendees still come first", async () => {
     const card = await frames("some_mcp_tool", { first: "a".repeat(900), second: "b".repeat(900), third: "c".repeat(900), fourth: "d".repeat(900), fifth: "e".repeat(900), attendees: ["z@evil.example"] });
-    expect(card.preview).toContain("chars omitted");
-    expect(card.preview).toContain("first (900 chars)");
+    expect(card.preview).not.toContain("chars omitted");
+    for (const letter of ["a", "b", "c", "d", "e"]) expect(card.preview).toContain(letter.repeat(900));
+    expect(card.preview.split("\n")[0]).toBe("Attendees (1): z@evil.example");
     expect(card.preview).toContain("attendees");
   });
 });
@@ -419,11 +420,11 @@ describe("W2-B int3: nothing the model chooses can forge a line of an approval c
     clean(cal);
   });
 
-  test("a very long entry is cut with a marker, and the count shows how many there are", async () => {
+  test("a very long entry is shown whole, and the count shows how many there are", async () => {
     const mail = await card("mail_send", { account: "owner", to: ["a@example.com", `${"x".repeat(5_000)}@evil.example`], subject: "s", body: "b" });
     const to = lineStarting(mail, "To (2): ")[0]!;
-    expect(to.length).toBeLessThan(700);
-    expect(to).toMatch(/\(\+\d+ chars\)/);
+    expect(to).toContain(`${"x".repeat(5_000)}@evil.example`);
+    expect(to).not.toMatch(/\(\+\d+ chars\)/);
     const cal = await card("calendar_create", { account: "owner", summary: "s", start: "a", end: "b", attendees: Array.from({ length: 30 }, (_, i) => `p${i}@x.com`) });
     expect(cal.preview.split("\n")[0]!.startsWith("Attendees (30): ")).toBe(true);
   });

@@ -8,7 +8,7 @@ import type { Database } from "bun:sqlite";
 import { openDatabase } from "../src/db";
 import { cancelScheduledJob, listScheduledJobs, scheduleJob } from "../src/tools/jobs-tool";
 import { describeSchedule, nextDailyRun, parseDay, parseWallClock } from "../src/jobs/schedule";
-import { getJob } from "../src/stores/jobs";
+import { enqueueJob, getJob } from "../src/stores/jobs";
 
 let db: Database | undefined;
 afterEach(() => { db?.close(); db = undefined; });
@@ -113,5 +113,19 @@ describe("scheduling tools", () => {
     expect(listScheduledJobs(database, "researcher").scheduled.find((entry) => entry.id === job.id)).toBeUndefined();
     expect(() => cancelScheduledJob(database, job.id, "researcher")).toThrow(/no scheduled job/);
     expect(cancelScheduledJob(database, job.id, "ea").state).toBe("cancelled");
+  });
+
+  test("a bot cannot cancel a wake or a delegated task's job: they are counters and records, not its reminders", () => {
+    db = openDatabase(":memory:");
+    const database = db;
+    const wake = enqueueJob(database, { kind: "turn", payload: { agentID: "ea", threadID: "thr_a", wakeKey: "wake:thr_a:trn_a", wakeCounted: true, results: [] } });
+    const task = enqueueJob(database, { kind: "turn", payload: { agentID: "ea", text: "Count the pallets.", delegationTaskID: "tsk_a" } });
+    for (const row of [wake, task]) {
+      expect(() => cancelScheduledJob(database, row.id, "ea"), `${row.id} was cancelled`).toThrow(/cannot cancel|not one of your/);
+      expect(getJob(database, row.id), `${row.id} was deleted`).not.toBeNull();
+    }
+    // A reminder the bot scheduled itself is still its own to cancel.
+    const reminder = scheduleJob(database, { text: "Sweep the inbox.", everyMinutes: 30 }, "ea");
+    expect(cancelScheduledJob(database, reminder.id, "ea").state).toBe("cancelled");
   });
 });

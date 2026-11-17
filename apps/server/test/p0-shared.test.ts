@@ -8,12 +8,14 @@ import { s3Commands } from "../src/cli/s3-commands";
 import { openDatabase } from "../src/db";
 import { HealthTracker } from "../src/models/health";
 import type { ProviderConfig } from "../src/models/providers";
-import { Router } from "../src/models/router";
+import { Router, setRouteGate } from "../src/models/router";
+import { configureBudget } from "../src/policy/budget";
 import { recordModelUsage, setUsageRecorder, type ModelUsageEvent } from "../src/models/usage-hook";
 import { audit, setAuditSink, type AuditEvent, type AuditSink } from "../src/policy/audit-sink";
 import type { ToolMeta } from "../src/policy/tool-meta";
-import { startupS2 } from "../src/startup/s2";
-import { startupS2Audit } from "../src/startup/s2-audit";
+import { resetS2Startup, startupS2 } from "../src/startup/s2";
+import { startupS2Audit, stopPauseWatcher } from "../src/startup/s2-audit";
+import { unbindPauseStore } from "../src/policy/pause";
 import { startupS2Ledger } from "../src/startup/s2-ledger";
 import { startupS3Vault } from "../src/startup/s3-vault";
 import { startupS3 } from "../src/startup/s3";
@@ -22,13 +24,19 @@ import { registerSecret, redact } from "../src/util/redact";
 
 const noopSink: AuditSink = { record() {} };
 afterEach(() => {
+  // The real startup hooks install a watcher, a gate, a recorder and a spend provider: none may leak into other tests.
+  resetS2Startup();
+  stopPauseWatcher();
+  unbindPauseStore();
   setAuditSink(noopSink);
   setUsageRecorder(() => {});
+  setRouteGate(null);
+  configureBudget(null);
 });
 
 describe("P0 extra CLI commands", () => {
-  test("both sprint tables ship empty", () => {
-    expect(s2Commands).toEqual({ commands: {}, help: [] });
+  test("sprint 3's table ships empty; sprint 2's lists the commands its tasks added", () => {
+    expect(Object.keys(s2Commands.commands)).toEqual(expect.arrayContaining(["audit", "pause", "resume"]));
     expect(s3Commands).toEqual({ commands: {}, help: [] });
   });
 
@@ -43,7 +51,7 @@ describe("P0 extra CLI commands", () => {
     const a: CommandTable = { commands: {}, help: ["  one   first"] };
     const b: CommandTable = { commands: {}, help: ["  two   second", "  three third"] };
     expect(extraHelpLines([a, b])).toEqual(["  one   first", "  two   second", "  three third"]);
-    expect(extraHelpLines()).toEqual([]);
+    expect(extraHelpLines().some((line) => line.includes("audit verify"))).toBe(true);
   });
 
   test("mergeCommandTables spreads commands, concatenates help, and throws on a duplicate name", () => {

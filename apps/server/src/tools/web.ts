@@ -44,6 +44,7 @@ async function searchFirecrawl(query: string, count: number): Promise<WebSearchR
       method: "POST",
       signal: AbortSignal.timeout(15_000),
       headers,
+      redirect: "error",
       body: JSON.stringify({ query, limit: count }),
     });
     if (!response.ok) return null;
@@ -150,9 +151,11 @@ export interface WebFetchArgs {
 
 /** Fetch page content. Uses Firecrawl (cloud or self-hosted) for JS-rendered pages, else fetchPage. */
 export async function webFetch(args: WebFetchArgs, allowedHost?: (url: URL) => boolean): Promise<{ title: string | null; summary: string | null; url: string }> {
-  // Firecrawl follows redirects on its side, out of reach of allowedHost, so a
-  // host-restricted (routine) fetch always goes through fetchPage.
-  const base = allowedHost ? null : firecrawlBase();
+  // Firecrawl follows redirects on its side, out of reach of allowedHost and of the per-hop address check, so a
+  // host-restricted (routine) fetch always goes through fetchPage. So does every fetch when Firecrawl is
+  // self-hosted: it runs on the owner's own network, where a redirect to a private address would reach things
+  // fetchPage refuses. Only the cloud service, which cannot see that network, is given the URL.
+  const base = allowedHost || fcUrl() ? null : firecrawlBase();
   const maxChars = Math.min(args.maxChars ?? DEFAULT_FETCH_CHARS, MAX_FETCH_CHARS);
   // Same checks as fetchPage, before the URL leaves for a third party.
   const target = new URL(args.url);
@@ -168,6 +171,7 @@ export async function webFetch(args: WebFetchArgs, allowedHost?: (url: URL) => b
         method: "POST",
         signal: AbortSignal.timeout(20_000),
         headers,
+        redirect: "error",
         body: JSON.stringify({ url: args.url, formats: ["markdown"] }),
       });
       if (response.ok) {

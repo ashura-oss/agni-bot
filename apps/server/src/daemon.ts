@@ -16,6 +16,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Config } from "./config";
 import { type HealthReport, type Liveness } from "./ws/server";
+import { childEnv } from "./util/child-env";
 import { formatDuration } from "./util/time";
 import { log } from "./log";
 import { restrictToOwnerOnWindows } from "./util/windows-acl";
@@ -133,6 +134,8 @@ export async function fetchHealth(
     const token = localDeviceToken(env);
     const response = await fetch(healthURL(config), {
       signal: AbortSignal.timeout(timeoutMs),
+      // The device token goes with this request: a redirect is an error, never followed.
+      redirect: "error",
       ...(token ? { headers: { authorization: `Bearer ${token}` } } : {}),
     });
     if (!response.ok) return null;
@@ -210,7 +213,8 @@ export async function startDaemon(config: Config, options: StartOptions = {}): P
       return Bun.spawn({
         cmd: [process.execPath, entryPath, "serve"],
         cwd: process.cwd(),
-        env: process.env,
+        // Only the names the server needs (util/child-env.ts), not the whole shell's environment.
+        env: childEnv("daemon"),
         stdio: ["ignore", logFd, logFd],
         // Own session: the daemon survives this shell, its signals stay its own.
         detached: true,

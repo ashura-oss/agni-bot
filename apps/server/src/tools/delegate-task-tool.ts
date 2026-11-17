@@ -9,9 +9,9 @@
  */
 import type { Database } from "bun:sqlite";
 import { PEER_INTENTS, PeerIntentSchema, type PeerIntent, type ServerFrameBody } from "@agni/protocol";
-import type { ToolRegistry } from "./registry";
+import type { ToolContext, ToolRegistry } from "./registry";
 import { assertTeammate, canonicalAgentID, resolvePersona } from "../agent/personas";
-import { DEFAULT_VISIBILITY, RESULT_MAX_CHARS, redactStoredForCaller, type Visibility } from "../agent/visibility";
+import { DEFAULT_VISIBILITY, MISSING_AGENT_VISIBILITY, RESULT_MAX_CHARS, redactStoredForCaller, type Visibility } from "../agent/visibility";
 import {
   createDelegationTask,
   setDelegationJob,
@@ -25,9 +25,11 @@ import { enqueueJob } from "../stores/jobs";
 import { readFacts } from "./expand-tool";
 import { checkPeerRequest, fingerprintPeerRequest } from "../stores/peer-chains";
 import { appendChannelMessage } from "../stores/channels";
-import { MAX_DEPTH } from "../agent/guardrails";
+import { MAX_DEPTH, canStartDelegation, maxConcurrentDelegations } from "../agent/guardrails";
 import { listTaskNotes } from "../stores/task-notes";
 import { getArtifact } from "../stores/artifacts";
+import { carryTaint, packCarried, saveTaskTaint, storedCarried, taskTaint } from "../policy/carry";
+import { denialScope } from "../policy/denials";
 
 const objectSchema = (properties: Record<string, unknown>, required: string[]): Record<string, unknown> => ({
   type: "object", properties, required, additionalProperties: false,
@@ -47,6 +49,31 @@ export interface DelegateTaskToolDeps {
   /** The parent thread, so the answer to a question can go back to it. */
   parentThreadID?: string;
   chainID?: string;
+}
+
+/** The bot's name for a card or a note: its display name, or its id. */
+function botName(db: Database, agentID: string | null | undefined): string {
+  if (!agentID) return "another bot";
+  return db.query<{ display_name: string | null }, [string]>("SELECT display_name FROM agents WHERE id = ?").get(agentID)?.display_name?.trim() || agentID;
+}
+
+/**
+ * The run that reads a finished task's result takes on what the task's run read from outside text,
+ * unless the result is withheld from it (a private bot hands back a receipt, not words).
+ */
+function carryFromTask(ctx: ToolContext, db: Database, task: TaskRow, _view: Record<string, unknown>): void {
+  // Whatever of the task comes back (a result, notes, a question, a partial answer, or only a receipt) carries what
+  // its run had read so far; a task with no record reads as having read outside text.
+  carryTaint(ctx.run, botName(db, task.owner_agent_id), taskTaint(db, task.id), "delegate_task");
+}
+
+/** Delegations queued or running under one root run. */
+function activeDelegations(db: Database, rootKey: string): number {
+  return db.query<{ n: number }, [string]>(
+    `SELECT COUNT(*) AS n FROM jobs
+     WHERE kind = 'turn' AND state IN ('queued', 'running')
+       AND json_extract(payload, '$.delegationTaskID') IS NOT NULL AND json_extract(payload, '$.rootKey') = ?`,
+  ).get(rootKey)?.n ?? 0;
 }
 
 export function registerDelegateTaskTool(registry: ToolRegistry, deps: DelegateTaskToolDeps): void {
@@ -129,8 +156,10 @@ export function registerDelegateTaskTool(registry: ToolRegistry, deps: DelegateT
         const repeated = check === "retry";
         if (args.mode === "wait") {
           const waited = await waitForDelegation(deps.db, existing.id, waitBudget(args.timeoutMs), ctx.signal);
+          const view = taskView(waited.task, deps);
+          carryFromTask(ctx, deps.db, waited.task, view);
           return {
-            ...taskView(waited.task, deps),
+            ...view,
             jobID: existing.job_id,
             duplicate: true,
             repeated,
@@ -148,10 +177,19 @@ export function registerDelegateTaskTool(registry: ToolRegistry, deps: DelegateT
         };
       }
       if (check === "retry") return { repeated: true, note: "That exact request was already sent in this chain. Say something new, or stop." };
-      brief.chainID = chainID;
+      // At most a few at once under one root: a bot that fans out without limit runs up the bill before anyone can stop it.
+      const rootKey = ctx.run ? denialScope(ctx.run) : (deps.parentTurnID ?? chainID);
+      const running = activeDelegations(deps.db, rootKey);
+      const mostAtOnce = maxConcurrentDelegations(deps.db);
+      if (!canStartDelegation(running, mostAtOnce)) {
+        throw new Error(`not done: ${running} delegations are already running for this task, and ${mostAtOnce} is the most at once. Wait for one to finish with delegate_wait, or do part of the work yourself.`);
+      }
+      // What this run hands the task: the child's job and the task's brief hold the one value. The brief keeps it for the wake and a resumed run,
+      // which read it back from here and never from a root job's row (so they report back inside the same request, as the same chain, cut to the same tools).
+      const carried = packCarried(ctx.run, "delegate", { chainID });
       const task = createDelegationTask(deps.db, {
         ownerAgentID: toAgentID,
-        brief,
+        brief: { ...brief, ...storedCarried(carried) },
         origin: "ea_delegated",
         parentTurnID: deps.parentTurnID ?? null,
         parentThreadID: deps.parentThreadID ?? null,
@@ -164,7 +202,6 @@ export function registerDelegateTaskTool(registry: ToolRegistry, deps: DelegateT
       const job = enqueueJob(deps.db, {
         kind: "turn",
         payload: {
-          chainID: brief.chainID,
           // A brief is a peer's note, not the owner speaking: logged as system,
           // so it is not replayed to the model as a bare user message later.
           inputRole: "system",
@@ -178,9 +215,14 @@ export function registerDelegateTaskTool(registry: ToolRegistry, deps: DelegateT
           notify: true,
           delegationTaskID: task.id,
           depth: depth + 1,
+          // What this run has read, the root and clock the child shares, the tools it is cut down to, and whose chain it is (S2-06).
+          ...storedCarried(carried),
+          rootKey,
         },
       });
       setDelegationJob(deps.db, task.id, job.id);
+      // The task starts with what its sender had read; its own run adds to it as it goes.
+      saveTaskTaint(deps.db, task.id, carried.taint);
 
       deps.emit({
         type: "status.update",
@@ -192,8 +234,10 @@ export function registerDelegateTaskTool(registry: ToolRegistry, deps: DelegateT
 
       if (args.mode === "wait") {
         const waited = await waitForDelegation(deps.db, task.id, waitBudget(args.timeoutMs), ctx.signal);
+        const view = taskView(waited.task, deps);
+        carryFromTask(ctx, deps.db, waited.task, view);
         return {
-          ...taskView(waited.task, deps),
+          ...view,
           jobID: job.id,
           waitTimedOut: waited.timedOut,
           message: waited.timedOut
@@ -222,7 +266,7 @@ function taskView(task: TaskRow, deps: DelegateTaskToolDeps): Record<string, unk
   // The result of a private agent is a receipt, not text — the same rule the
   // synchronous handoff applies, so the async path cannot be the weak one.
   const owner = task.owner_agent_id ?? "";
-  const visibility = owner ? resolvePersona(deps.db, owner)?.visibility ?? DEFAULT_VISIBILITY : DEFAULT_VISIBILITY;
+  const visibility = owner ? resolvePersona(deps.db, owner)?.visibility ?? MISSING_AGENT_VISIBILITY : DEFAULT_VISIBILITY;
   // The row keeps a short summary; the artifact holds what the specialist
   // actually wrote (DEL-004). A finished task is shown from the artifact so a
   // long answer is not cut to the row's summary. It is still redacted for
@@ -234,7 +278,8 @@ function taskView(task: TaskRow, deps: DelegateTaskToolDeps): Record<string, unk
   // Only the bot that delegated the task (and the one that did the work) reads its full result. Any other
   // bot that comes by a task ID gets the short summary the visibility rule allows, nothing more.
   const asker = canonicalAgentID(deps.currentAgentID);
-  const involved = !task.parent_agent_id || asker === canonicalAgentID(task.parent_agent_id) || (owner !== "" && asker === canonicalAgentID(owner));
+  // A task with no recorded delegator is open to nobody but the bot that did the work: unknown means most restrictive.
+  const involved = (Boolean(task.parent_agent_id) && asker === canonicalAgentID(task.parent_agent_id as string)) || (owner !== "" && asker === canonicalAgentID(owner));
   const shownVisibility: Visibility = involved || visibility === "private" ? visibility : "summary";
   const redacted = involved
     ? redactStoredForCaller(artifact?.content ?? task.result, owner, deps.currentAgentID, shownVisibility, RESULT_MAX_CHARS, true)
@@ -338,11 +383,13 @@ function registerTaskStatusTool(registry: ToolRegistry, deps: DelegateTaskToolDe
     kind: "static",
     timeoutMs: 5_000,
     schema: objectSchema({ taskID: stringProp }, ["taskID"]),
-    handler: async (args: Record<string, unknown>) => {
+    handler: async (args: Record<string, unknown>, ctx) => {
       const taskID = String(args.taskID ?? "").trim();
       const task = getTask(deps.db, taskID);
       if (!task) throw new Error(`no task ${taskID}`);
-      return taskView(task, deps);
+      const view = taskView(task, deps);
+      carryFromTask(ctx, deps.db, task, view);
+      return view;
     },
   });
 }
@@ -364,7 +411,9 @@ function registerDelegateWaitTool(registry: ToolRegistry, deps: DelegateTaskTool
     handler: async (args: Record<string, unknown>, ctx) => {
       const taskID = String(args.taskID ?? "").trim();
       const waited = await waitForDelegation(deps.db, taskID, waitBudget(args.timeoutMs), ctx.signal);
-      return { ...taskView(waited.task, deps), waitTimedOut: waited.timedOut };
+      const view = taskView(waited.task, deps);
+      carryFromTask(ctx, deps.db, waited.task, view);
+      return { ...view, waitTimedOut: waited.timedOut };
     },
   });
 }

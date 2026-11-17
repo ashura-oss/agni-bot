@@ -25,31 +25,43 @@ export const STOPPED_REQUEST_NOTE =
 export const INTERRUPTED_REQUEST_NOTE =
   `[My previous request was interrupted by a restart and was not completed. Some of its steps may already have run. That request is closed: I will not resume it, re-run its tool calls, or ask for its approvals again unless the owner asks for it again in a new message. ${CHECK_STATE}]`;
 
+export const PAUSED_REQUEST_NOTE =
+  `[The owner paused all bots, so my previous request was stopped before it finished. Some of its steps may already have run. That request is closed: I will not resume it, retry its actions, or ask for its approvals again unless the owner asks for it again in a new message after the bots are resumed. ${CHECK_STATE}]`;
+
+export const AGENT_OFF_REQUEST_NOTE =
+  `[The owner turned me off, so my previous request was stopped before it finished. Some of its steps may already have run. That request is closed: I will not resume it, retry its actions, or ask for its approvals again unless the owner asks for it again in a new message after turning me back on. ${CHECK_STATE}]`;
+
 export const REVOKED_REQUEST_NOTE =
   `[My previous request came from a device that has since been revoked. Some of its steps may already have run. That request is closed: I will not resume it, retry its actions, or ask for its approvals again. ${CHECK_STATE}]`;
 
 /**
- * Notes already stored under earlier wordings stay recognised, so a thread that
- * holds one still shows it to the model and still keeps it out of the summariser's
- * reach of untrusted system rows.
+ * True for a stored row that is a closure note: one `closeRequest` wrote. It marks the row, and the
+ * mark cannot come from model text. The words alone never make a row a closure note: a note of the
+ * fixed wording with no record (only the 2026-11-16 development builds wrote those) is plain system
+ * text, and so is a scheduled job's instruction that happens to read like one.
  */
-const EARLIER_WORDINGS = [
-  "[The owner pressed Stop on my previous request, so I did not finish it. That request is closed: I will not resume it, retry its actions, or ask for its approvals again unless the owner asks for it again in a new message.]",
-  "[My previous request was interrupted by a restart and was not completed. That request is closed: I will not resume it, re-run its tool calls, or ask for its approvals again unless the owner asks for it again in a new message.]",
-  "[My previous request came from a device that has since been revoked. That request is closed: I will not resume it, retry its actions, or ask for its approvals again.]",
-];
-
-/** Notes in their fixed wording, with no record: written before rows carried a kind, so they are recognised by their text. */
-const LEGACY_NOTES: ReadonlySet<string> = new Set([STOPPED_REQUEST_NOTE, INTERRUPTED_REQUEST_NOTE, REVOKED_REQUEST_NOTE, ...EARLIER_WORDINGS]);
+export function isClosureNote(role: string, _text: string, kind?: string | null): boolean {
+  return role === "system" && kind === "closure";
+}
 
 /**
- * True for a stored row that is a closure note: one `closeRequest` wrote (it marks the row, and the mark
- * cannot come from model text), or one of the fixed notes from before the mark existed. A system row whose
- * text only looks like a note with a record, such as a scheduled job's instruction, is not one.
+ * Does this text read like a closure note or its record line? A bot writes jobs, routines and prompts
+ * that are stored and shown to a model later as the server's own words; none of them may say what only
+ * the server says about a request that was closed. Whitespace and case are ignored, so spacing cannot hide it.
  */
-export function isClosureNote(role: string, text: string, kind?: string | null): boolean {
-  return role === "system" && (kind === "closure" || LEGACY_NOTES.has(text));
+export function closureWording(text: string): boolean {
+  const flat = text.replace(/\s+/g, " ").toLowerCase();
+  return CLOSURE_MARKERS.some((marker) => marker.test(flat));
 }
+const CLOSURE_MARKERS: readonly RegExp[] = [
+  /that request is closed\b/,
+  /the owner pressed stop on my previous request/,
+  /my previous request (?:was interrupted by a restart|came from a device that has since been revoked|was stopped)/,
+  /\[record from the tool log of that request/,
+];
+
+/** What a refusal says when a bot's text reads like a closure note. */
+export const CLOSURE_WORDING_REFUSAL = "not done: that text reads like a server notice about a stopped request, which a bot may not write. Say it in your own words.";
 
 /**
  * Error codes the loop stores on a tool call. A tool's own failure message is stored as its text, so one that
@@ -57,7 +69,7 @@ export function isClosureNote(role: string, text: string, kind?: string | null):
  */
 export const ABORTED_MID_CALL = "aborted_mid_call";
 const LOOP_ERROR_CODES: ReadonlySet<string> = new Set([
-  "approval_rejected", "approval_expired", "tool_not_allowed", "domain_not_allowed", "tool_not_loaded",
+  "approval_rejected", "approval_expired", "tool_not_allowed", "domain_not_allowed", "tool_not_loaded", "cannot_show",
   "cancelled", "interrupted_before_result", ABORTED_MID_CALL, "tool timed out or was cancelled",
 ]);
 export function toolErrorCode(message: string): string {
@@ -106,7 +118,7 @@ function bucketOf(row: RecordedCall): { bucket: Bucket; outcome: string } {
       ? { bucket: "denied", outcome: "denied" }
       : { bucket: "notRun", outcome: "not run: stopped while waiting for approval" };
   }
-  if (row.error !== null && ["approval_expired", "tool_not_allowed", "domain_not_allowed", "tool_not_loaded", "cancelled"].includes(row.error)) {
+  if (row.error !== null && ["approval_expired", "tool_not_allowed", "domain_not_allowed", "tool_not_loaded", "cannot_show", "cancelled"].includes(row.error)) {
     return { bucket: "notRun", outcome: "not run: refused or not approved" };
   }
   if (row.result === null) {
@@ -156,8 +168,16 @@ function recordOf(db: Database, turnID: string): string {
   return `[Record from the tool log of that request (not from memory): ${parts.join(". ")}${more > 0 ? ` (and ${more} more)` : ""}. I will never say that anything listed as done did not happen, I will not repeat it, and I check anything listed as unknown before I act on it.]`;
 }
 
-export function closeRequest(db: Database, params: { threadID: string; turnID?: string; reason: "stopped" | "interrupted" | "revoked" }): void {
-  const base = params.reason === "stopped" ? STOPPED_REQUEST_NOTE : params.reason === "revoked" ? REVOKED_REQUEST_NOTE : INTERRUPTED_REQUEST_NOTE;
+const CLOSE_NOTES = {
+  stopped: STOPPED_REQUEST_NOTE,
+  interrupted: INTERRUPTED_REQUEST_NOTE,
+  revoked: REVOKED_REQUEST_NOTE,
+  paused: PAUSED_REQUEST_NOTE,
+  agent_off: AGENT_OFF_REQUEST_NOTE,
+} as const;
+
+export function closeRequest(db: Database, params: { threadID: string; turnID?: string; reason: keyof typeof CLOSE_NOTES }): void {
+  const base = CLOSE_NOTES[params.reason];
   appendMessage(db, {
     threadID: params.threadID,
     ...(params.turnID ? { turnID: params.turnID } : {}),

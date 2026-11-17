@@ -146,6 +146,11 @@ export function listChannelMembers(db: Database, channelID: string): ChannelMemb
 
 // --- messages ---------------------------------------------------------------
 
+/** Name the turn a message started. The owner's message is stored before its turn exists, so the turn id arrives here. */
+export function setChannelMessageTurn(db: Database, messageID: string, turnID: string): void {
+  db.run("UPDATE channel_messages SET turn_id = ? WHERE id = ? AND turn_id IS NULL", [turnID, messageID]);
+}
+
 export function appendChannelMessage(
   db: Database,
   input: {

@@ -26,6 +26,7 @@ import { fitToolResult } from "../src/agent/task-loop";
 import { DEFAULT_AGENT_TOOLS, PERSONAS, getPersona, personaInfo, registerPersona, resolvePersona, updatePersona, type Persona } from "../src/agent/personas";
 import { RESULT_MAX_CHARS, SUMMARY_MAX_CHARS, redactForCaller, redactResultForCaller } from "../src/agent/visibility";
 import { registerExpandTool } from "../src/tools/expand-tool";
+import { fullCapabilityRun } from "./policy-fixture";
 import { createGroupChannel } from "../src/stores/channels";
 import { createThread, appendMessage } from "../src/stores/threads";
 import { ensureConversation, openSession } from "../src/stores/conversations";
@@ -334,6 +335,8 @@ describe("S1-19: handoff", () => {
         }
       },
       signal: new AbortController().signal, threadID: parent.id, guardrail: rootGuardrail("ea"),
+      // The coder may call what the assistant that handed off to it could.
+      run: fullCapabilityRun(db!),
     }, { toAgentID: "coder", task: "Save the note.", emit: () => undefined, signal: new AbortController().signal });
     expect(seen.some((frame) => frame.type === "approval.request")).toBe(true);
     expect(result.text).toBe("The owner said no; I stopped.");

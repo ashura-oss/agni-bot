@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { PeerIntentSchema, type PeerIntent, type TaskInfo } from "@agni/protocol";
 import { newID, nowISO } from "../util/ids";
+import { readCarried, type Carried } from "../policy/carry";
 
 export type TaskStatus = "open" | "done" | "snoozed";
 export type TaskPriority = "low" | "normal" | "high" | "urgent";
@@ -24,9 +25,14 @@ export interface TaskRow {
 export interface TaskListRow { id: string; name: string; position: number; created_at: string; updated_at: string }
 export interface TaskActivityRow { id: string; task_id: string; actor: string; action: string; detail: string|null; created_at: string }
 
-export interface DelegationBrief {
+/**
+ * What a delegation is, and with it (flat, under the same names) the `Carried` value of the run that made it (`policy/carry.ts`): the
+ * root it belongs to (so a refusal earlier in the chain still holds in the child, a resumed run and the wake), what that run had read,
+ * its tools, and whether the chain is the owner's own. The wake and a resumed run read it back with `briefCarried`; an absent field
+ * reads as the worst. The time limit's clock is stored too, but only the child takes it: a resumed run and a wake start their own.
+ */
+export interface DelegationBrief extends Partial<Carried> {
   goal: string;
-  chainID?: string;
   /**
    * What this delegation is for. Phase 1 stores and reports it; the value is
    * not yet used to route or gate the work.
@@ -380,10 +386,13 @@ function briefIntent(brief: string | null): PeerIntent {
   return "request";
 }
 
-/** The chain a delegation was started in; absent for briefs written before chains. */
-export function briefChainID(raw: string | null): string | undefined {
-  if (!raw) return undefined;
-  try { const value = JSON.parse(raw) as { chainID?: unknown }; return typeof value.chainID === "string" ? value.chainID : undefined; } catch { return undefined; }
+/**
+ * What the run that made a delegation carried to it: its root, what it had read, its tools, whether the chain is the owner's own. A
+ * brief that is missing, cannot be read, or says nothing reads as the worst (`readCarried`).
+ */
+export function briefCarried(raw: string | null): Carried {
+  if (!raw) return readCarried(undefined, { brief: true });
+  try { return readCarried(JSON.parse(raw), { brief: true }); } catch { return readCarried(undefined, { brief: true }); }
 }
 
 function parseAttachmentIDs(value: string): string[] {

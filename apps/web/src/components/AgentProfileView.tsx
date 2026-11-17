@@ -12,6 +12,7 @@ import { useEffect, useState } from "react";
 import { Check, Link2, X } from "lucide-react";
 import { useAppModel, useAppSnapshot } from "../state/use-app-model";
 import { SidebarAgentBadge } from "./bits";
+import { BotPowerSwitch } from "./PolicyControls";
 import { checkAgentName, writtenRole } from "../state/display";
 
 type Tab = "details" | "activity";
@@ -86,6 +87,8 @@ export function AgentProfileView() {
           <X size={15} />
         </button>
       </div>
+
+      <BotPowerSwitch agent={agent} />
 
       <div className="profile-identity">
         <div className="profile-avatar">

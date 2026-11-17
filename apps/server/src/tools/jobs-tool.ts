@@ -18,6 +18,13 @@ import {
 } from "../stores/jobs";
 import { canonicalAgentID } from "../agent/personas";
 import { describeSchedule, nextDailyRun, parseDay, parseWallClock } from "../jobs/schedule";
+import { MAX_EVERY_MINUTES, MIN_EVERY_MINUTES, checkSchedule } from "../jobs/schedule-check";
+import { isPeerPrincipal, isTainted } from "../policy/context";
+import { packCarried, storedCarried, type Carried } from "../policy/carry";
+import { denialScope } from "../policy/denials";
+import { audit } from "../policy/audit-sink";
+import { describeRecurring, isRecurringSchedule, standingRuleOrigin, standingScheduleKind } from "../policy/standing-rules";
+import { canSelfSchedule, maxSelfScheduledJobs } from "../agent/guardrails";
 
 export interface JobScheduleArgs {
   /** The prompt the scheduled run executes. */
@@ -61,33 +68,82 @@ export interface ScheduledJobView {
   lastResult: string | null;
 }
 
-const MIN_EVERY_MINUTES = 5;
+/** Why this bot may not keep another job of its own, or null. */
+function capProblem(db: Database, callerAgentID: string): string | null {
+  const mine = selfScheduledCount(db, callerAgentID);
+  const mostToKeep = maxSelfScheduledJobs(db);
+  return canSelfSchedule(mine, mostToKeep)
+    ? null
+    : `you already have ${mine} scheduled jobs and ${mostToKeep} is the most a bot may keep. Cancel one with job_cancel before scheduling another.`;
+}
 
-export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: string): JobScheduleResult {
-  const requested = args.agentID?.trim();
-  if (requested && canonicalAgentID(requested) !== canonicalAgentID(callerAgentID)) {
-    throw new Error("an agent may only schedule jobs for itself");
-  }
+/** Jobs this bot put on its own clock that are still queued or running. Jobs the owner or a routine made are not counted. */
+function selfScheduledCount(db: Database, callerAgentID: string): number {
+  return listJobs(db, { limit: 1_000 }).filter((row) => {
+    if (row.kind !== "turn") return false;
+    const payload = parsePayload(row.payload);
+    return payload.scheduledBy === "bot" && canonicalAgentID(String(payload.agentID ?? "ea")) === canonicalAgentID(callerAgentID);
+  }).length;
+}
+
+/**
+ * Why this call may not schedule work, or null when it may. A run that read outside text may not
+ * (what a page asks for must not become a standing job); a bot's brief from another bot and a
+ * routine's saved state may not either. A wake or a scheduled job that read nothing outside may,
+ * as the owner's own turn may.
+ */
+function schedulingRefusal(ctx: ToolContext): string | null {
+  if (!ctx.run) return ctx.peerInput ? "not done: this turn started from another agent's message" : null;
+  // A run that cannot say who started it is not the owner's (fail closed).
+  if (typeof ctx.run.principal?.kind !== "string") return "not done: I cannot tell who started this turn, so it may not schedule work. Tell the owner what you wanted to schedule and ask them to confirm it.";
+  if (isPeerPrincipal(ctx.run)) return "not done: this turn started from another agent's message";
+  if (isTainted(ctx.run)) return "not done: this run read outside content, so it may not schedule work. Tell the owner what you wanted to schedule and ask them to confirm it.";
+  return null;
+}
+
+/** What a job a bot schedules keeps of the run that scheduled it. */
+export interface ScheduledFrom {
+  /**
+   * What the scheduling run hands the job (`packCarried(run, "schedule-once" | "schedule-recurring")`, `policy/carry.ts`): what it had read, the tools
+   * it was cut down to, the refusal scope and request it belongs to, and that a bot made the link. Every fire starts with it. Absent: a link made by
+   * something with no record of itself, which is the worst on every count.
+   */
+  carried?: Carried;
+  /**
+   * The request that made a repeating job, for the audit log: the scheduling run's refusal scope (the chat turn, or the job a chain
+   * began in). Set by the server from the run, never by a tool argument.
+   */
+  createdByRequest?: string;
+  /** For the audit row of a repeating job: the bot's turn, and how the job came to be allowed. */
+  created?: { turnID?: string; jobID?: string | null; approval: "own_turn" | "owner_card" };
+}
+
+export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: string, from: ScheduledFrom = {}): JobScheduleResult {
+  const { createdByRequest, created } = from;
+  // The rules the engine and the card use before they ask the owner (jobs/schedule-check.ts): the same ones, so none can drift.
+  const problem = checkSchedule({ ...args, agent_id: args.agentID }, callerAgentID);
+  if (problem) throw new Error(problem);
   const text = args.text.trim();
-  if (!text) throw new Error("a scheduled job needs something to do");
-  const choices = [args.at, args.dailyAt, args.everyMinutes].filter((value) => value !== undefined && value !== null);
-  if (choices.length === 0) throw new Error("say when it should run: `at` (one-off), `dailyAt` (a clock time), or `everyMinutes`");
-  if (choices.length > 1) throw new Error("pick one: `at`, `dailyAt` or `everyMinutes`");
+  const full = capProblem(db, callerAgentID);
+  if (full) throw new Error(full);
 
   const payload: Record<string, unknown> = {
     text,
     agentID: callerAgentID,
     // C4: scheduled text is model-authored, so it runs as non-owner input.
     inputRole: "system",
+    // Counted against the bot's own allowance (S2-09).
+    scheduledBy: "bot",
     notify: args.notify !== false,
+    // What the scheduling run hands every fire: what it read (each fire starts as tainted as that run was), the tools it was cut down to,
+    // the owner's refusals in it (they hold in every run of the job, for good), and that a bot made the link. Never looked up from a root job later.
+    ...storedCarried(from.carried ?? packCarried(undefined, args.at ? "schedule-once" : "schedule-recurring")),
   };
 
   let runAt: string;
   let recurrence: string;
   if (args.at) {
-    const when = new Date(args.at);
-    if (Number.isNaN(when.getTime())) throw new Error(`"${args.at}" is not a date`);
-    runAt = when.toISOString();
+    runAt = new Date(args.at).toISOString();
     recurrence = "once";
   } else if (args.dailyAt) {
     const clock = parseWallClock(args.dailyAt);
@@ -97,18 +153,38 @@ export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: 
     recurrence = describeSchedule(at, days);
     payload.dailyAt = at;
     if (days && days.length > 0) payload.days = days;
+    if (createdByRequest) payload.createdByRequest = createdByRequest;
   } else {
     const minutes = Number(args.everyMinutes);
-    if (!Number.isFinite(minutes) || minutes < MIN_EVERY_MINUTES || minutes > 10_080) {
-      throw new Error(`everyMinutes must be between ${MIN_EVERY_MINUTES} and 10080 (a week)`);
-    }
     const everyMs = Math.round(minutes * 60_000);
     runAt = new Date(Date.now() + everyMs).toISOString();
     recurrence = `every ${minutes} minute${minutes === 1 ? "" : "s"}`;
     payload.everyMs = everyMs;
+    if (createdByRequest) payload.createdByRequest = createdByRequest;
   }
 
   const row = enqueueJob(db, { kind: "turn", payload, runAt });
+  if (!args.at) {
+    // A repeating job leaves its own audit row, and is not kept without it (fail closed).
+    try {
+      audit({
+        kind: "job.recurring.created",
+        actor: callerAgentID,
+        ...(created?.turnID ? { turnID: created.turnID } : {}),
+        ...(created?.jobID ? { jobID: created.jobID } : {}),
+        detail: { jobID: row.id, agent: callerAgentID, schedule: recurrence, nextRun: runAt, createdByRequest: createdByRequest ?? null, approval: created?.approval ?? "direct", what: text.slice(0, 200) },
+      });
+    } catch (error) {
+      const told = new Error(`not done: the audit log could not record the repeating job, so it was not kept (${error instanceof Error ? error.message : String(error)})`);
+      // Whatever goes wrong while taking the job back, the caller is told why it was not kept. A job that cannot be removed is stopped.
+      let removed = false;
+      try { removed = deleteJob(db, row.id); } catch { /* stopped below */ }
+      if (!removed) {
+        try { setJobEnabled(db, row.id, false); } catch { /* the caller is still told */ }
+      }
+      throw told;
+    }
+  }
   return {
     id: row.id,
     nextRun: runAt,
@@ -148,11 +224,19 @@ function ownsJob(row: NonNullable<ReturnType<typeof getJob>>, callerAgentID: str
   return row.kind === "turn" && canonicalAgentID(String(parsePayload(row.payload).agentID ?? "ea")) === canonicalAgentID(callerAgentID);
 }
 
+function isRecordRow(row: NonNullable<ReturnType<typeof getJob>>): boolean {
+  const payload = parsePayload(row.payload);
+  return payload.wakeKey !== undefined || payload.delegationTaskID !== undefined;
+}
+
 export function cancelScheduledJob(db: Database, id: string, callerAgentID: string): { id: string; state: string; note: string } {
   const found = getJob(db, id) ?? getJobByPrefix(db, id);
   // Someone else's job looks the same as a missing one.
   const row = found && ownsJob(found, callerAgentID) ? found : undefined;
   if (!row) throw new Error(`no scheduled job with id "${id}"`);
+  // A wake is the count of its request's wakes, and a delegated task's job is the record of that task: deleting either
+  // would reset a limit or erase what ran. They are not reminders the bot set, so it may not remove them.
+  if (isRecordRow(row)) throw new Error(`job "${row.id}" is not one of your reminders: it is the record of a delegated task or a wake, and job_cancel cannot remove it`);
   if (row.state === "running") {
     setJobEnabled(db, row.id, false);
     return { id: row.id, state: "paused", note: "it is running right now; it will not run again" };
@@ -182,6 +266,31 @@ function callerOf(ctx: ToolContext): string {
   return id;
 }
 
+/** Why these `job_schedule` arguments can never be made into a job by this bot, or null: the checks `scheduleJob` makes, said before the call is judged. */
+function scheduleProblem(db: Database, args: Record<string, unknown>, bot: string | undefined): string | null {
+  // A bot at its cap could not keep the job, so it is told before anyone is asked about it.
+  return checkSchedule(args, bot) ?? (bot ? capProblem(db, bot) : null);
+}
+
+/**
+ * The answer to a repeating job nobody may make unasked: the tool's own line of defence behind the policy engine, which puts the
+ * owner a card for the same call. It leaves an audit row too.
+ */
+function refuseStandingJob(ctx: ToolContext, input: Record<string, unknown>, why: string): { error: string } {
+  try {
+    audit({
+      kind: "job.recurring.refused",
+      actor: ctx.chain?.currentAgentID ?? "unknown",
+      turnID: ctx.turnID,
+      ...(ctx.run?.jobID ? { jobID: ctx.run.jobID } : {}),
+      detail: { tool: "job_schedule", cause: "not_approved", schedule: describeRecurring(input), principal: ctx.run?.principal?.kind ?? "unknown" },
+    });
+  } catch {
+    // The refusal stands without its row.
+  }
+  return { error: `not done: work that starts again on its own (a repeating job, or a job that schedules the next one) is a standing rule, and only your owner's own turn may start it without asking. ${why} Tell the owner what you wanted to schedule and ask them to confirm it.` };
+}
+
 /** The scheduling tools, as the task lane sees them. */
 export function createJobTools(db: Database): ToolDefinition<unknown, unknown>[] {
   return [
@@ -203,9 +312,28 @@ export function createJobTools(db: Database): ToolDefinition<unknown, unknown>[]
         notify: { type: "boolean" },
       }, ["text"]),
       timeoutMs: 3_000,
+      // What the schema cannot say: a schedule that could never be made is refused before the owner is asked about a repeating job.
+      validate: (args, bot) => scheduleProblem(db, args, bot),
       handler: async (args, ctx) => {
-        if (ctx.peerInput) return { error: "not done: this turn started from another agent's message" };
         const input = (args ?? {}) as Record<string, unknown>;
+        // The owner said yes to a time that was ahead when the card was raised. If the card waited past it, the job would run at once.
+        if (ctx.ownerApproved === true) {
+          const stale = checkSchedule(input, ctx.chain?.currentAgentID, Date.now());
+          if (stale) return { error: `not done: ${stale} The owner said yes to a time that is no longer ahead, so nothing was made.` };
+        }
+        const recurring = isRecurringSchedule(input);
+        if (recurring) {
+          // A repeating job is a standing rule: only the owner's own clean turn, or the owner's yes to this very call's card
+          // (set by the loop, never by an argument), makes one. A run or an origin that cannot be read is not the owner's.
+          const why = ctx.ownerApproved === true ? null : standingRuleOrigin(ctx.run);
+          if (why !== null) return refuseStandingJob(ctx, input, why);
+        } else {
+          const refusal = schedulingRefusal(ctx);
+          if (refusal) return { error: refusal };
+          // A fire of a job a bot made, and a wake in the chain it started, may not schedule the next one unasked: a chain of one-shot jobs is
+          // a repeating job (policy/standing-rules.ts). The same question the engine asks, so the card and this check cannot disagree.
+          if (ctx.ownerApproved !== true && standingScheduleKind(input, ctx.run) === "next_job") return refuseStandingJob(ctx, input, standingRuleOrigin(ctx.run) ?? "This task was not started by you.");
+        }
         return scheduleJob(db, {
           text: String(input.text ?? ""),
           ...(input.at === undefined ? {} : { at: String(input.at) }),
@@ -214,7 +342,11 @@ export function createJobTools(db: Database): ToolDefinition<unknown, unknown>[]
           ...(input.everyMinutes === undefined ? {} : { everyMinutes: Number(input.everyMinutes) }),
           ...(input.agent_id === undefined ? {} : { agentID: String(input.agent_id) }),
           ...(input.notify === undefined ? {} : { notify: Boolean(input.notify) }),
-        }, callerOf(ctx));
+        }, callerOf(ctx), {
+          carried: packCarried(ctx.run, recurring ? "schedule-recurring" : "schedule-once"),
+          ...(ctx.run && recurring ? { createdByRequest: denialScope(ctx.run) } : {}),
+          created: { turnID: ctx.turnID, jobID: ctx.run?.jobID ?? null, approval: ctx.ownerApproved === true ? "owner_card" : "own_turn" },
+        });
       },
     } as ToolDefinition<unknown, unknown>,
     {

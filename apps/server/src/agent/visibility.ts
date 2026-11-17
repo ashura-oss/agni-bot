@@ -28,6 +28,12 @@ export type Visibility = (typeof VISIBILITIES)[number];
 /** What an agent gets when nothing says otherwise. */
 export const DEFAULT_VISIBILITY: Visibility = "summary";
 
+/**
+ * What a bot that no longer exists gets. A deleted specialist cannot say what it was willing to share,
+ * so what it wrote stays with the owner: a receipt, not a line.
+ */
+export const MISSING_AGENT_VISIBILITY: Visibility = "private";
+
 export function normalizeVisibility(value: string | null | undefined): Visibility {
   return VISIBILITIES.includes(value as Visibility) ? (value as Visibility) : DEFAULT_VISIBILITY;
 }

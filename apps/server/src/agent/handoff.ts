@@ -22,6 +22,8 @@ import type { TaskTurnSettings, TaskTurnRun, TaskTurnResult } from "./task-loop"
 import { runTaskTurn } from "./task-loop";
 import { recentMessages } from "../stores/threads";
 import { activeSession, delegationSession, ensureConversation, type ConversationRow } from "../stores/conversations";
+import { packCarried } from "../policy/carry";
+import type { RunContext, TaintSource } from "../policy/types";
 
 export interface HandoffRequest {
   /** Agent id the work is handed to. */
@@ -56,6 +58,8 @@ export interface HandoffResult {
   stopReason: string;
   /** Depth the child ran at (1 = root, 2 = first delegation). */
   depth: number;
+  /** What the child's run read from outside. The bot that reads the answer carries it. */
+  taint: TaintSource[];
 }
 
 export interface HandoffDeps {
@@ -73,6 +77,12 @@ export interface HandoffDeps {
   guardrail: GuardrailState;
   /** Optional persona override for the child (defaults to the target agent's persona). */
   persona?: ResolvedPersona;
+  /**
+   * The delegating run. The child starts with the outside text it has read and shares its root, so
+   * a "no" from the owner earlier in the chain still holds and a tainted bot cannot launder its
+   * reach through another bot.
+   */
+  run?: RunContext;
 }
 
 /**
@@ -81,7 +91,8 @@ export interface HandoffDeps {
  * parent can report to the user instead of spinning.
  */
 export async function handoff(deps: HandoffDeps, request: HandoffRequest): Promise<HandoffResult> {
-  const persona = deps.persona ?? resolvePersona(deps.db, request.toAgentID) ?? defaultResolvedPersona(deps.db);
+  const named = deps.persona ?? resolvePersona(deps.db, request.toAgentID);
+  const persona = named ?? defaultResolvedPersona(deps.db);
   const child = enterDelegation(deps.guardrail, persona.id, request.context ?? null);
   // The delegated work belongs to the agent that was asked: its block lives in
   // that agent's conversation, so opening that agent's chat in the app shows
@@ -93,7 +104,8 @@ export async function handoff(deps: HandoffDeps, request: HandoffRequest): Promi
   // block that is active now.
   // Only when the caller says the chain began with the owner's own turn, and
   // never from a private bot: its chat stays in its own conversation.
-  const ownChat = request.includeOwnChat && persona.visibility !== "private" ? ownRecentChat(deps.db, conversation) : null;
+  // A target that could not be found runs as the default bot; it is not the bot that was asked for, so it reads no chat.
+  const ownChat = request.includeOwnChat && named && persona.visibility !== "private" ? ownRecentChat(deps.db, conversation) : null;
   const childThread = delegationSession(deps.db, conversation, `${parent} messaged ${persona.name}`);
   const childThreadID = childThread.id;
 
@@ -134,6 +146,8 @@ export async function handoff(deps: HandoffDeps, request: HandoffRequest): Promi
     guardrail: child,
     // Preserve guardrail bookkeeping; peer context itself is carried in text.
     handoffSummary: child.handoffSummary,
+    // What this run hands the child (S2-06): what it had read, its root and clock, the tools the child is cut down to, and whose chain it is.
+    ...(deps.run ? { policy: { ...packCarried(deps.run, "handoff"), jobID: deps.run.jobID } } : {}),
   };
 
   const result = await runTaskTurn(deps.db, deps.router, deps.settings, run);
@@ -143,6 +157,7 @@ export async function handoff(deps: HandoffDeps, request: HandoffRequest): Promi
     text: result.text,
     stopReason: result.stopReason,
     depth: child.depth,
+    taint: result.taint,
   };
 }
 

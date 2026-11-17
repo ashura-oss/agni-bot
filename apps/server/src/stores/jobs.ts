@@ -135,7 +135,7 @@ export type WakeOutcome = "woken" | "running" | "not_found";
  */
 export function wakeJob(db: Database, id: string): WakeOutcome {
   const result = db.run(
-    "UPDATE jobs SET state = 'queued', run_at = ?, attempts = 0, result = NULL, run_once = CASE WHEN enabled = 1 THEN 0 ELSE 1 END, updated_at = ? WHERE id = ? AND state != 'running'",
+    "UPDATE jobs SET state = 'queued', run_at = ?, attempts = 0, run_clock_key = NULL, result = NULL, run_once = CASE WHEN enabled = 1 THEN 0 ELSE 1 END, updated_at = ? WHERE id = ? AND state != 'running'",
     [nowISO(), nowISO(), id],
   );
   if (result.changes > 0) return "woken";
@@ -161,9 +161,10 @@ export function getJob(db: Database, id: string): JobRow | null {
 /** Resolve a full id or unique prefix, like `revoke` does for devices. */
 export function getJobByPrefix(db: Database, prefix: string): JobRow | null {
   if (prefix.length === 0) return null;
+  // The prefix is text, not a pattern: `%` and `_` in it must match only themselves. Compared by length, not LIKE.
   const rows = db
-    .query<JobRow, [string]>(`SELECT ${COLUMNS} FROM jobs WHERE id LIKE ? LIMIT 2`)
-    .all(`${prefix}%`);
+    .query<JobRow, [number, string]>(`SELECT ${COLUMNS} FROM jobs WHERE lower(substr(id, 1, ?)) = lower(?) LIMIT 2`)
+    .all(prefix.length, prefix);
   return rows.length === 1 ? rows[0] ?? null : null;
 }
 

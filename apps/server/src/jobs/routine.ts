@@ -6,7 +6,7 @@ import { executeRoutine } from "../routines/run";
 import { nextRun } from "../routines/cron";
 import { getRoutine } from "../stores/routines";
 import { parseJobPayload, type JobRow } from "../stores/jobs";
-import type { JobRunner } from "./runner";
+import type { JobContext, JobRunner } from "./runner";
 import { seedCheckAppsRoutine } from "../routines/templates";
 import { resolveTimeZone } from "../config";
 
@@ -19,7 +19,7 @@ export interface RoutineJobDeps {
 
 export function registerRoutineJob(runner: JobRunner, deps: RoutineJobDeps): void {
   seedCheckAppsRoutine(deps.db, resolveTimeZone());
-  runner.register("routine", async (job: JobRow) => {
+  runner.register("routine", async (job: JobRow, ctx: JobContext) => {
     const payload = parseJobPayload<{ routineID?: string }>(job);
     if (!payload.routineID) throw new Error("routine job payload has no routineID");
     const routine = getRoutine(deps.db, payload.routineID);
@@ -34,7 +34,9 @@ export function registerRoutineJob(runner: JobRunner, deps: RoutineJobDeps): voi
       }
     }
 
-    await executeRoutine(deps, routine);
+    // Run as the bot the runner resolved and checked against the pause switch, not as a second reading of the routine.
+    if (ctx.agentID === null) throw new Error("routine job has no bot to run as");
+    await executeRoutine(deps, routine, ctx.agentID);
     return { nextRunAt: nextRun(routine.cron, routine.timezone, new Date()).toISOString() };
   }, {
     // M38: after a failed run, skip to the routine's next cron slot (null if the routine is gone).

@@ -24,7 +24,11 @@
 import { execFile } from "node:child_process";
 import { rmSync, writeFileSync, chmodSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { childEnv } from "../util/child-env";
 import { privateTempDir } from "../util/private-temp";
+
+/** Where macOS keeps osascript. Called by this path, never found through PATH. */
+export const OSASCRIPT_PATH = "/usr/bin/osascript";
 
 /** Is this host a Mac? The OS authorization path exists nowhere else. */
 export function isMacOS(): boolean {
@@ -39,12 +43,18 @@ export interface PrivilegedRunResult {
   usedOSAuth: boolean;
 }
 
-/** Shell chaining, pipes, substitution and newlines: one command only in os-mode. */
+/** The longest command os-mode takes. The dialog shows the command, so a longer one could hide its middle. */
+export const OS_COMMAND_MAX = 300;
+
+/**
+ * Anything but one short simple command: chaining (`;` `&` `&&` `||`), pipes, redirection (`<` `>`),
+ * substitution (backticks, `$(`, `${`), newlines, or more than 300 characters. Such a command is refused, not cut.
+ */
 export function isCompoundCommand(command: string): boolean {
-  return /[;|`\n\r]|&&|\$\(/.test(command);
+  return /[;|&<>`\n\r]|\$[({]/.test(command) || command.length > OS_COMMAND_MAX;
 }
 
-const PROMPT_MAX = 300;
+const PROMPT_MAX = OS_COMMAND_MAX;
 
 /** The dialog text: escaped for an AppleScript string, long commands keep head and tail. */
 export function osAuthPrompt(command: string): string {
@@ -103,12 +113,12 @@ export function removePrivilegedScript(dir: string, scriptPath: string): void {
  */
 export function runPrivilegedWithOSAuth(
   command: string,
-  options: { timeoutMs?: number } = {},
+  options: { timeoutMs?: number; /** For tests: stands in for `execFile`. */ exec?: typeof execFile } = {},
 ): Promise<PrivilegedRunResult> {
   if (isCompoundCommand(command)) {
     return Promise.resolve({
       stdout: "",
-      stderr: "os-mode runs one simple command only (no ; && || | backticks, $( ) or newlines). Split it into separate commands.",
+      stderr: `os-mode runs one simple command only (no ; & && || | < > backticks, $( ), \${ } or newlines, and at most ${OS_COMMAND_MAX} characters). Split it into separate commands.`,
       exitCode: 1,
       usedOSAuth: false,
     });
@@ -116,10 +126,12 @@ export function runPrivilegedWithOSAuth(
   const timeoutMs = Math.min(options.timeoutMs ?? 120_000, 120_000);
   const { dir, scriptPath } = writePrivilegedScript(command);
   return new Promise<PrivilegedRunResult>((resolve) => {
-    execFile(
-      "osascript",
+    // By absolute path, so a program placed earlier on PATH cannot stand in for it, and with the clean child
+    // environment, so nothing of the server's own reaches the authorization helper.
+    (options.exec ?? execFile)(
+      OSASCRIPT_PATH,
       ["-e", buildAppleScript(command), scriptPath],
-      { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024 },
+      { timeout: timeoutMs, maxBuffer: 8 * 1024 * 1024, env: childEnv("shell") },
       (error, stdout, stderr) => {
         removePrivilegedScript(dir, scriptPath);
         const text = String(stdout ?? "");

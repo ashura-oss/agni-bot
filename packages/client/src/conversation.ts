@@ -7,6 +7,7 @@
 import type { AttachmentInfo, AgentInfo, Decision, MessageInfo, TaskInfo, Usage } from "@agni/protocol";
 import { parseISO } from "./format.js";
 import { stopReasonExplanation, type IncomingFrame } from "./protocol";
+import { FULL_FAILED, NOT_OPENED_NOTICE, NO_FULL_TEXT, type ApprovalCardFields } from "./approval-card";
 
 export type MessageRole = "user" | "assistant" | "system";
 
@@ -64,7 +65,7 @@ export interface ChatMessage {
   knownBeforeSend?: ReadonlySet<string>;
 }
 
-export interface ApprovalRow {
+export interface ApprovalRow extends ApprovalCardFields {
   id: string;
   action: string;
   preview: string;
@@ -164,6 +165,19 @@ function newMessage(partial: Partial<ChatMessage> & Pick<ChatMessage, "id" | "ro
     isContinuation: false,
     ...partial,
   };
+}
+
+/** The empty reply that stands for a turn which was stopped before it wrote anything: it draws "No reply, stopped". */
+function stoppedReply(question: ChatMessage, turnID: string, reason: string): ChatMessage {
+  return newMessage({
+    id: `stopped_${turnID}`,
+    role: "assistant",
+    createdAt: question.createdAt,
+    turnID,
+    sessionID: question.sessionID,
+    state: { kind: "stopped", reason },
+    stopKnown: true,
+  });
 }
 
 export function isStreaming(message: ChatMessage): boolean {
@@ -336,6 +350,47 @@ export class Conversation {
   resolveApproval(id: string, decision: Decision | string): void {
     const approval = this.approvals.find((candidate) => candidate.id === id);
     if (approval) approval.decision = decision;
+  }
+
+  /** The owner asked for the full text behind a card: Allow stays locked until it arrives. */
+  beginApprovalFull(id: string): void {
+    const approval = this.approvals.find((candidate) => candidate.id === id);
+    if (approval) {
+      approval.full = { ...NO_FULL_TEXT, state: "loading" };
+      approval.notice = null;
+    }
+  }
+
+  /** The full text did not come (the card is gone, the connection dropped): say so; Allow stays locked, Deny works. */
+  failApprovalFull(id: string): void {
+    const approval = this.approvals.find((candidate) => candidate.id === id);
+    if (approval) {
+      approval.full = { ...NO_FULL_TEXT, state: "failed" };
+      approval.notice = FULL_FAILED;
+    }
+  }
+
+  /** Cards whose full text was asked for and has not come. */
+  get loadingApprovalIDs(): string[] {
+    return this.approvals.filter((approval) => approval.full?.state === "loading").map((approval) => approval.id);
+  }
+
+  /**
+   * The daemon refused an Allow that was already sent (the full text was not open on its side): the card
+   * comes back, locked again, with the reason. A card the daemon has closed is not here and is left alone.
+   */
+  reopenApproval(id: string, options: { notice?: string; relock?: boolean } = {}): void {
+    const approval = this.approvals.find((candidate) => candidate.id === id);
+    if (!approval) return;
+    approval.decision = null;
+    // Unless the refusal was about something else (the audit log), the card is locked again: the text must be opened again.
+    if (options.relock !== false) approval.full = { ...NO_FULL_TEXT };
+    approval.notice = options.notice ?? NOT_OPENED_NOTICE;
+  }
+
+  /** The connection was lost while the full text was on its way: it will not come. */
+  failLoadingApprovalFulls(): void {
+    for (const id of this.loadingApprovalIDs) this.failApprovalFull(id);
   }
 
   resolveForm(id: string, answer: string): void {
@@ -515,6 +570,17 @@ export class Conversation {
       }),
     );
 
+    // A turn stopped before it wrote anything leaves no reply row to carry its stop reason: the owner's own row carries it
+    // (history.ts), and the empty stopped reply it stands for is put back after it, so "No reply: stopped" survives a reload.
+    for (let index = rebuilt.length - 1; index >= 0; index -= 1) {
+      const info = incoming[index];
+      const row = rebuilt[index];
+      if (!info || !row || info.role !== "user" || !info.turnID || info.stopReason === undefined) continue;
+      if (info.stopReason === "end" || info.stopReason === "needs_input") continue;
+      if (incoming.some((other) => other.role === "assistant" && other.turnID === info.turnID)) continue;
+      rebuilt.splice(index + 1, 0, stoppedReply(row, info.turnID, info.stopReason));
+    }
+
     const streaming = this.messages.filter((message) => isStreaming(message) && message.text.length > 0);
     const echoes = this.messages.filter(
       (message) => message.isLocalEcho && !(message.state.kind === "failed" && message.state.reason === ""),
@@ -635,6 +701,24 @@ export class Conversation {
       case "approval.rules.list.ok":
       case "approval.rule.revoke.ok":
         return [];
+
+      // Sprint 2 answers (pause state, spend): they are state, not transcript. The app keeps them in
+      // `PolicyState`, so the reducer leaves them alone.
+      case "policy.pause.ok":
+      case "spend.status.ok":
+      case "spend.stopped":
+      case "spend.continue.ok":
+        return [];
+
+      case "approval.full.ok": {
+        // The whole call, for a card that was cut or too long to take in at a glance. Opening it unlocks Allow.
+        const approval = this.approvals.find((candidate) => candidate.id === frame.requestID);
+        if (approval) {
+          approval.full = { state: "open", text: frame.text, cut: frame.cut === true };
+          approval.notice = null;
+        }
+        return [];
+      }
 
       case "approval.closed":
         // The card is no longer actionable (answered here or elsewhere, timed
@@ -937,6 +1021,12 @@ export class Conversation {
           decision: null,
           isLocal: false,
           agentID: this.requestingAgentID(),
+          truncated: frame.truncated === true,
+          expiresAt: frame.expiresAt ?? null,
+          tier: frame.tier ?? null,
+          source: frame.source ?? [],
+          full: { ...NO_FULL_TEXT },
+          notice: null,
         });
         return [
           {

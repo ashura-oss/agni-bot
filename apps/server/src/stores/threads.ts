@@ -141,11 +141,13 @@ export function finishTurn(
     inputTokens?: number;
     outputTokens?: number;
     latencyMs?: number;
+    /** Set when something other than the model's own end stopped the turn and that is worth telling apart from its stop reason (the run's time limit). */
+    endedBy?: "wall_time";
   },
 ): void {
   db.run(
     `UPDATE turns
-     SET state = 'done', stop_reason = ?, provider = ?, model = ?, input_tokens = ?, output_tokens = ?, latency_ms = ?, ended_at = ?
+     SET state = 'done', stop_reason = ?, provider = ?, model = ?, input_tokens = ?, output_tokens = ?, latency_ms = ?, ended_at = ?, ended_by = ?
      WHERE id = ?`,
     [
       params.stopReason,
@@ -155,6 +157,7 @@ export function finishTurn(
       params.outputTokens ?? null,
       params.latencyMs ?? null,
       nowISO(),
+      params.endedBy ?? null,
       params.id,
     ],
   );
