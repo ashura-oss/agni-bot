@@ -14,20 +14,16 @@ export function BudgetStopCard({ stop }: { stop: BudgetStop }) {
   const [asked, setAsked] = useState(false);
   const name = model.requesterName(stop.agentID);
   const { headline, raise } = stopTitle(stop, name);
-  const lines = stop.message.split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
-  const [first, ...rest] = lines.length > 0 ? lines : [headline];
+  // The daemon also writes the whole notice (what was spent, "work done so far is kept") into the thread as a message,
+  // right above this card: the card repeats only its first line, with the buttons.
+  const first = stop.message.split("\n").map((line) => line.trim()).find((line) => line.length > 0) ?? headline;
 
   return (
     <div className="budget-stop-card" role="group" aria-label={headline}>
       <div className="card-heading">
         <OctagonAlert size={12} color="var(--ember)" />
-        <span>{safeLine(first ?? headline, 300)}</span>
+        <span>{safeLine(first, 300)}</span>
       </div>
-      {rest.map((line, index) => (
-        <p key={index} className="budget-stop-line">
-          {safeLine(line, 300)}
-        </p>
-      ))}
       {stop.continued ? (
         <p className="budget-stop-done" role="status">
           {`Done. This run may spend up to ${money(stop.continued.grantedUsd)} more. Send a message to carry on.`}

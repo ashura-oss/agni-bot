@@ -222,6 +222,50 @@
   top: 116px;
 }
 
+/* A narrow chat column (a small window, or the profile or details panel open beside it): the centred
+   agent pill would sit on top of the new controls, so it moves left and the pause button is the icon alone. */
+@media (min-width: 721px) and (max-width: 1119px) {
+  .thread-header {
+    justify-content: flex-start;
+  }
+
+  .thread-header .agent-pill {
+    position: static;
+    transform: none;
+  }
+
+  .thread-header .policy-pause {
+    justify-content: center;
+    width: 34px;
+    padding: 0;
+  }
+
+  .thread-header .policy-pause-text {
+    display: none;
+  }
+}
+
+@media (min-width: 721px) {
+  .thread-header[data-panel] {
+    justify-content: flex-start;
+  }
+
+  .thread-header[data-panel] .agent-pill {
+    position: static;
+    transform: none;
+  }
+
+  .thread-header[data-panel] .policy-pause {
+    justify-content: center;
+    width: 34px;
+    padding: 0;
+  }
+
+  .thread-header[data-panel] .policy-pause-text {
+    display: none;
+  }
+}
+
 /* One bot on or off: the top of its profile --------------------------------- */
 
 .bot-power {
@@ -270,7 +314,7 @@
   background: var(--surface);
 }
 
-.budget-stop-line,
+
 .budget-stop-done {
   margin: 0;
   color: var(--ink-secondary);

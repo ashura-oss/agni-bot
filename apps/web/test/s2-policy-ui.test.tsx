@@ -377,13 +377,14 @@ describe("one bot off", () => {
 });
 
 describe("a run a spend cap stopped", () => {
-  it("shows the daemon's notice in the bot's thread with Raise and Continue once", () => {
+  it("shows the daemon's headline in the bot's thread with Raise and Continue once", () => {
     const { model } = rig();
     frame(model, { type: "agents.update", seq: 1, agents: roster, mentions: roster });
     frame(model, stopped());
     renderWith(model);
-    expect(screen.getByText(/This task cost \$0\.50 of \$0\.50\./)).toBeInTheDocument();
-    expect(screen.getByText(/Work done so far is kept\./)).toBeInTheDocument();
+    // The rest of the notice is the message the daemon writes into the thread; the card repeats only the first line.
+    expect(within(screen.getByRole("group", { name: /Ava stopped/ })).getByText("Ava stopped: this task reached its limit.")).toBeInTheDocument();
+    expect(screen.queryByText(/This task cost/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Raise the task limit" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Continue once" })).toBeInTheDocument();
   });

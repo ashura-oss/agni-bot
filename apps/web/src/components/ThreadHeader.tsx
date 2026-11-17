@@ -25,7 +25,7 @@ export function ThreadHeader({ onToggleSidebar }: { onToggleSidebar?: () => void
   const working = connected && (snapshot.conversation.isStreaming || agentState === "working");
 
   return (
-    <header className="thread-header" onKeyDown={(event) => { if (event.key === "Escape") { setActionsOpen(false); setConnectionOpen(false); } }}>
+    <header className="thread-header" data-panel={snapshot.isAgentProfilePresented || snapshot.isInspectorPresented ? "open" : undefined} onKeyDown={(event) => { if (event.key === "Escape") { setActionsOpen(false); setConnectionOpen(false); } }}>
       <button
         type="button"
         className="icon-btn header-menu"
