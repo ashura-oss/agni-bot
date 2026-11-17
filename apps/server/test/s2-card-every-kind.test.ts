@@ -66,7 +66,8 @@ describe("a shell command is shown whole, or the call is refused", () => {
     expect(frame!.preview).toContain(TAIL);
     expect(frame!.preview).toContain("> echo start;");
     expect(frame!.preview).not.toMatch(NOT_CUT);
-    expect(frame!.truncated).toBe(false);
+    // Nothing is cut, but it is more than a glance (over 2,000 characters): the owner opens the full text before Allow.
+    expect(frame!.truncated, "a card too long to take in at a glance is not marked").toBe(true);
   });
 
   test("the working directory a command runs in is on the card", async () => {
@@ -239,7 +240,9 @@ describe("every card kind: each argument that decides what runs is on the card, 
       const frame = await brokerCard(tool, args);
       for (const name of marked) expect({ tool, name, shown: frame.preview.includes(MARK(name)) }, `the card hides the end of ${name}`).toEqual({ tool, name, shown: true });
       expect(frame.preview).not.toMatch(NOT_CUT);
-      expect(frame.truncated).toBe(false);
+      // Marked when the preview is more than a glance (over 2,000 characters or 40 lines), and only then: nothing here is cut.
+      const glance = frame.preview.length > 2_000 || frame.preview.split("\n").length > 40;
+      expect({ tool, truncated: frame.truncated }).toEqual({ tool, truncated: glance });
     });
   }
 

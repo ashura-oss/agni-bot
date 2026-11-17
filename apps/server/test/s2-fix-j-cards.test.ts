@@ -11,7 +11,10 @@
  */
 import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
 import { previewAction, CARD_BODY_MAX_CHARS } from "../src/agent/card-preview";
-import { ApprovalBroker } from "../src/agent/approval-broker";
+import { ApprovalBroker, FULL_VIEW_MAX_CHARS, FULL_VIEW_MAX_LINES, previewNeedsFullView } from "../src/agent/approval-broker";
+import { loadCardMeta } from "../src/agent/pending-cards";
+import { fullApprovalText } from "../src/ws/approval-full";
+import { createThread, createTurn } from "../src/stores/threads";
 import { checkSchedule } from "../src/jobs/schedule-check";
 import { createJobTools } from "../src/tools/jobs-tool";
 import { createRoutineTools } from "../src/tools/routines-tool";
@@ -187,5 +190,95 @@ describe("one check says whether a job_schedule call could ever be made", () => 
     } finally {
       rig.close();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 9. a card too big to take in at a glance is marked, and approval.full returns the whole preview
+// ---------------------------------------------------------------------------
+
+describe("a preview over 2,000 characters or 40 lines marks the card `truncated`: the owner opens the full text before Allow", () => {
+  test("the limits: 2,000 characters and 40 lines are still a glance; one more is not", () => {
+    expect(previewNeedsFullView("x".repeat(FULL_VIEW_MAX_CHARS))).toBe(false);
+    expect(previewNeedsFullView("x".repeat(FULL_VIEW_MAX_CHARS + 1))).toBe(true);
+    expect(previewNeedsFullView(Array.from({ length: FULL_VIEW_MAX_LINES }, () => "x").join("\n"))).toBe(false);
+    expect(previewNeedsFullView(Array.from({ length: FULL_VIEW_MAX_LINES + 1 }, () => "x").join("\n"))).toBe(true);
+    expect(previewNeedsFullView("")).toBe(false);
+  });
+
+  /** The frame the broker emits, and the meta it saves for a replay, for one call. */
+  async function raised(tool: string, args: Record<string, unknown>): Promise<{ truncated: boolean | undefined; saved: boolean | undefined }> {
+    const rig = policyRig();
+    try {
+      const frames: Array<{ truncated?: boolean; requestID: string }> = [];
+      const broker = new ApprovalBroker({ db: rig.db, emit: (frame) => { frames.push(frame as never); }, waitForDecision: async () => "reject" });
+      await broker.request("thr", "trn", tool, "call_1", args, new AbortController().signal);
+      return { truncated: frames[0]!.truncated, saved: loadCardMeta(rig.db, frames[0]!.requestID)?.truncated };
+    } finally {
+      rig.close();
+    }
+  }
+
+  test("a short card is not marked; a long one, and a many-line one, are, on the frame and in what a replay shows", async () => {
+    expect(await raised("bash", { command: "touch note.txt" })).toEqual({ truncated: false, saved: false });
+    expect(await raised("bash", { command: "y".repeat(2_500) })).toEqual({ truncated: true, saved: true });
+    expect(await raised("bash", { command: Array.from({ length: 45 }, (_, line) => `echo ${line}`).join("\n") })).toEqual({ truncated: true, saved: true });
+  });
+
+  test("a whole job card with a long prompt is marked, so the owner reads it in full before Allow", async () => {
+    const prompt = Array.from({ length: 45 }, (_, step) => `Step ${step}: tidy the shelf and write down what is on it.`).join("\n");
+    expect((await raised("job_schedule", { text: prompt, everyMinutes: 30 })).truncated).toBe(true);
+  });
+
+  function cardRow(rig: PolicyRig, preview: string, tool: string, args: Record<string, unknown>): string {
+    const thread = createThread(rig.db, "ea");
+    createTurn(rig.db, { id: "trn_full", threadID: thread.id, agentID: "ea" });
+    db_insert(rig, thread.id, preview, tool, args);
+    return "apr_full";
+  }
+  function db_insert(rig: PolicyRig, threadID: string, preview: string, tool: string, args: Record<string, unknown>): void {
+    rig.db.run("INSERT INTO approvals (id, thread_id, turn_id, action, preview, status, decision, call_id, tool_name, created_at) VALUES ('apr_full', ?, 'trn_full', 'act', ?, 'pending', NULL, 'call_full', ?, ?)", [threadID, preview, tool, new Date().toISOString()]);
+    rig.db.run("INSERT INTO tool_calls (id, thread_id, turn_id, call_id, tool_name, args, created_at) VALUES ('tc_full', ?, 'trn_full', 'call_full', ?, ?, ?)", [threadID, tool, JSON.stringify(args), new Date().toISOString()]);
+  }
+
+  test("approval.full returns the whole preview of such a card, not a second rendering of the call", () => {
+    const rig = policyRig();
+    try {
+      const preview = `Bot: Ava\nRuns: every 30 minutes\nAva would run this each time, on its own:\n${Array.from({ length: 60 }, (_, step) => `> Step ${step}`).join("\n")}\n> THE LAST LINE`;
+      expect(previewNeedsFullView(preview)).toBe(true);
+      const id = cardRow(rig, preview, "job_schedule", { text: "x", everyMinutes: 30 });
+      const full = fullApprovalText(rig.db, id)!;
+      expect(full.text, "the full text is not the card's own whole preview").toBe(preview);
+      expect(full.cut).toBe(false);
+    } finally {
+      rig.close();
+    }
+  });
+
+  test("a short card's full text is still built from the call, as before", () => {
+    const rig = policyRig();
+    try {
+      const id = cardRow(rig, "run shell: ls", "bash", { command: "ls -la" });
+      expect(fullApprovalText(rig.db, id)!.text).toContain("Command:\nls -la");
+    } finally {
+      rig.close();
+    }
+  });
+
+  scenarioTest("through the real loop: a 5,000-character command raises a truncated card, and approval.full gives the whole of it", async () => {
+    const s = await scenarios.start();
+    const a = await s.connect({ label: "A" });
+    const command = `echo ${"a".repeat(4_960)} ; touch ${s.outside("full-marker").replaceAll("\\", "/")}`;
+    s.model.queue(...scripted(true, [call("bash", { command }, "call_long"), say("Done.")]));
+    const { turnID, since } = await a.startTurn("run the long command");
+    const request = await a.until((frame) => frame.type === "approval.request", { since, why: "the card for the long command" });
+    if (request.type !== "approval.request") throw new Error("not a card");
+    expect(request.truncated, "a card the owner cannot take in at a glance was not marked").toBe(true);
+    a.send({ type: "approval.full", requestID: request.requestID });
+    const full = await a.until((frame) => frame.type === "approval.full.ok" && frame.requestID === request.requestID, { since, why: "the full text" });
+    if (full.type !== "approval.full.ok") throw new Error("not the full text");
+    expect(full.text, "the full text does not hold the whole command").toContain(command);
+    a.send({ type: "approve.reply", requestID: request.requestID, decision: "reject" });
+    await a.until((frame) => frame.type === "turn.end" && frame.turnID === turnID, { since, why: "the end of the turn" });
   });
 });

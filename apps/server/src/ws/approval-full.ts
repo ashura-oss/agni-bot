@@ -1,10 +1,14 @@
 /**
  * The whole call behind an approval card (`approval.full`).
  *
- * A card's preview is cut when a call is long, and the owner must read what was
- * hidden before Allow. The full text is not pushed with every card: the client
- * asks for it, and it is built here from the call the turn stored, never from
- * the preview. Every invisible character is escaped the way the card escapes it
+ * A card is marked `truncated` when the owner must open the full text before
+ * Allow: its preview is cut, or it is more than can be taken in at a glance
+ * (over 2,000 characters or 40 lines: `previewNeedsFullView`). The full text is
+ * not pushed with every card: the client asks for it. For a card that is long
+ * but not cut, it is the whole preview the card was raised with (the owner reads
+ * what the card said, in the form the card said it). For a card that is cut it
+ * is built here from the call the turn stored, since the preview no longer holds
+ * all of it. Every invisible character is escaped the way the card escapes it
  * (`agent/card-text.ts`), and secrets are masked (`util/redact.ts`).
  *
  * Only a card that is still waiting has a full text to show. A card that is
@@ -13,6 +17,7 @@
  */
 import type { Database } from "bun:sqlite";
 import { escapeUnsafe } from "../agent/card-text";
+import { previewIsCut, previewNeedsFullView } from "../agent/approval-broker";
 import { redact } from "../util/redact";
 
 /** The most characters one answer carries; a bigger call is cut and `cut` says so. */
@@ -57,11 +62,16 @@ export function renderFullCall(toolName: string, args: Record<string, unknown>):
 /** The full text of a pending card, or null when there is nothing safe to show. */
 export function fullApprovalText(db: Database, requestID: string): { text: string; cut: boolean } | null {
   const card = db
-    .query<{ turn_id: string | null; call_id: string | null; tool_name: string | null }, [string]>(
-      "SELECT turn_id, call_id, tool_name FROM approvals WHERE id = ? AND status = 'pending'",
+    .query<{ turn_id: string | null; call_id: string | null; tool_name: string | null; preview: string | null }, [string]>(
+      "SELECT turn_id, call_id, tool_name, preview FROM approvals WHERE id = ? AND status = 'pending'",
     )
     .get(requestID);
   if (!card?.turn_id || !card.call_id) return null;
+  // A card that is too long to take in at a glance but is not cut already holds the whole call: that preview is the full text.
+  if (card.preview && !previewIsCut(card.preview) && previewNeedsFullView(card.preview)) {
+    const text = escapeUnsafe(card.preview, true);
+    return text.length <= FULL_TEXT_MAX_CHARS ? { text, cut: false } : { text: `${text.slice(0, FULL_TEXT_MAX_CHARS)}\n[cut: the card is longer than ${FULL_TEXT_MAX_CHARS.toLocaleString("en-US")} characters]`, cut: true };
+  }
   const call = db
     .query<{ args: string; tool_name: string }, [string, string]>(
       "SELECT args, tool_name FROM tool_calls WHERE turn_id = ? AND call_id = ? ORDER BY created_at DESC LIMIT 1",

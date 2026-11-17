@@ -34,8 +34,8 @@ export function cardExpiresAt(background: boolean, from: number = Date.now()): s
 
 /**
  * What a card was raised with beyond its text: the untrusted input the run had read, how risky the call is,
- * when the card expires, and whether the preview hides part of the call. Saved with the card so a replay on
- * reconnect shows the same card.
+ * when the card expires, and whether the owner must open the full text before Allow (`truncated`: the preview hides
+ * part of the call, or is too long to take in at a glance). Saved with the card so a replay on reconnect shows the same card.
  */
 export interface CardMeta {
   source?: ApprovalSource[];

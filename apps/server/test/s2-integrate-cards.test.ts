@@ -86,14 +86,15 @@ describe("an approval card carries what the owner needs to judge it", () => {
     expect(loadCardMeta(db, frame!.requestID)).toMatchObject({ tier: 2, expiresAt, truncated: false, source: frame!.source });
   });
 
-  test("a long call is shown whole, so it is not marked cut; one too long for any card raises none", async () => {
+  test("a long call is shown whole and marked, so the owner opens the full text before Allow; one too long for any card raises none", async () => {
     db = openDatabase(":memory:");
     const { broker, frames } = brokerFor(db);
     await broker.request("thr", "trn", "mail_send", "call_1", { to: ["x@y.z"], subject: "s", body: "word ".repeat(2_000) }, new AbortController().signal, { card: card({ sources: [] }), agentID: "ea" });
-    expect(frames[0]!.truncated).toBe(false);
+    // Nothing is cut, but ten thousand characters is more than a glance.
+    expect(frames[0]!.truncated).toBe(true);
     expect(frames[0]!.preview).toContain("word ".repeat(2_000).trimEnd());
     expect(frames[0]!.source).toBeUndefined();
-    expect(loadCardMeta(db, frames[0]!.requestID)?.truncated).toBe(false);
+    expect(loadCardMeta(db, frames[0]!.requestID)?.truncated).toBe(true);
     await expect(broker.request("thr", "trn", "mail_send", "call_2", { to: ["x@y.z"], subject: "s", body: "word ".repeat(10_000) }, new AbortController().signal, { card: card({ sources: [] }), agentID: "ea" })).rejects.toThrow(/too long/);
     expect(frames).toHaveLength(1);
   });

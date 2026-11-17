@@ -105,7 +105,7 @@ describe("INV-13 a long command's card shows all of it, and one too long to show
 
   // Fix round I: a card shows the whole of what will run, so no card is cut; a command too long for a card is refused, with no card, and does not run.
   // Two turns, not one: a refused command is a denial for the rest of its run (INV-07), and the second command would share it.
-  scenarioTest("a card is never cut (`truncated` is false), and a command too long to show whole raises no card and does not run", async () => {
+  scenarioTest("a card is never cut, a card more than a glance is marked `truncated` (the owner opens the full text), and a command too long to show whole raises no card and does not run", async () => {
     const s = await scenarios.start();
     const a = await s.connect({ label: "A" });
     const marker = shell(s.outside("cut-marker"));
@@ -117,8 +117,9 @@ describe("INV-13 a long command's card shows all of it, and one too long to show
     expect(whole.cards.length).toBe(1);
     // The whole command, in the quoted form the card shows model-written text in (a single line here): not its last few thousand characters.
     expect(long.cards[0]!.preview, "a long card hid part of the command").toContain(`> ${LONG}${marker}`);
-    expect(long.cards[0]!.raw.truncated ?? false, "a card that shows everything said it was cut").toBe(false);
-    expect(whole.cards[0]!.raw.truncated ?? false, "a whole card claimed to be cut").toBe(false);
+    expect(long.cards[0]!.preview, "a long card was cut").not.toMatch(/chars omitted|\(\+\d+ chars\)/);
+    expect(long.cards[0]!.raw.truncated ?? false, "a 5,000-character card, more than a glance, was not marked: the owner is not made to open the full text").toBe(true);
+    expect(whole.cards[0]!.raw.truncated ?? false, "a short card was marked").toBe(false);
 
     const huge = shell(s.outside("huge-marker"));
     s.model.queue(...scripted(true, [call("bash", { command: `echo ${"a".repeat(25_000)} ; touch ${huge}` }, "call_huge"), say("Done.")]));

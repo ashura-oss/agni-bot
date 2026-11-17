@@ -81,7 +81,10 @@ export interface ApprovalBrokerDeps {
     tier?: 0 | 1 | 2 | 3;
     /** When the card stops waiting (ISO time). */
     expiresAt?: string;
-    /** The preview hides part of the call: the owner opens the full text before allowing. */
+    /**
+     * The owner must open the full text (`approval.full`) before allowing: the preview hides part of the call (it has a cut in it), or it
+     * is more than can be taken in at a glance (over 2,000 characters or 40 lines), though every character of it is there.
+     */
     truncated?: boolean;
   }) => void;
   /** Wait for a decision on a pending approval. */
@@ -112,6 +115,22 @@ export function previewIsCut(preview: string): boolean {
   return CUT_MARKS.test(preview);
 }
 
+/**
+ * How much of a card the owner can take in at a glance: the most characters and lines a preview may have before the card is marked
+ * `truncated`. The web card's box is small, and a card the owner has not read to the end must not be allowed on a glance.
+ */
+export const FULL_VIEW_MAX_CHARS = 2_000;
+export const FULL_VIEW_MAX_LINES = 40;
+
+/**
+ * True when the preview is more than the owner takes in at a glance (over 2,000 characters or 40 lines). The card is then marked
+ * `truncated` even though nothing is cut: the flag means "the owner must open the full text before Allow", and `approval.full` answers
+ * with the whole preview (`ws/approval-full.ts`).
+ */
+export function previewNeedsFullView(preview: string): boolean {
+  return preview.length > FULL_VIEW_MAX_CHARS || preview.split("\n").length > FULL_VIEW_MAX_LINES;
+}
+
 export class ApprovalBroker {
   constructor(private readonly deps: ApprovalBrokerDeps) {}
 
@@ -138,7 +157,7 @@ export class ApprovalBroker {
     // engine said may not be remembered never offers "always".
     const target = info?.card.canRemember && info.agentID ? approvalTarget(toolName, args) : null;
     const scope = info?.agentID && target !== null ? { agentID: info.agentID, target } : null;
-    const truncated = previewIsCut(preview);
+    const truncated = previewIsCut(preview) || previewNeedsFullView(preview);
     const source = info ? approvalSources(info.card) : [];
     const tier = info ? info.card.tier : undefined;
     const expiresAt = info?.expiresAt;

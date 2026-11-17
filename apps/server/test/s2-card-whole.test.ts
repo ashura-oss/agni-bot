@@ -58,7 +58,8 @@ describe("a one-shot job card from a run that is not the owner's own turn shows 
     expect(frame!.preview, "the card hides the middle of the prompt").toContain("> Step 20: tidy");
     expect(frame!.preview).not.toMatch(/chars omitted|\(\+\d+ chars\)/);
     expect(frame!.action, "the heading hides the end of the prompt").toContain(LAST);
-    expect(frame!.truncated, "a card that shows everything said it was cut").toBe(false);
+    // Nothing is cut, but a 2,000-character prompt is more than a glance: the owner opens the full text before Allow.
+    expect(frame!.truncated, "a card too long to take in at a glance is not marked").toBe(true);
   });
 
   test("the card names the bot and says when it runs: once, at the time", async () => {
@@ -216,7 +217,9 @@ describe("every classification the engine can give has a preview that matches it
           expect({ label, kind, says: SAYS[kind!]!.test(frame!.preview) }, "the preview is not the one for this classification").toEqual({ label, kind, says: true });
           expect({ label, whole: frame!.preview.includes(`> ${LAST}`) }, "the card hides the end of the prompt").toEqual({ label, whole: true });
           expect({ label, cut: /chars omitted|\(\+\d+ chars\)/.test(frame!.preview) }).toEqual({ label, cut: false });
-          expect({ label, truncated: frame!.truncated }).toEqual({ label, truncated: false });
+          // Marked when the preview is more than a glance (over 2,000 characters or 40 lines), and only then: nothing here is cut.
+          const glance = frame!.preview.length > 2_000 || frame!.preview.split("\n").length > 40;
+          expect({ label, truncated: frame!.truncated }).toEqual({ label, truncated: glance });
         }
       }
     }
