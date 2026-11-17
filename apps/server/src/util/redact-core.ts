@@ -89,40 +89,59 @@ function embeddedBase64(bytes: Buffer, lead: 0 | 1 | 2): string[] {
 /** `text` as it appears between the quotes of a JSON string. */
 const jsonEscaped = (text: string): string => JSON.stringify(text).slice(1, -1);
 
-/**
- * The escapes other common serializers write on top of JSON's own, by kind: `/` as `\/` (PHP); `<`, `>` and `&` as
- * `<`, `>`, `&` (Go, .NET, PHP with flags); non-ASCII text as `\uXXXX` per UTF-16 unit (Python, PHP,
- * .NET). Hex digits come in lower and upper case, and one serializer applies several kinds at once.
- */
-const SERIALIZER_ESCAPES: readonly { present: RegExp; apply: (text: string, upper: boolean) => string }[] = [
-  { present: /\//, apply: (text) => text.replaceAll("/", "\\/") },
-  { present: /[<>&]/, apply: (text, upper) => text.replace(/[<>&]/g, (ch) => unicodeEscape(ch, upper)) },
-  { present: /[^\x00-\x7f]/, apply: (text, upper) => text.replace(/[^\x00-\x7f]/g, (ch) => unicodeEscape(ch, upper)) },
-];
-
 const unicodeEscape = (unit: string, upper: boolean): string => {
   const digits = unit.charCodeAt(0).toString(16).padStart(4, "0");
   return `\\u${upper ? digits.toUpperCase() : digits}`;
 };
 
+/** One way of escaping: `text` with the characters a pattern matches written as backslash-u-hex (`upper`: A-F, else a-f). */
+type Escaper = (text: string, upper: boolean) => string;
+
+/** A match is one character, or the pair backslash-quote (a quote is that pair in JSON text); the last character is escaped. */
+const escaping = (pattern: RegExp): Escaper => (text, upper) => text.replace(pattern, (found) => unicodeEscape(found.slice(-1), upper));
+
 /**
- * `jsonText` (a value already escaped the JSON way) as each serializer above writes it: every non-empty combination
- * of the kinds it holds, in lower and upper hex. One level only, and none for a value without these characters, so
- * the cost is at most 14 more forms for a value that holds all three kinds, and none for the usual key.
+ * The escapes other common serializers write on top of JSON's own, by kind. A kind lists the `ways` serializers apply it;
+ * one serializer uses one way of each kind it applies. The comment names each escape in words, because a backslash-u
+ * sequence written in source is read by some tools and editors as the character it stands for.
+ *   - slash: `/` as backslash-slash (PHP);
+ *   - tag, in three ways, because they differ, and a value that holds a character one way leaves alone is matched only by
+ *     the way that leaves it alone:
+ *       Go (and PHP with flags): `<`, `>` and `&` as backslash-u-003c, backslash-u-003e and backslash-u-0026;
+ *       .NET's default encoder: those, and `+` (backslash-u-002b), `'` (backslash-u-0027), a backtick (backslash-u-0060)
+ *         and `"` (backslash-u-0022, in place of the backslash-quote JSON writes), but not `=`;
+ *       Gson: those, and `=` (backslash-u-003d) and `'`, but not `+` or `"`;
+ *   - non-ASCII: everything above ASCII as backslash-u-XXXX per UTF-16 unit (Python's ensure_ascii, PHP, .NET).
+ * Hex digits come in lower and upper case, and one serializer applies several kinds at once.
+ */
+const SERIALIZER_ESCAPES: readonly { present: RegExp; ways: readonly Escaper[] }[] = [
+  { present: /\//, ways: [(text) => text.replaceAll("/", "\\/")] },
+  { present: /["<>&+='`]/, ways: [escaping(/[<>&]/g), escaping(/\\"|[<>&+'`]/g), escaping(/[<>&=']/g)] },
+  { present: /[^\x00-\x7e]/, ways: [escaping(/[^\x00-\x7e]/g)] },
+];
+
+/**
+ * `jsonText` (a value already escaped the JSON way) as each serializer above writes it: every combination of one way (or
+ * none) per kind it holds, other than none at all, in lower and upper hex. One level only, and none for a value without
+ * these characters. A value that holds characters of every kind gets at most 30 more forms ((1 + 1) x (1 + 3) x (1 + 1) - 1
+ * combinations, in two cases), and the ways that write the same text for it count once; the usual key gets none.
  */
 function serializerForms(jsonText: string): string[] {
   const kinds = SERIALIZER_ESCAPES.filter((kind) => kind.present.test(jsonText));
-  const forms: string[] = [];
-  for (let subset = 1; subset < 1 << kinds.length; subset++) {
-    for (const upper of [false, true]) {
-      let form = jsonText;
-      kinds.forEach((kind, index) => {
-        if (subset & (1 << index)) form = kind.apply(form, upper);
-      });
-      forms.push(form);
-    }
+  const forms = new Set<string>();
+  for (const upper of [false, true]) {
+    const walk = (index: number, text: string, escaped: boolean): void => {
+      const kind = kinds[index];
+      if (!kind) {
+        if (escaped) forms.add(text);
+        return;
+      }
+      walk(index + 1, text, escaped);
+      for (const way of kind.ways) walk(index + 1, way(text, upper), true);
+    };
+    walk(0, jsonText, false);
   }
-  return forms;
+  return [...forms];
 }
 
 function variantsOf(value: string): string[] {
@@ -268,7 +287,9 @@ export const RETIRED_PER_SLOT = 32;
  * `redact()` of a 100 KB frame measured 56 ms, so the bound is 512 (per slot
  * 32 still covers ten refreshes, and many slots rarely all have full queues). With the two JSON-escaped
  * forms, 512 values that all hold a quote, a backslash and a newline (the worst case) measured about 47 ms
- * for a 100 KB frame, against about 39 ms before the second form and about 21 ms for 512 plain values. It is about a twentieth
+ * for a 100 KB frame, against about 39 ms before the second form and about 21 ms for 512 plain values. With the serializer
+ * forms (up to 30 more per value, for a value that also holds the characters they escape) the same worst case measured
+ * about 55 ms, against about 37 ms for the same values without them, on one run of both, and 16 ms for 512 plain values. It is about a twentieth
  * of `MAX_SECRETS`, so the live values of the vault, the environment and every store always fit.
  */
 export const RETIRED_MAX = 512;
