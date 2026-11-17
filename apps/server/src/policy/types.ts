@@ -150,7 +150,8 @@ export interface PolicyInput {
  * What kind of standing rule (work that starts again on its own) a call is, as the engine classified it. The card carries it, and
  * the preview is chosen by it, so what the owner reads is the view of what the engine decided (`policy/standing-rules.ts`).
  *  - repeating_job: a `job_schedule` with a clock time or an interval.
- *  - next_job: a one-shot `job_schedule` from a run of a job a bot made (a chain of one-shot jobs is a repeating job by another route).
+ *  - next_job: a one-shot `job_schedule` from a run that is not the owner's own work: a chain a bot made a link of, or one that cannot say
+ *    where it came from (a chain of one-shot jobs is a repeating job by another route).
  *  - routine_create: a new routine.
  *  - routine_resume: `routine_pause` with `enabled: true`.
  */

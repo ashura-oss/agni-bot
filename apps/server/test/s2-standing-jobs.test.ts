@@ -22,6 +22,8 @@ import { createRoutineTools } from "../src/tools/routines-tool";
 import { resolvePersona } from "../src/agent/personas";
 import { decide } from "../src/policy/engine";
 import { addTaint } from "../src/policy/context";
+import { OWNER_STARTED } from "../src/policy/provenance";
+import { ownerJobPayload } from "../src/jobs/owner-job";
 import { assessCall, policyFor } from "../src/policy/metadata";
 import { recordDenial } from "../src/policy/denials";
 import { STANDING_JOB_RESOURCE } from "../src/policy/standing-rules";
@@ -239,10 +241,10 @@ describe("an origin that cannot be read is asked about", () => {
     const tainted = rig.another();
     addTaint(tainted, { kind: "web", label: "evil.example/page", tool: "web_fetch", at: "2026-11-16T10:00:00Z" });
     expect(decide(tainted, { tool: "job_schedule", args: recur, callID: "call_1" }).action).toBe("ask");
-    // A one-shot job from a clean run that no bot-made job is behind is not a standing rule (a wake in a bot-made job's chain is: test/s2-standing-chain.test.ts); a tainted run may not make one.
+    // A one-shot job from a clean run that a bot made no link of is not a standing rule (a wake in a bot's chain is: test/s2-chain-decision.test.ts); a tainted run may not make one.
     const once = { text: "do it", at: new Date(Date.now() + 3_600_000).toISOString() };
     expect(decide(rig.run, { tool: "job_schedule", args: once, callID: "call_1" }).action).toBe("run");
-    expect(decide(rig.another({ principal: { kind: "wake" } }), { tool: "job_schedule", args: once, callID: "call_1" }).action).toBe("run");
+    expect(decide(rig.another({ principal: { kind: "wake" }, provenance: OWNER_STARTED }), { tool: "job_schedule", args: once, callID: "call_1" }).action).toBe("run");
     expect(decide(tainted, { tool: "job_schedule", args: once, callID: "call_1" })).toMatchObject({ action: "refuse", code: "protected_write" });
   });
 
@@ -524,7 +526,8 @@ describe("every job_schedule call names the standing-job resource", () => {
       expect(asked.card.canRemember).toBe(false);
       expect(asked.card.standingRule).toBeDefined();
     }
-    expect(decide(rig.another({ principal: { kind: "owner" }, jobID: "job_owner" }), { tool: "job_schedule", args: once(), callID: "call_1" }).action).toBe("run");
+    // A job the owner made carries the owner's marker (`agni job add`); one with none is not shown to be theirs (test/s2-chain-decision.test.ts).
+    expect(decide(rig.another({ principal: { kind: "owner" }, jobID: "job_owner", provenance: OWNER_STARTED }), { tool: "job_schedule", args: once(), callID: "call_1" }).action).toBe("run");
     const tainted = rig.another({ principal: { kind: "job" }, jobID: "job_bot" });
     addTaint(tainted, { kind: "web", label: "evil.example/page", tool: "web_fetch", at: "2026-11-16T10:00:00Z" });
     expect(decide(tainted, { tool: "job_schedule", args: once(), callID: "call_1" })).toMatchObject({ action: "refuse", code: "protected_write" });
@@ -640,7 +643,7 @@ describe("a one-shot job keeps the request of a run that was not the owner's own
   scenarioTest("a fire of a job the owner made hands its root on to the one-shot job it schedules", async () => {
     const s = await scenarios.start();
     const a = await s.connect({ label: "A" });
-    const ownerJob = enqueueJob(s.db, { kind: "turn", runAt: past(), payload: { agentID: "ea", text: "Do the weekly check.", notify: false } });
+    const ownerJob = enqueueJob(s.db, { kind: "turn", runAt: past(), payload: ownerJobPayload({ agentID: "ea", text: "Do the weekly check.", notify: false }) });
     s.model.queue(...scripted(true, [call("job_schedule", { text: "Look again later.", at: future() }, "call_later"), say("Scheduled.")]));
     await tickUntil(s, () => allCallsTo(s, "job_schedule", a).some((entry) => entry.callID === "call_later"));
     expect(allCallsTo(s, "job_schedule", a).find((entry) => entry.callID === "call_later")?.ok, "the owner's job could not schedule the one-shot job; the script is out of step").toBe(true);

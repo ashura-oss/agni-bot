@@ -11,8 +11,8 @@
  */
 import { entry } from "../agent/card-text";
 import { describeSchedule, parseDay, parseWallClock } from "../jobs/schedule";
-import { getJob } from "../stores/jobs";
 import { isTainted } from "./context";
+import { isOwnerMade } from "./provenance";
 import type { ToolResource } from "./tool-meta";
 import type { RunContext, StandingKind } from "./types";
 
@@ -36,9 +36,14 @@ export const STANDING_KINDS: readonly StandingKind[] = Object.keys(KINDS) as Sta
 
 /**
  * What kind of standing rule is this `job_schedule` call, or null when it is not one? A repeating job always is. A one-shot job is
- * too when it is made by a fire of a job a bot made: a chain of one-shot jobs, each telling its run to schedule the next, is a
- * repeating job by another route. The owner's own turn, a wake and a fire of a job the owner made are not the start of a chain. A
- * run that read outside text is not asked about a one-shot job at all: it is refused (a protected write), as before.
+ * too when it is made from a chain a bot made a link of: a chain of one-shot jobs, each telling its run to schedule the next, is a
+ * repeating job by another route. Whether a run is the owner's own work is the run's own flags (`policy/provenance.ts`): its chain
+ * started with the owner (their chat turn, or a job they made) and no link since was a bot's. Nothing else is read, and not the root
+ * job's row, which a follow-up a bot scheduled from the owner's job would pass for the owner's. Flags that are missing or cannot be
+ * read are a bot's (fail closed).
+ *
+ * The fire of a job a bot scheduled is always asked. A run that read outside text is not asked about a one-shot job at all: it is
+ * refused (a protected write), as before. A bot's brief and a routine are not asked either: the tool itself refuses them.
  *
  * This one answer is what the engine asks with and what the card is drawn from: nothing else decides what the owner is shown.
  */
@@ -47,24 +52,8 @@ export function standingScheduleKind(args: Record<string, unknown>, run: RunCont
   if (!run || isTainted(run)) return null;
   const kind = run.principal?.kind;
   if (kind === "job") return "next_job";
-  // A wake is the next step of the chain a bot-made job started (the job delegated, the task finished, the wake reports back): it
-  // may not schedule the next link unasked. A wake of the owner's own chat turn, or of a job the owner made, starts no chain.
-  return kind === "wake" && run.rootJob != null && rootJobMadeByBot(run) ? "next_job" : null;
-}
-
-/**
- * Was the job at the root of this run's request made by a bot (a `job_schedule` call)? A root job that cannot be read, or that is
- * not there, is not shown to be the owner's: it counts as a bot's (fail closed).
- */
-function rootJobMadeByBot(run: RunContext): boolean {
-  try {
-    const row = getJob(run.services.db, String(run.rootJob));
-    if (!row) return true;
-    const payload: unknown = JSON.parse(row.payload ?? "{}");
-    return typeof payload !== "object" || payload === null || (payload as { scheduledBy?: unknown }).scheduledBy === "bot";
-  } catch {
-    return true;
-  }
+  if (kind !== "owner" && kind !== "wake") return null;
+  return isOwnerMade(run) ? null : "next_job";
 }
 
 /**
@@ -108,10 +97,11 @@ const PRINCIPAL_LINE: Record<string, string> = {
 };
 
 const UNREADABLE_LINE = "I cannot tell who started this task or what it read, so I am treating it as not yours.";
+const CHAIN_LINE = "This task came through a step a bot took, or I cannot tell where it came from, so I am treating it as not yours.";
 
 /**
  * Why this run may not make a repeating job without the owner's card (one sentence for the card), or null when it may:
- * the owner's own chat turn (no job behind it), with taint known and empty. A run that is missing, or whose principal or taint cannot be read, is
+ * the owner's own chat turn (no job behind it), with taint known and empty and a chain no bot has made a link of. A run that is missing, or whose principal or taint cannot be read, is
  * never let through.
  */
 export function standingRuleOrigin(run: RunContext | undefined): string | null {
@@ -124,6 +114,8 @@ export function standingRuleOrigin(run: RunContext | undefined): string | null {
     if (run.jobID !== null) return run.jobID === undefined ? UNREADABLE_LINE : PRINCIPAL_LINE.job!;
     if (!Array.isArray(run.taint?.sources)) return UNREADABLE_LINE;
     if (isTainted(run)) return "This task read outside content, so what it asks for may not be what you meant.";
+    // Even the owner's own turn is not shown to be theirs when its chain came through a bot's link, or cannot say where it came from.
+    if (!isOwnerMade(run)) return CHAIN_LINE;
     return null;
   } catch {
     return UNREADABLE_LINE;

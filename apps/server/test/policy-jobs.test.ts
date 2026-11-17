@@ -11,6 +11,7 @@ import { ToolRegistry } from "../src/tools/registry";
 import { registerDelegateTaskTool } from "../src/tools/delegate-task-tool";
 import { buildTaskToolRegistry } from "../src/tools/task-registry";
 import { createRunContext } from "../src/policy/context";
+import { OWNER_STARTED, type Provenance } from "../src/policy/provenance";
 import type { PrincipalKind, RunContext, TaintSource } from "../src/policy/types";
 import { DEFAULT_MAX_CONCURRENT_DELEGATIONS as MAX_CONCURRENT_DELEGATIONS, DEFAULT_MAX_SELF_SCHEDULED_JOBS as MAX_SELF_SCHEDULED_JOBS } from "../src/agent/guardrails";
 import { createThread } from "../src/stores/threads";
@@ -21,9 +22,9 @@ afterEach(() => { db?.close(); db = undefined; });
 const WEB: TaintSource = { kind: "web", label: "evil.example/page", tool: "web_fetch", at: "2026-11-16T10:00:00Z" };
 const tomorrow = (): string => new Date(Date.now() + 86_400_000).toISOString();
 
-function runOf(database: Database, principal: PrincipalKind, taint: TaintSource[] = [], bot = "ea"): RunContext {
+function runOf(database: Database, principal: PrincipalKind, taint: TaintSource[] = [], bot = "ea", provenance?: Provenance): RunContext {
   const registry = buildTaskToolRegistry(database);
-  return createRunContext({ db: database, bot, threadID: "thr", turnID: "trn", principal: { kind: principal }, capabilities: registry.list().map((tool) => tool.name), registry, taint });
+  return createRunContext({ db: database, bot, threadID: "thr", turnID: "trn", principal: { kind: principal }, capabilities: registry.list().map((tool) => tool.name), registry, taint, ...(provenance ? { provenance } : {}) });
 }
 const ctxOf = (run: RunContext) => ({
   threadID: "thr", turnID: "trn", signal: new AbortController().signal, run,
@@ -34,10 +35,10 @@ const ctxOf = (run: RunContext) => ({
 const schedule = (database: Database) => createJobTools(database)[0]!.handler as unknown as (args: unknown, ctx: unknown) => Promise<{ id?: string; error?: string }>;
 
 describe("job_schedule follows the taint rule", () => {
-  test("a wake that read nothing outside may schedule work, as the owner's own turn may", async () => {
+  test("a wake of the owner's own chain that read nothing outside may schedule work, as the owner's own turn may", async () => {
     db = openDatabase(":memory:");
     for (const principal of ["owner", "wake"] as const) {
-      const result = await schedule(db)({ text: `Check in (${principal})`, at: tomorrow() }, ctxOf(runOf(db, principal)));
+      const result = await schedule(db)({ text: `Check in (${principal})`, at: tomorrow() }, ctxOf(runOf(db, principal, [], "ea", OWNER_STARTED)));
       expect({ principal, scheduled: Boolean(result.id) }).toEqual({ principal, scheduled: true });
     }
   });
