@@ -21,7 +21,7 @@ import { isOutsideScratch, scratchDir, writeTargetExists } from "../tools/write-
 import type { CallAssessment, RiskKind, RunContext, TaintKind, TaintSource } from "./types";
 import type { ToolClass, ToolMeta, ToolResource, ToolTier } from "./tool-meta";
 import { hostResource, pathResource, recipientResources, shellFacts, shellWorkingDir } from "./resources";
-import { STANDING_JOB_RESOURCE, isStandingSchedule } from "./standing-rules";
+import { STANDING_JOB_RESOURCE, isStandingRoutine, isStandingSchedule, standingRoutineResources } from "./standing-rules";
 
 type Args = Record<string, unknown>;
 
@@ -228,8 +228,17 @@ export const TOOL_POLICY: Readonly<Record<string, ToolPolicy>> = {
     resources: () => [STANDING_JOB_RESOURCE],
   }),
   job_cancel: local({ protectedWrite: true }),
-  routine_create: local({ protectedWrite: true }),
-  routine_pause: local({ protectedWrite: true }),
+  // A routine runs on a schedule by itself, so creating one and resuming a paused one are standing rules like a repeating job.
+  routine_create: local({
+    protectedWrite: true,
+    standingWrite: (args, run) => isStandingRoutine(args, run, "routine_create"),
+    resources: (args) => standingRoutineResources(args, "routine_create"),
+  }),
+  routine_pause: local({
+    protectedWrite: true,
+    standingWrite: (args, run) => isStandingRoutine(args, run, "routine_pause"),
+    resources: (args) => standingRoutineResources(args, "routine_pause"),
+  }),
   routine_delete: local({ protectedWrite: true }),
 };
 

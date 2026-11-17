@@ -651,3 +651,61 @@ describe("a one-shot job keeps the request of a run that was not the owner's own
   });
 });
 
+
+describe("a routine is a repeating job: a job run's routine_create and routine_pause (resume) are put to the owner", () => {
+  let rig: PolicyRig | undefined;
+  afterEach(() => { rig?.close(); rig = undefined; });
+  const create = { name: "Inbox", prompt: "Check the inbox.", cron: "0 9 * * *", timezone: "UTC" };
+  const resume = { id: "rtn_1", enabled: true };
+  const pause = { id: "rtn_1", enabled: false };
+
+  test("only the owner's own untainted turn, with no job behind it, makes one unasked", () => {
+    rig = policyRig();
+    for (const [tool, args] of [["routine_create", create], ["routine_pause", resume]] as const) {
+      expect({ tool, own: decide(rig.run, { tool, args, callID: "call_1" }).action }).toEqual({ tool, own: "run" });
+      for (const [what, run] of [
+        ["a job a bot made", rig.another({ principal: { kind: "job" }, jobID: "job_bot" })],
+        ["a job the owner made", rig.another({ principal: { kind: "owner" }, jobID: "job_owner" })],
+        ["a wake", rig.another({ principal: { kind: "wake" } })],
+      ] as const) {
+        const decision = decide(run, { tool, args, callID: "call_1" });
+        expect({ tool, what, action: decision.action }).toEqual({ tool, what, action: "ask" });
+        if (decision.action === "ask") expect({ tool, what, remember: decision.card.canRemember, why: decision.card.standingRule !== undefined }).toEqual({ tool, what, remember: false, why: true });
+      }
+    }
+  });
+
+  test("pausing a routine is never a standing rule, and a tainted run is still refused outright", () => {
+    rig = policyRig();
+    expect(decide(rig.another({ principal: { kind: "job" }, jobID: "job_bot" }), { tool: "routine_pause", args: pause, callID: "call_1" }).action).toBe("run");
+    const tainted = rig.another({ principal: { kind: "job" }, jobID: "job_bot" });
+    addTaint(tainted, { kind: "web", label: "evil.example/page", tool: "web_fetch", at: "2026-11-16T10:00:00Z" });
+    for (const [tool, args] of [["routine_create", create], ["routine_pause", resume]] as const) {
+      expect(decide(tainted, { tool, args, callID: "call_1" })).toMatchObject({ action: "refuse", code: "protected_write" });
+    }
+  });
+
+  test("the owner's no to a routine is the same refusal as to a repeating job", () => {
+    rig = policyRig();
+    const job = rig.another({ principal: { kind: "job" }, jobID: "job_bot" });
+    recordDenial(rig.db, job, { tool: "routine_create", operation: "change", resources: assessCall(policyFor("routine_create"), create).resources, cause: "denied" });
+    expect(decide(job, { tool: "job_schedule", args: { text: "x", everyMinutes: 30 }, callID: "call_1" })).toMatchObject({ action: "refuse", code: "denied_resource" });
+    expect(decide(job, { tool: "routine_pause", args: resume, callID: "call_1" })).toMatchObject({ action: "refuse", code: "denied_resource" });
+    expect(decide(job, { tool: "routine_pause", args: pause, callID: "call_1" }).action).toBe("run");
+  });
+
+  scenarioTest("a fire of a job the owner made asks before it creates a routine", async () => {
+    const s = await scenarios.start();
+    const a = await s.connect({ label: "A" });
+    enqueueJob(s.db, { kind: "turn", runAt: past(), payload: { agentID: "ea", text: "Do the weekly check.", notify: false } });
+    const owner = answerCards(a, "reject");
+    s.model.queue(...scripted(true, [call("routine_create", create, "call_routine"), say("Tried.")]));
+    await tickUntil(s, () => allCallsTo(s, "routine_create", a).some((entry) => entry.callID === "call_routine"));
+    owner.stop();
+    expect(allCallsTo(s, "routine_create", a).some((entry) => entry.callID === "call_routine"), "the owner's job never made the call; the script is out of step").toBe(true);
+    expect(owner.cards.length, "a fire of the owner's job created a routine with no card").toBe(1);
+    expect(owner.cards[0]!.buttons).toEqual(["once", "reject"]);
+    expect(s.all("SELECT id FROM routines")).toEqual([]);
+  });
+});
+

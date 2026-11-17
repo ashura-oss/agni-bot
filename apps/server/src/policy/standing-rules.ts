@@ -39,6 +39,21 @@ export function isStandingSchedule(args: Record<string, unknown>, run: RunContex
   return run?.principal?.kind === "job" && !isTainted(run);
 }
 
+/**
+ * Does this `routine_create` call or `routine_pause` call start work that runs on a schedule by itself? A new routine does,
+ * and so does resuming a paused one (`enabled: true`); pausing one does not. Like a repeating job, it is the owner's own untainted
+ * turn or the owner's card. A run that read outside text is not asked: it is refused outright (a protected write), as before.
+ */
+export function isStandingRoutine(args: Record<string, unknown>, run: RunContext | undefined, tool: "routine_create" | "routine_pause"): boolean {
+  if (tool === "routine_pause" && args.enabled !== true) return false;
+  return run !== undefined && !isTainted(run);
+}
+
+/** The refusal a routine's creation or resumption is recorded under: the same one a repeating job has. */
+export function standingRoutineResources(args: Record<string, unknown>, tool: "routine_create" | "routine_pause"): ToolResource[] {
+  return tool === "routine_pause" && args.enabled !== true ? [] : [STANDING_JOB_RESOURCE];
+}
+
 const PRINCIPAL_LINE: Record<string, string> = {
   job: "This task was started by a scheduled job, not by you.",
   wake: "This task was started by a finished task reporting back, not by you.",
