@@ -68,6 +68,8 @@ const APP_TITLE = "Agni";
 /** Typing frames: `true` at most this often while typing goes on; `false` after this much quiet. */
 const TYPING_REFRESH_MS = 3000;
 const TYPING_IDLE_MS = 1000;
+/** What a send that finds no connection says, in the composer and on the failed message alike. */
+const OFFLINE_REFUSAL = "Not connected. Your draft was kept; send it again once you are reconnected.";
 
 function notice(kind: NoticeKind, title: string, body: string, threadID: string | null = null): NoticeRow {
   return {
@@ -807,7 +809,7 @@ export class AppModel {
     this.selectAgent(agent);
     const sent = this.send(`Please work on this task for me. Task ID: ${task.id}\nTitle: ${task.title}${task.description ? `\nDetails: ${task.description}` : ""}${task.dueAt ? `\nDue: ${task.dueAt}` : ""}${task.deadlineAt ? `\nDeadline: ${task.deadlineAt}` : ""}${task.labels?.length ? `\nLabels: ${task.labels.join(", ")}` : ""}\nUpdate the task's progressNote as you work so I can see what you are doing, add relevant labels if needed, and move its workflow status to AI review when your work is ready. Tell me what you did and what still needs my review.`);
     if (!sent) {
-      // `send` told the owner when it was offline; a chat that is still loading is told here.
+      // `send` raises no notice of its own; say why here.
       if (this.refusal) this.showToast(notice("failure", "Not sent", this.refusal));
       return false;
     }
@@ -867,8 +869,9 @@ export class AppModel {
   }
 
   /**
-   * Why the last `send` answered false, when the model raised no notice of its own (a chat that is still
-   * loading). `null`: it already told the owner (not connected) or there was nothing to send.
+   * Why the last `send` answered false, in words for the owner. Whoever called `send` shows it once, where
+   * the owner is looking; `send` raises no toast of its own. `null`: the last send went, or there was
+   * nothing to send.
    */
   sendRefusal(): string | null {
     return this.refusal;
@@ -891,16 +894,19 @@ export class AppModel {
     const mention = this.resolveMention(trimmed);
     if (mention && mention.agent.id !== this.conversation.agentID) this.selectAgent(mention.agent);
     const outgoing = mention ? mention.text : content;
-    if (outgoing.length === 0) return false;
+    if (outgoing.length === 0) {
+      // Only an address: the chat is open, there is nothing to say yet.
+      this.refusal = `Add a message after @${mention?.agent.name ?? "the name"}. Your draft was kept.`;
+      return false;
+    }
     const localID = this.conversation.appendLocalUserMessage(outgoing, new Date(), attachments);
     this.lastSent = { localID, text: content };
     this.publish();
     const connection = this.connection;
     if (!connection || !isReady(this.connectionState)) {
-      this.conversation.markLocalFailure(localID, "Not connected — this message was not sent.");
-      this.showToast(
-        notice("failure", "Not connected", "Reconnecting. Your message was kept in the list but was not sent."),
-      );
+      // One wording, shown by the caller (the composer, or the hand-off toast) and on the failed echo.
+      this.refusal = OFFLINE_REFUSAL;
+      this.conversation.markLocalFailure(localID, OFFLINE_REFUSAL);
       this.publish();
       return false;
     }
@@ -986,7 +992,7 @@ export class AppModel {
       body: JSON.stringify({ ids: attachments.map((file) => file.id) }),
     });
     if (expectedAgentID && this.conversation.agentID !== expectedAgentID) throw new Error("The selected agent changed. Review your draft and send it again.");
-    if (!this.send(text, attachments)) throw new Error(this.refusal ?? "Not connected. Your draft has been kept; try again after reconnecting.");
+    if (!this.send(text, attachments)) throw new Error(this.refusal ?? OFFLINE_REFUSAL);
   }
 
   renameAgent(name: string, agentID = "ea"): void {

@@ -71,6 +71,46 @@ describe("send refused because the chat is still loading", () => {
   });
 });
 
+describe("send refused because the connection is down", () => {
+  function sendOffline(text: string) {
+    const { model } = openAt("/agent/scout", false);
+    frame(model, rosterFrame);
+    render(<AppModelProvider model={model}><ComposerView /></AppModelProvider>);
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: text } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    return { model, input };
+  }
+
+  it("says one thing, in the composer and on the failed message, and it says the draft was kept", () => {
+    const { model, input } = sendOffline("hello");
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(/draft was kept/i);
+    expect(alert).toHaveTextContent(/not connected/i);
+    const failed = model.getSnapshot().conversation.messages.find((message) => message.isLocalEcho);
+    expect(failed?.state).toEqual({ kind: "failed", reason: alert.textContent });
+    expect(model.getSnapshot().toast).toBeNull();
+    expect(input).toHaveValue("hello");
+  });
+});
+
+describe("send refused because the message is only an @mention", () => {
+  it("says what is missing instead of 'Not connected' while connected", () => {
+    const { model, sent } = openAt("/agent/scout");
+    frame(model, rosterFrame);
+    render(<AppModelProvider model={model}><ComposerView /></AppModelProvider>);
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "@friday" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    const alert = screen.getByRole("alert");
+    expect(alert).not.toHaveTextContent(/not connected/i);
+    expect(alert).toHaveTextContent(/friday/i);
+    expect(alert).toHaveTextContent(/draft was kept/i);
+    expect(sent.some((item) => item.type === "msg.send")).toBe(false);
+    expect(input).toHaveValue("@friday");
+  });
+});
+
 describe("handing a task to a bot", () => {
   it("marks the task handed off after the message went", () => {
     const { model, sent } = openAt("/tasks");

@@ -154,8 +154,10 @@ describe("web shell", () => {
 
     expect(screen.getByText("are you there?", { selector: "p" })).toBeInTheDocument();
     expect(composer).toHaveValue("are you there?");
-    expect(screen.getByText("Not connected — this message was not sent.")).toBeInTheDocument();
-    expect(screen.getByText("Not connected")).toBeInTheDocument();
+    // One message, said once in the composer and on the failed echo; no toast on top of it.
+    const reason = "Not connected. Your draft was kept; send it again once you are reconnected.";
+    expect(screen.getAllByText(reason)).toHaveLength(2);
+    expect(model.getSnapshot().toast).toBeNull();
   });
 
   it("opens the search overlay with Command-K and closes on Escape", () => {
