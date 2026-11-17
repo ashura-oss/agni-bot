@@ -7,6 +7,7 @@
 import type { AttachmentInfo, AgentInfo, Decision, MessageInfo, TaskInfo, Usage } from "@agni/protocol";
 import { parseISO } from "./format.js";
 import { stopReasonExplanation, type IncomingFrame } from "./protocol";
+import { FULL_FAILED, NOT_OPENED_NOTICE, NO_FULL_TEXT, type ApprovalCardFields } from "./approval-card";
 
 export type MessageRole = "user" | "assistant" | "system";
 
@@ -64,7 +65,7 @@ export interface ChatMessage {
   knownBeforeSend?: ReadonlySet<string>;
 }
 
-export interface ApprovalRow {
+export interface ApprovalRow extends ApprovalCardFields {
   id: string;
   action: string;
   preview: string;
@@ -336,6 +337,41 @@ export class Conversation {
   resolveApproval(id: string, decision: Decision | string): void {
     const approval = this.approvals.find((candidate) => candidate.id === id);
     if (approval) approval.decision = decision;
+  }
+
+  /** The owner asked for the full text behind a card: Allow stays locked until it arrives. */
+  beginApprovalFull(id: string): void {
+    const approval = this.approvals.find((candidate) => candidate.id === id);
+    if (approval) {
+      approval.full = { ...NO_FULL_TEXT, state: "loading" };
+      approval.notice = null;
+    }
+  }
+
+  /** The full text did not come (the card is gone, the connection dropped): say so; Allow stays locked, Deny works. */
+  failApprovalFull(id: string): void {
+    const approval = this.approvals.find((candidate) => candidate.id === id);
+    if (approval) {
+      approval.full = { ...NO_FULL_TEXT, state: "failed" };
+      approval.notice = FULL_FAILED;
+    }
+  }
+
+  /** Cards whose full text was asked for and has not come. */
+  get loadingApprovalIDs(): string[] {
+    return this.approvals.filter((approval) => approval.full?.state === "loading").map((approval) => approval.id);
+  }
+
+  /**
+   * The daemon refused an Allow that was already sent (the full text was not open on its side): the card
+   * comes back, locked again, with the reason. A card the daemon has closed is not here and is left alone.
+   */
+  reopenApproval(id: string): void {
+    const approval = this.approvals.find((candidate) => candidate.id === id);
+    if (!approval) return;
+    approval.decision = null;
+    approval.full = { ...NO_FULL_TEXT };
+    approval.notice = NOT_OPENED_NOTICE;
   }
 
   resolveForm(id: string, answer: string): void {
@@ -638,12 +674,21 @@ export class Conversation {
 
       // Sprint 2 answers (full card text, pause state, spend). Their UI is S2-6's; until then the
       // reducer leaves them alone so the new frames never break an older client's transcript.
-      case "approval.full.ok":
       case "policy.pause.ok":
       case "spend.status.ok":
       case "spend.stopped":
       case "spend.continue.ok":
         return [];
+
+      case "approval.full.ok": {
+        // The whole call, for a card that was cut or too long to take in at a glance. Opening it unlocks Allow.
+        const approval = this.approvals.find((candidate) => candidate.id === frame.requestID);
+        if (approval) {
+          approval.full = { state: "open", text: frame.text, cut: frame.cut === true };
+          approval.notice = null;
+        }
+        return [];
+      }
 
       case "approval.closed":
         // The card is no longer actionable (answered here or elsewhere, timed
@@ -946,6 +991,12 @@ export class Conversation {
           decision: null,
           isLocal: false,
           agentID: this.requestingAgentID(),
+          truncated: frame.truncated === true,
+          expiresAt: frame.expiresAt ?? null,
+          tier: frame.tier ?? null,
+          source: frame.source ?? [],
+          full: { ...NO_FULL_TEXT },
+          notice: null,
         });
         return [
           {
