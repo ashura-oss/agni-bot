@@ -180,7 +180,7 @@ export class ApprovalBroker {
   ): void {
     const action = redact(describeAction(toolName, args));
     const note = this.deps.approvalNote?.(toolName);
-    const body = recordedBody(toolName, args);
+    const body = recordedBody(toolName, args, { db: this.deps.db, agentID: rule.agentID });
     const preview = redact(note ? `${body}
 
 ${escapeUnsafe(note)}` : body);
@@ -201,14 +201,16 @@ Auto-approved by standing rule ${rule.id}: "Always allow" for ${rule.agentID} / 
 }
 
 /**
- * What the audit row of a call a stored rule let through says of the call. A call too long for a card was never put on one (a rule
- * answered, nobody was asked), but the row still records what ran: the start and the end of it, cut in the middle and marked.
+ * What the audit row of a call a stored rule let through says of the call. A call that cannot be shown whole (too long for a card, or
+ * naming a routine that is not there) was never put on one (a rule answered, nobody was asked), but the row still records what ran:
+ * the reason it could not be shown, and the start and the end of it, cut in the middle and marked. The database is passed so a call
+ * drawn from it (resuming a routine) is shown the way a card shows it.
  */
-function recordedBody(toolName: string, args: Record<string, unknown>): string {
+function recordedBody(toolName: string, args: Record<string, unknown>, options: { db: Database; agentID: string }): string {
   try {
-    return previewAction(toolName, args);
+    return previewAction(toolName, args, "A bot", options);
   } catch (error) {
-    const why = error instanceof CardNotShown ? "too long to show whole" : "could not be drawn";
+    const why = error instanceof CardNotShown ? entry(error.message, 300) : "could not be drawn";
     return `${describeAction(toolName, args)}\n\n(${why}; the start and the end are kept)\n${escapeUnsafe(clip(JSON.stringify(args, null, 2) ?? "{}", 4_000), true)}`;
   }
 }
