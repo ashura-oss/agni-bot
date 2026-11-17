@@ -1224,6 +1224,27 @@ interface ToolOutcome {
   stop?: RunStop;
 }
 
+/**
+ * A tool call's arguments, parsed once (C1, Sprint 5 hotfix). The gate judges this value and the handler is given this same
+ * value, deep-frozen, so nothing between the two can change what was judged. A parse error is returned, not thrown: the gate
+ * judges such a call with no arguments, and the handler step reports the error as before.
+ */
+export function prepareToolArguments(raw: string): { value: unknown; error: Error | null } {
+  try {
+    return { value: deepFreeze(JSON.parse(raw) as unknown), error: null };
+  } catch (error) {
+    return { value: undefined, error: error instanceof Error ? error : new Error(String(error)) };
+  }
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const item of Object.values(value as Record<string, unknown>)) deepFreeze(item);
+  }
+  return value;
+}
+
 async function executeTool(
   db: Database, threadID: string, turnID: string, call: ToolCall,
   registry: ReturnType<typeof buildTaskToolRegistry>, broker: ApprovalBroker, signal: AbortSignal,
@@ -1232,8 +1253,9 @@ async function executeTool(
   persona: Persona, guardrail: GuardrailState, hooks: ToolHooks,
 ): Promise<ToolOutcome> {
   const tool = registry.get(call.function.name);
-  let args: Record<string, unknown> = {};
-  try { args = JSON.parse(call.function.arguments) as Record<string, unknown>; } catch { /* handled below */ }
+  // One parse for the gate and the handler (C1): what is judged is what runs.
+  const prepared = prepareToolArguments(call.function.arguments);
+  const args: Record<string, unknown> = prepared.error ? {} : (prepared.value as Record<string, unknown>);
   const existing = db.query("SELECT result, ok, error FROM tool_calls WHERE turn_id = ? AND call_id = ? ORDER BY created_at DESC LIMIT 1").get(turnID, call.id) as { result: string | null; ok: number; error: string | null } | null;
   if (existing) {
     if (existing.result !== null) return { content: existing.result, awaiting: false };
@@ -1270,7 +1292,8 @@ async function executeTool(
     ownerWaitCeiling = setTimeout(releaseOwnerWait, hooks.ownerWaitMs);
   }
   try {
-    const parsed = JSON.parse(call.function.arguments) as unknown;
+    if (prepared.error) throw prepared.error;
+    const parsed = prepared.value;
     const timeout = AbortSignal.timeout(tool.timeoutMs);
     const combined = AbortSignal.any([signal, timeout]);
     const allowedDomains = hooks.allowedDomains;
