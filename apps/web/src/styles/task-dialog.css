@@ -1,4 +1,4 @@
-/* The new-task dialog (and the activity sheet) keep their fields their size and scroll.
+/* The new-task dialog (which also adds a subtask) keeps its fields their size and scrolls.
  * The dialog is a column with a max height; left alone, its flex children shrink to fit, and the
  * notes field was squeezed to 22px when the phone rules made the other fields 44px tall.
  */

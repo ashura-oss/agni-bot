@@ -180,22 +180,6 @@
   background: var(--surface);
 }
 
-/* The star in the corner of the mark. */
-.sidebar-tile-star {
-  position: absolute;
-  top: -2px;
-  right: -2px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: var(--amber);
-  color: #1a1206;
-  box-shadow: 0 0 0 2px var(--sidebar);
-}
-
 .sidebar-tile-name {
   font-size: 13px;
   font-weight: 600;

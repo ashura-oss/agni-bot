@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -196,13 +196,43 @@ describe("the new-task dialog body", () => {
 describe("the unpin button on a pinned tile", () => {
   const pins = strip(readFileSync(join(styles, "sidebar-pins.css"), "utf8"));
   const phonePins = mediaBlock(pins, "max-width: 720px");
+  const outsidePhone = pins.replace(phonePins, "");
 
-  it("is 22px drawn with a 44px touch area (12px past the padding box, inside its 1px border)", () => {
+  it("is a 22px circle", () => {
     expect(declarations(pins, ".sidebar-tile-unpin")["width"]).toBe("22px");
-    expect(declarations(phonePins, ".sidebar-tile-unpin::after")["inset"]).toBe("-12px");
   });
 
-  it("leaves room above the first row so the scrolling list does not clip that area", () => {
-    expect(px(declarations(pins, ".sidebar-grid")["padding-top"])).toBeGreaterThanOrEqual(8);
+  it("gets a 44px touch area on a phone that stays in the strip above the tile, never over the tile's own area", () => {
+    // Coordinates are from the top of the cell. The cell reserves a strip above the tile; the circle sits
+    // in it; the ::after area is the circle's padding box grown by `inset`, and it must stop at the strip's
+    // bottom edge, where the tile begins. (The 8px it reaches above the cell is the grid's row gap or
+    // padding, where no tile is.)
+    const strip_ = px(declarations(phonePins, ".sidebar-tile-cell")["padding-top"]);
+    const top = px(declarations(phonePins, ".sidebar-tile-unpin")["top"]);
+    const inset = (declarations(phonePins, ".sidebar-tile-unpin::after")["inset"] ?? "").split(/\s+/).map(px);
+    expect(inset).toHaveLength(4);
+    const [insetTop, , insetBottom, insetLeft] = inset as [number, number, number, number];
+    const border = 1, circle = 22;
+    const hitTop = top + border + insetTop;
+    const hitBottom = top + circle - border - insetBottom;
+    expect(hitBottom).toBeLessThanOrEqual(strip_);
+    expect(hitBottom - hitTop).toBeGreaterThanOrEqual(44);
+    expect(circle - 2 * border - insetLeft - (inset[1] ?? 0)).toBeGreaterThanOrEqual(44);
+    expect(hitTop).toBeGreaterThanOrEqual(-8);
+  });
+
+  it("leaves room above the first row on a phone so the scrolling list does not clip that area, and only there", () => {
+    expect(px(declarations(phonePins, ".sidebar-grid")["padding-top"])).toBeGreaterThanOrEqual(8);
+    // On a desktop the grid keeps the padding it had before the unpin button (overrides-v3.css: 0 above).
+    expect(declarations(outsidePhone, ".sidebar-grid")["padding-top"]).toBeUndefined();
+    expect(declarations(outsidePhone, ".sidebar-grid")["padding"]).toBeUndefined();
+    expect(declarations(outsidePhone, ".sidebar-tile-cell")["padding-top"]).toBeUndefined();
+  });
+});
+
+describe("styles nothing renders", () => {
+  const all = readdirSync(styles).map((name) => read(name)).join(" ");
+  it.each([".sidebar-tile-star", ".custom-swatch"])("%s is gone", (selector) => {
+    expect(all).not.toContain(selector);
   });
 });
