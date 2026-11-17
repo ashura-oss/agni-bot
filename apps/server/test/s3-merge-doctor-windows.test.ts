@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runDoctor } from "../src/cli/s3-doctor";
-import { lockVault, setKeyStoreOverride } from "../src/secrets";
+import { createMemoryKeyStore, lockVault, setKeyStoreOverride } from "../src/secrets";
 
 let home = "";
 beforeEach(() => {
@@ -17,6 +17,9 @@ beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "agni-doctorwin-"));
 });
 afterEach(() => {
+  // Put back what `test/preload.ts` installs: the override is process-wide, and a test that follows in this run must not find it gone.
+  lockVault();
+  setKeyStoreOverride(createMemoryKeyStore());
   rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 });
 
