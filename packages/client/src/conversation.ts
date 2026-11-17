@@ -702,8 +702,8 @@ export class Conversation {
       case "approval.rule.revoke.ok":
         return [];
 
-      // Sprint 2 answers (full card text, pause state, spend). Their UI is S2-6's; until then the
-      // reducer leaves them alone so the new frames never break an older client's transcript.
+      // Sprint 2 answers (pause state, spend): they are state, not transcript. The app keeps them in
+      // `PolicyState`, so the reducer leaves them alone.
       case "policy.pause.ok":
       case "spend.status.ok":
       case "spend.stopped":
