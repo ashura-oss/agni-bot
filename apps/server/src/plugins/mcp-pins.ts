@@ -14,6 +14,7 @@
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { MCP_PINS_SQL } from "../db/s3/m60";
+import { redactForStorage } from "../util/redact-storage";
 
 /** The part of an MCP tool listing that is pinned. */
 export interface PinnedDefinition {
@@ -106,8 +107,12 @@ export function reconcilePins(db: Database, plugin: string, offered: PinCandidat
       }
     }
     for (const item of offered) {
+      // The definition is the server's own text, kept so the owner can see a diff. A server that echoes the
+      // bearer into a description must not leave it here; `hash` is of the definition as offered, so masking
+      // the copy changes no verdict.
+      const shown = redactForStorage(item.definition);
       if (!trusted) {
-        db.run("INSERT INTO mcp_tool_pins (plugin_id, tool_name, status, hash, definition, recorded_at) VALUES (?, ?, 'approved', ?, ?, ?)", [plugin, item.tool, item.hash, item.definition, stamp]);
+        db.run("INSERT INTO mcp_tool_pins (plugin_id, tool_name, status, hash, definition, recorded_at) VALUES (?, ?, 'approved', ?, ?, ?)", [plugin, item.tool, item.hash, shown, stamp]);
         verdicts.set(item.tool, "approved");
         continue;
       }
@@ -119,7 +124,7 @@ export function reconcilePins(db: Database, plugin: string, offered: PinCandidat
       db.run(
         `INSERT INTO mcp_tool_pins (plugin_id, tool_name, status, hash, definition, recorded_at) VALUES (?, ?, 'pending', ?, ?, ?)
          ON CONFLICT (plugin_id, tool_name, status) DO UPDATE SET hash = excluded.hash, definition = excluded.definition, recorded_at = excluded.recorded_at`,
-        [plugin, item.tool, item.hash, item.definition, stamp],
+        [plugin, item.tool, item.hash, shown, stamp],
       );
       verdicts.set(item.tool, "pending");
     }

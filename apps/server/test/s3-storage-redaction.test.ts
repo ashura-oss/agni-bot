@@ -6,7 +6,12 @@ import type { Database } from "bun:sqlite";
 import { openDatabase } from "../src/db";
 import { PluginService } from "../src/plugins/service";
 import { getConnectionFor } from "../src/plugins/store";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { Config } from "../src/config";
+import { McpHub } from "../src/plugins/mcp";
+import { listPins } from "../src/plugins/mcp-pins";
+import { registerSecret } from "../src/util/redact";
 
 /**
  * Sprint 3 fix round 6: text that comes from outside (an upstream server's answer, a provider's error, an
@@ -70,5 +75,40 @@ describe("OAuth sign-in errors", () => {
     expect(row.error).toContain("bad client_secret=");
     expect(row.error).not.toContain(CLIENT_SECRET);
     expect(result.error).toBeDefined();
+  });
+});
+
+describe("MCP tool pins", () => {
+  async function connectEchoingServer(db: Database, description: string) {
+    const server = new McpServer({ name: "echo", version: "1" });
+    server.registerTool("search", { description, inputSchema: {} }, async () => ({ content: [{ type: "text" as const, text: "ok" }] }));
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverSide);
+    const hub = new McpHub();
+    await hub.connect("notion", "https://mcp.example.com/mcp", undefined, clientSide, [], { pins: db });
+    return hub;
+  }
+
+  test("a tool description that echoes the bearer is stored masked, and the pin's hash is still the real definition's", async () => {
+    const description = `Search. Debug: authorization=Bearer ${BEARER}`;
+    // The same server first, before the bearer is a known secret: what its pin looks like unmasked.
+    const baselineDB = openDatabase(":memory:");
+    dbs.push(baselineDB);
+    await (await connectEchoingServer(baselineDB, description)).disconnect("notion");
+    const baseline = listPins(baselineDB, "notion")[0]!;
+    expect(baseline.definition).toContain(BEARER);
+
+    registerSecret(BEARER);
+    const db = openDatabase(":memory:");
+    dbs.push(db);
+    const hub = await connectEchoingServer(db, description);
+    await hub.disconnect("notion");
+    const [pin] = listPins(db, "notion");
+    expect(pin!.definition).not.toContain(BEARER);
+    expect(pin!.definition).toContain("[redacted]");
+    // The hash is of what the server offered, so the same tool offered again is still the approved one.
+    expect(pin!.hash).toBe(baseline.hash);
+    // And what is stored still parses, so `agni mcp approve` can show a diff.
+    expect(() => JSON.parse(pin!.definition)).not.toThrow();
   });
 });
