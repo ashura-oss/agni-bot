@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import { PeerIntentSchema, type PeerIntent, type TaskInfo } from "@agni/protocol";
 import { newID, nowISO } from "../util/ids";
+import { readProvenance, type Provenance } from "../policy/provenance";
 
 export type TaskStatus = "open" | "done" | "snoozed";
 export type TaskPriority = "low" | "normal" | "high" | "urgent";
@@ -37,6 +38,8 @@ export interface DelegationBrief {
   rootJob?: string | null;
   /** The refusal scope the delegating run was handed (`RunContext.denialRoot`), when it is not its own root; carried on to the child, the wake and a resumed run. */
   denialRoot?: string;
+  /** Where the delegating run's chain came from (`policy/provenance.ts`); carried on to the child, the wake and a resumed run. Absent reads as unknown. */
+  provenance?: Provenance;
   /**
    * What this delegation is for. Phase 1 stores and reports it; the value is
    * not yet used to route or gate the work.
@@ -408,6 +411,12 @@ export function briefRoot(raw: string | null): { rootTurnID: string; rootJob: st
       ...(typeof value.denialRoot === "string" && value.denialRoot !== "" ? { denialRoot: value.denialRoot } : {}),
     };
   } catch { return undefined; }
+}
+
+/** Where the chain a delegation was made in came from. A brief that does not say, or cannot be read, is the unknown chain (a bot's). */
+export function briefProvenance(raw: string | null): Provenance {
+  if (!raw) return readProvenance(undefined);
+  try { return readProvenance((JSON.parse(raw) as { provenance?: unknown } | null)?.provenance); } catch { return readProvenance(undefined); }
 }
 
 function parseAttachmentIDs(value: string): string[] {

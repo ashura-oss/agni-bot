@@ -22,6 +22,7 @@ import { readCapabilities } from "../policy/narrowing";
 import { readTaint, unknownTaint } from "../policy/context";
 import { saveTaskTaint, taskTaint } from "../policy/carry";
 import { denialScope } from "../policy/denials";
+import { mergeProvenance, readProvenance, type Provenance } from "../policy/provenance";
 import type { TaintSource } from "../policy/types";
 import type { Router } from "../models/router";
 import { getThread } from "../stores/threads";
@@ -38,6 +39,7 @@ import {
   taskInfo,
   trackRunningDelegation,
   briefChainID,
+  briefProvenance,
   briefRoot,
 } from "../stores/tasks";
 import { saveArtifact } from "../stores/artifacts";
@@ -103,11 +105,18 @@ export interface TurnJobPayload {
     redacted: boolean;
     /** What that task's run read from outside text (S2-06). Empty for a task that read nothing. */
     taint?: unknown;
+    /** Where the chain that task was delegated in came from (`policy/provenance.ts`). Missing or unreadable: the unknown chain. */
+    provenance?: unknown;
   }>;
   /** What the run that queued this job had read from outside text, for a delegated child (S2-06). */
   taint?: unknown;
   /** What the run that queued this job could call; a delegated child may call only these (S2-06). Missing or unreadable: the inert tools only. */
   capabilities?: unknown;
+  /**
+   * Where the chain this job belongs to came from: written by the server (`job_schedule`, `delegate_task`, the CLI's `job add`, a wake), never taken
+   * from a tool's arguments. Missing or unreadable: the unknown chain, which is a bot's (`policy/provenance.ts`).
+   */
+  provenance?: unknown;
   /** The request this job belongs to: set on a delegated child, a wake and a resumed task so a refusal earlier in the chain still holds. */
   rootTurnID?: string;
   rootJob?: string | null;
@@ -547,6 +556,14 @@ function startTaint(payload: TurnJobPayload): TaintSource[] {
   return payload.taint === undefined ? [unknownTaint("a task whose sender did not say what it had read")] : readTaint(payload.taint);
 }
 
+/**
+ * Where the chain this run belongs to came from: the job's own record, and for a wake each task it is told about. A chain is the owner's
+ * only if every part is, and a part that is missing or unreadable is a bot's.
+ */
+function startProvenance(payload: TurnJobPayload): Provenance {
+  return mergeProvenance(readProvenance(payload.provenance), ...(payload.results ?? []).map((item) => readProvenance(item.provenance)));
+}
+
 /** A wake is told about finished tasks; if one of them read outside text, so has the bot that reads it. */
 function wakeTaint(db: Database, results: TurnJobPayload["results"]): TaintSource[] {
   const out: TaintSource[] = [];
@@ -599,6 +616,8 @@ function wakeParent(deps: TurnJobDeps, taskID: string, summary: string, parentDe
     summary: visible.text ?? "",
     redacted: visible.redacted,
     taint: taskTaint(deps.db, task.id),
+    // The wake is a link of the chain the task was delegated in.
+    provenance: briefProvenance(task.brief),
   };
   claimResultDelivery(deps.db, task.id, () => {
     const existing = findQueuedJobByPayloadKey(deps.db, "turn", wakeKey);
@@ -619,6 +638,7 @@ function wakeParent(deps: TurnJobDeps, taskID: string, summary: string, parentDe
         chainID: briefChainID(task.brief),
         // The wake is part of the request the task came from: what the owner refused there is refused here (S2-07).
         ...briefRoot(task.brief),
+        provenance: item.provenance,
         results: [item],
       },
     });
@@ -677,6 +697,8 @@ async function runTurn(
         // undefined says the sender did not say what it had read (a bot that starts from it is tainted); a list, even empty, says it did.
         ...(payload.taint !== undefined || payload.wakeKey ? { taint: [...(payload.taint !== undefined ? readTaint(payload.taint) : []), ...wakeTaint(deps.db, payload.results)] } : {}),
         ...(payload.rootTurnID ? { rootTurnID: payload.rootTurnID, rootJob: payload.rootJob ?? null } : {}),
+        // Where this chain came from: always given, so a job with no record of it is the unknown chain and not "the owner's by default".
+        provenance: startProvenance(payload),
         ...(typeof payload.denialRoot === "string" && payload.denialRoot !== "" ? { denialRoot: payload.denialRoot } : {}),
         // A delegated child is on its parent's clock; a wake, a resumed task and any other job start their own, and a retry keeps the one its run started (`jobs.run_clock_key`).
         ...(payload.clockKey ? { clockKey: payload.clockKey } : {}),

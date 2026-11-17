@@ -20,6 +20,7 @@ import { canonicalAgentID } from "../agent/personas";
 import { describeSchedule, nextDailyRun, parseDay, parseWallClock } from "../jobs/schedule";
 import { MAX_EVERY_MINUTES, MIN_EVERY_MINUTES, checkSchedule } from "../jobs/schedule-check";
 import { isPeerPrincipal, isTainted, packTaint, unknownTaint } from "../policy/context";
+import { UNKNOWN_PROVENANCE, readProvenance, scheduledProvenance, type Provenance } from "../policy/provenance";
 import type { RunContext, TaintSource } from "../policy/types";
 import { denialScope } from "../policy/denials";
 import { audit } from "../policy/audit-sink";
@@ -134,6 +135,12 @@ export interface ScheduledFrom {
    * `null` says the run's set could not be read, which fires with the inert tools only. Absent for a run that was not narrowed.
    */
   capabilities?: string[] | null;
+  /**
+   * Where the scheduling run's chain came from (`policy/provenance.ts`): a job a run schedules is made by a bot, so the chain is marked
+   * `botChained` whoever started the run, and every fire of the job, and everything it delegates, wakes and schedules, carries the mark.
+   * Absent: the unknown chain, which reads as a bot's.
+   */
+  provenance?: Provenance;
 }
 
 /** What a job made by this run must start with, or undefined when the run read nothing outside. A record that cannot be read is one unknown source. */
@@ -165,7 +172,7 @@ function inheritedRoot(ctx: ToolContext): RequestRoot | undefined {
 }
 
 export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: string, from: ScheduledFrom = {}): JobScheduleResult {
-  const { root, denialRoot, createdByRequest, created, taint, capabilities } = from;
+  const { root, denialRoot, createdByRequest, created, taint, capabilities, provenance } = from;
   // The rules the engine and the card use before they ask the owner (jobs/schedule-check.ts): the same ones, so none can drift.
   const problem = checkSchedule({ ...args, agent_id: args.agentID }, callerAgentID);
   if (problem) throw new Error(problem);
@@ -180,6 +187,8 @@ export function scheduleJob(db: Database, args: JobScheduleArgs, callerAgentID: 
     inputRole: "system",
     // Counted against the bot's own allowance (S2-09).
     scheduledBy: "bot",
+    // Where the chain came from, carried on to every fire (the one flag pair, never looked up from a root job later).
+    provenance: readProvenance({ ...(provenance ?? UNKNOWN_PROVENANCE), botChained: true }),
     notify: args.notify !== false,
     // The owner's refusals in the run that scheduled it hold in every run of this job, for good (what the run delegates, wakes and schedules too).
     ...(denialRoot ? { denialRoot } : {}),
@@ -398,6 +407,7 @@ export function createJobTools(db: Database): ToolDefinition<unknown, unknown>[]
           root: inheritedRoot(ctx),
           taint: carriedTaint(ctx.run),
           capabilities: carriedCapabilities(ctx.run),
+          provenance: scheduledProvenance(ctx.run),
           created: { turnID: ctx.turnID, jobID: ctx.run?.jobID ?? null, approval: ctx.ownerApproved === true ? "owner_card" : "own_turn" },
         });
       },

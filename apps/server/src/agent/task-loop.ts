@@ -9,6 +9,7 @@ import { gateToolCall } from "./tool-gate";
 import { abortReasonOf } from "./abort-reason";
 import { markRun } from "../policy/carry";
 import { createRunContext, isTainted, packTaint, readTaint, unknownTaint } from "../policy/context";
+import type { Provenance } from "../policy/provenance";
 import { narrowCapabilities } from "../policy/narrowing";
 import { ownerWordsOf, recordOwnerWords } from "../policy/owner-words";
 import { saveTaskTaint } from "../policy/carry";
@@ -175,6 +176,12 @@ export interface TaskTurnRun {
      * like a delegated child: a list that cannot be read leaves only the inert tools. Set from the job's payload, never a tool argument.
      */
     narrowed?: boolean;
+    /**
+     * Where the chain this run belongs to came from (`policy/provenance.ts`), already read back: what the job, brief or result that started
+     * it carried, or what the handing run's link made of it. Server-set. Absent: the owner's own chat turn starts a chain; any other run
+     * has no record of one.
+     */
+    provenance?: Provenance;
   };
   /** Restrict task tools to this list, intersected with the persona's tools. */
   toolAllowlist?: string[];
@@ -575,6 +582,7 @@ async function runTaskTurnLocked(db: Database, router: Router, settings: TaskTur
     principal,
     capabilities: callableTools,
     ...(narrowedRun ? { narrowed: true } : {}),
+    ...(run.policy?.provenance ? { provenance: run.policy.provenance } : {}),
     registry,
     isUnloaded: (name) => deferred.includes(name) && !loadedTools.has(name),
     // The owner's own words, for "send only where the owner said": what the owner typed in this thread (kept in its

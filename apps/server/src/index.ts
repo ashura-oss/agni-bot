@@ -39,7 +39,8 @@ import { openDatabase, openDatabaseForCLI } from "./db";
 import { seedAgentPromptTemplates, setOwnerName, loadRuntimeAgents } from "./agent/personas";
 import { setSlotBudgets } from "./context/compiler";
 import { JobRunner } from "./jobs/runner";
-import { registerTurnJob, type TurnJobPayload } from "./jobs/turn";
+import { registerTurnJob } from "./jobs/turn";
+import { ownerJobPayload } from "./jobs/owner-job";
 import { registerAllJobs } from "./jobs/registry";
 import { nextDailyRun } from "./jobs/schedule";
 import { scheduleTagger } from "./jobs/tagger";
@@ -335,13 +336,8 @@ function jobAdd(db: ReturnType<typeof openDatabase>, args: string[]): void {
 
   const threadID = flag(args, "--thread");
   const agentID = flag(args, "--agent");
-  const payload: TurnJobPayload = {
-    text,
-    ...(threadID ? { threadID } : {}),
-    ...(agentID ? { agentID } : {}),
-    notify: !hasFlag(args, "--quiet"),
-    ...(everyMs ? { everyMs } : {}),
-  };
+  // The owner's own job: stamped as such, so its fires are the owner's work and not a bot's.
+  const payload = ownerJobPayload({ text, threadID, agentID, notify: !hasFlag(args, "--quiet"), everyMs });
 
   const job = enqueueJob(db, { kind: flag(args, "--kind") ?? "turn", payload, runAt });
   console.log(`${job.id}  ${job.kind}  first run ${job.run_at}${everyMs ? ` then every ${formatDuration(everyMs)}` : ""}`);

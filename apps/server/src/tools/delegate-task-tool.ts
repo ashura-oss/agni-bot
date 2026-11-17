@@ -29,6 +29,7 @@ import { MAX_DEPTH, canStartDelegation, maxConcurrentDelegations } from "../agen
 import { listTaskNotes } from "../stores/task-notes";
 import { getArtifact } from "../stores/artifacts";
 import { packTaint, unknownTaint } from "../policy/context";
+import { handedProvenance } from "../policy/provenance";
 import { carryTaint, saveTaskTaint, taskTaint } from "../policy/carry";
 import { denialScope } from "../policy/denials";
 
@@ -188,6 +189,9 @@ export function registerDelegateTaskTool(registry: ToolRegistry, deps: DelegateT
       brief.chainID = chainID;
       // The task row remembers its root, so a wake or a resumed run reports back inside the same request.
       if (ctx.run) { brief.rootTurnID = ctx.run.rootTurnID; brief.rootJob = ctx.run.rootJob; if (ctx.run.denialRoot) brief.denialRoot = ctx.run.denialRoot; }
+      // Where this chain came from goes with the task: the wake and a resumed run read it back from here, never from a root job's row.
+      const provenance = ctx.run ? handedProvenance(ctx.run) : undefined;
+      if (provenance) brief.provenance = provenance;
       const task = createDelegationTask(deps.db, {
         ownerAgentID: toAgentID,
         brief,
@@ -222,6 +226,7 @@ export function registerDelegateTaskTool(registry: ToolRegistry, deps: DelegateT
           ...(ctx.run ? { taint: packTaint(ctx.run) } : {}),
           ...(ctx.run ? { rootTurnID: ctx.run.rootTurnID, rootJob: ctx.run.rootJob, clockKey: ctx.run.clockKey } : {}),
           ...(ctx.run?.denialRoot ? { denialRoot: ctx.run.denialRoot } : {}),
+          ...(provenance ? { provenance } : {}),
           // What this run could call: the child's tools are cut down to it (S2-06). None says the sender is unknown, and the child gets only the inert tools.
           ...(ctx.run ? { capabilities: [...ctx.run.effectiveCapabilities] } : {}),
           rootKey,
