@@ -8,7 +8,7 @@
  * the parsed value, one at a time, as the text they are. Round 8: the parser and the raw bytes can disagree
  * (`JSON.parse` keeps the last of two equal keys), so parsed JSON is never returned as the raw text.
  */
-import { redact } from "./redact";
+import { REDACTED, redact } from "./redact";
 
 /** How many layers of JSON inside a string are opened. Deeper text is masked as it is; the registry covers two levels of escaping. */
 const MAX_JSON_DEPTH = 6;
@@ -52,8 +52,9 @@ export function redactJSONText(text: string, depth = 0): string {
     const walked = walk(parsed, depth);
     return withBackstop(JSON.stringify(walked), walked);
   } catch {
-    // Nested too deep to walk: mask it as plain text rather than let any of it through.
-    return redact(text);
+    // Nested too deep to walk. The text parsed, so it is not returned as text either: plain-text masking would miss
+    // a `\u`-escaped secret or one in the first of two equal keys, and anyone can nest deep enough to get here.
+    return REDACTED;
   }
 }
 

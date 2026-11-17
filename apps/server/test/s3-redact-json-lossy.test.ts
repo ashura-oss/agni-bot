@@ -136,3 +136,31 @@ describe("a lossy number keeps its digits", () => {
     expect(JSON.parse(out)).toEqual({ id: REDACTED });
   });
 });
+
+describe("a document too deep to walk is not returned as the text the parser read", () => {
+  test("a \\u-escaped secret under 50,000 levels of nesting is gone, not passed through as raw text", () => {
+    registerSecret(SECRET);
+    const depth = 50_000;
+    const deep = `${"[".repeat(depth)}"${ESCAPED_SECRET}"${"]".repeat(depth)}`;
+    expect(() => JSON.parse(deep)).not.toThrow();
+    const out = redactJSONText(deep);
+    expect(out).not.toContain("Zk93");
+    expect(out).not.toContain("ossy-secret");
+  });
+
+  test("a duplicate-key secret at that depth is gone too", () => {
+    registerSecret(SECRET);
+    const depth = 50_000;
+    const deep = `${"[".repeat(depth)}{"k":"${SECRET}","k":"x"}${"]".repeat(depth)}`;
+    expect(redactJSONText(deep)).not.toContain("Zk93");
+  });
+
+  test("a shared document with such a field still goes through, the field withheld", () => {
+    registerSecret(SECRET);
+    const depth = 50_000;
+    const deep = `${"[".repeat(depth)}"${ESCAPED_SECRET}"${"]".repeat(depth)}`;
+    const masked = maskedDocument(documentOf(toolRecord({ result: deep })));
+    expect(JSON.stringify(masked)).not.toContain("Zk93");
+    expect(masked.records[0]!.result).toBe(REDACTED);
+  });
+});
