@@ -219,11 +219,11 @@ describe("1b. what a delegated task read reaches the bot that reads the task, an
       const runner = new JobRunner(db, () => undefined, { maxPerTick: 5 });
       registerTurnJob(runner, { db, router: scripted([{ id: "l", name: "load_tools", args: { names: ["job_schedule"] } }, { id: "s", name: "job_schedule", args: { text: "Check in tomorrow", at: new Date(Date.now() + 86_400_000).toISOString() } }]), settings, emit: () => undefined });
       // A wake of the owner's own chain (what this test is not about): the taint record is the only thing that differs.
-      enqueueJob(db, { kind: "turn", payload: { agentID: "ea", threadID: parent.id, notify: false, inputRole: "system", wakeKey: `wake:${parent.id}`, depth: 1, ownerOnly: true, results } });
+      enqueueJob(db, { kind: "turn", payload: { agentID: "ea", threadID: parent.id, notify: false, inputRole: "system", wakeKey: `wake:${parent.id}`, depth: 1, ownerOnly: true, narrowed: false, results } });
       await runner.tick();
       return errorOf("job_schedule");
     };
-    const item = { taskID: "tsk_x", agentID: "researcher", summary: "found it", redacted: false, ownerOnly: true };
+    const item = { taskID: "tsk_x", agentID: "researcher", summary: "found it", redacted: false, ownerOnly: true, narrowed: false };
     expect(await schedule([item])).toBe("protected_write");
     expect(await schedule([{ ...item, taint: [] }])).toBeNull();
   });

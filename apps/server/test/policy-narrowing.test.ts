@@ -192,8 +192,8 @@ describe("a wake turn", () => {
     enqueueJob(database, {
       kind: "turn",
       payload: {
-        agentID: "ea", threadID: parent.id, notify: false, inputRole: "system", wakeKey: `wake:${parent.id}`, depth: 1, ownerOnly: true,
-        results: [{ taskID: "tsk_done", agentID: "researcher", summary: "found it", redacted: false, taint, ownerOnly: true }],
+        agentID: "ea", threadID: parent.id, notify: false, inputRole: "system", wakeKey: `wake:${parent.id}`, depth: 1, ownerOnly: true, narrowed: false,
+        results: [{ taskID: "tsk_done", agentID: "researcher", summary: "found it", redacted: false, taint, ownerOnly: true, narrowed: false }],
       },
     });
     await runner.tick();
