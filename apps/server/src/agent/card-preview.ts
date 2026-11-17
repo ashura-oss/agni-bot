@@ -24,6 +24,7 @@ import type { Preflight } from "../routines/types";
 import { getRoutine } from "../stores/routines";
 import { checkSchedule } from "../jobs/schedule-check";
 import { isOutsideScratch, resolveWritePath, scratchDir, writeTargetExists } from "../tools/write-file";
+import { redact } from "../util/redact";
 
 /** The most characters a card's body holds. A call whose body would be longer is not put to the owner: it is refused. */
 export const CARD_BODY_MAX_CHARS = 20_000;
@@ -174,12 +175,40 @@ function writePreview(args: Record<string, unknown>, path: string): string {
  * card (it is the same code that draws the card, so the two cannot disagree). Any failure to draw the card counts: fail closed.
  */
 export function cardProblem(toolName: string, args: Record<string, unknown>, context: { bot: string; card: ApprovalCard; db: Database; agentID: string }): string | null {
+  let body: string;
   try {
-    previewAction(toolName, args, context.bot, { card: context.card, db: context.db, agentID: context.agentID });
-    return null;
+    body = previewAction(toolName, args, context.bot, { card: context.card, db: context.db, agentID: context.agentID });
   } catch (error) {
     return error instanceof CardNotShown ? error.message : `the owner's card for this call could not be drawn (${error instanceof Error ? entry(error.message, 120) : "unknown error"}), so it was not run`;
   }
+  return carriesSavedSecret(describeAction(toolName, args), body) ? SAVED_SECRET_PROBLEM : null;
+}
+
+/** Why a call that carries a saved secret is not run, in words for the model. It does not repeat the secret. */
+export const SAVED_SECRET_PROBLEM =
+  "this call carries a saved secret; the owner cannot see it on a card, so it cannot run. Take the key, token or password out of the call and try again.";
+
+/**
+ * True when the text of a card (its heading and its body) changes under `redact()`: it holds a secret the server has saved. A card
+ * shows that secret as `[redacted]`, so the owner would be approving something the card does not show: a card never shows less than
+ * what will run. The call is refused instead, and a call a stored rule would let through unasked is refused the same way.
+ */
+export function carriesSavedSecret(heading: string, body: string): boolean {
+  return redact(heading) !== heading || redact(body) !== body;
+}
+
+/**
+ * The same question for a call that no card will be raised for because a stored "always allow" rule answers it. The text a card would
+ * hold is drawn the same way; a call that cannot be drawn whole (too long, a routine that is not there) is judged on its arguments.
+ */
+export function savedSecretProblem(toolName: string, args: Record<string, unknown>, context: { bot: string; db: Database; agentID: string }): string | null {
+  let body: string;
+  try {
+    body = previewAction(toolName, args, context.bot, { db: context.db, agentID: context.agentID });
+  } catch {
+    body = JSON.stringify(args) ?? "";
+  }
+  return carriesSavedSecret(describeAction(toolName, args), body) ? SAVED_SECRET_PROBLEM : null;
 }
 
 /** The tool each kind of standing rule is a call of, and how it is shown. A record over every kind: a new kind cannot be added without a preview. */
