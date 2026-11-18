@@ -12,15 +12,19 @@
  * definition carries), read the way the engine reads it: `policyFor(name, tool.meta)`.
  * `metaOf` below is the single place that does it.
  */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import type { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_AGENT_TOOLS, IMPLICIT_AGENT_TOOLS, PERSONAS } from "../../src/agent/personas";
+import { prepareToolArguments } from "../../src/agent/task-loop";
 import { openDatabase } from "../../src/db";
+import * as engine from "../../src/policy/engine";
 import { assessCall, policyFor, toolsMissingMetadata } from "../../src/policy/metadata";
+import { unbindPauseStore } from "../../src/policy/pause";
 import type { ToolClass, ToolMeta } from "../../src/policy/tool-meta";
+import { approvalTarget } from "../../src/stores/approval-rules";
 import { registerAskTool, registerDraftEmailTool } from "../../src/tools/ask-tool";
 import { registerArtifactTool } from "../../src/tools/artifact-tool";
 import { registerCreateAgentTool } from "../../src/tools/create-agent-tool";
@@ -35,6 +39,7 @@ import { registerScratchTools } from "../../src/tools/scratch-tool";
 import { registerSecureExecTool } from "../../src/tools/secure-exec-tool";
 import { buildTaskToolRegistry, registerLoadTools } from "../../src/tools/task-registry";
 import { createUpdateAgentTool } from "../../src/tools/update-agent-tool";
+import { policyRig } from "../policy-fixture";
 
 let db: Database | undefined;
 afterEach(() => { db?.close(); db = undefined; });
@@ -192,82 +197,156 @@ describe("INV-03 a tool the policy does not know is tier 3; an MCP tool is tier 
 });
 
 /**
- * C1 (Sprint 5 hotfix): the gate judges a call's arguments and the handler acts on them, so the two must see the same
- * thing. For every tool whose row has `assess` or `resources`, an argument padded with whitespace is either refused by the
- * handler (JUDGED: the value would otherwise be read two ways) or judged exactly as the unpadded one (EQUIVALENT: the
- * gate's own extractor trims or parses it the way the handler does). A new tool with `assess` or `resources` fails here
- * until it is put in one of the two lists.
+ * C1 and HF-2 (Sprint 5 hotfix): the gate judges a call's arguments and the handler acts on them; the two must read the same
+ * thing. For every tool the gate judges by its arguments (assess, resources, validate, standingKind, originRefusal, a taint
+ * condition, an "Always allow" target), each variant below goes through the task loop's own preparation, the registry's
+ * wrapper and a spy in place of the tool's handler. The gate's whole view of the prepared value must equal its view of what
+ * the handler received, and a padded judged field must be refused by the validate hook, before any card.
  */
-describe("INV-03 the gate and the handler read a padded argument the same way", () => {
-  // The handlers below may touch files: they run against a scratch folder of their own, never the owner's.
+describe("INV-03 the gate and the handler read the same arguments", () => {
   let scratch = "";
   let savedScratch: string | undefined;
+  let savedHome: string | undefined;
   beforeEach(() => {
+    unbindPauseStore();
     scratch = mkdtempSync(join(tmpdir(), "agni-inv03-"));
     savedScratch = process.env.AGNI_SCRATCH_DIR;
-    process.env.AGNI_SCRATCH_DIR = scratch;
+    savedHome = process.env.AGNI_HOME;
+    process.env.AGNI_SCRATCH_DIR = join(scratch, "scratch");
+    process.env.AGNI_HOME = scratch;
   });
   afterEach(() => {
-    if (savedScratch === undefined) delete process.env.AGNI_SCRATCH_DIR;
-    else process.env.AGNI_SCRATCH_DIR = savedScratch;
+    if (savedScratch === undefined) delete process.env.AGNI_SCRATCH_DIR; else process.env.AGNI_SCRATCH_DIR = savedScratch;
+    if (savedHome === undefined) delete process.env.AGNI_HOME; else process.env.AGNI_HOME = savedHome;
     rmSync(scratch, { recursive: true, force: true });
   });
-  const PADS = [(v: string) => ` ${v}`, (v: string) => `${v} `, (v: string) => `\t${v}`, (v: string) => `${v}\n`];
-  const JUDGED: Record<string, { args: Record<string, unknown>; fields: string[] }> = {
-    write_file: { args: { path: "out.txt", content: "hi" }, fields: ["path"] },
-    read_file: { args: { path: "out.txt" }, fields: ["path"] },
-    grep: { args: { pattern: "x", path: "sub" }, fields: ["path"] },
-    glob: { args: { pattern: "*.md", path: "sub" }, fields: ["path"] },
-    bash: { args: { command: "echo hi", cwd: "sub" }, fields: ["command", "cwd"] },
-    run_privileged: { args: { command: "sudo true", purpose: "test" }, fields: ["command"] },
-  };
-  const EQUIVALENT: Record<string, { args: Record<string, unknown>; fields: string[] }> = {
-    web_fetch: { args: { url: "https://example.com/page" }, fields: ["url"] },
-    link_save: { args: { url: "https://example.com/page" }, fields: ["url"] },
-    mail_send: { args: { to: ["a@example.com"], subject: "s", body: "b" }, fields: ["to"] },
-    calendar_create: { args: { title: "t", start: "2026-11-18T09:00:00Z", attendees: ["a@example.com"] }, fields: ["attendees"] },
-    calendar_update: { args: { eventID: "e1", attendees: ["a@example.com"] }, fields: ["attendees"] },
-    share_thread: { args: {}, fields: [] },
-    job_schedule: { args: { prompt: "p" }, fields: [] },
-    routine_create: { args: { name: "n" }, fields: [] },
-    routine_pause: { args: { routineID: "r", enabled: true }, fields: [] },
-  };
-  const padded = (value: unknown, pad: (v: string) => string): unknown =>
-    Array.isArray(value) ? value.map((item) => pad(String(item))) : pad(String(value));
 
-  test("every tool with assess or resources is in exactly one list, and every listed tool is registered", () => {
+  const PADS = [(v: string) => ` ${v}`, (v: string) => `${v} `, (v: string) => `\t${v}`, (v: string) => `${v}\n`, (v: string) => `\u00a0${v}`, (v: string) => `${v}\u2028`, (v: string) => `\ufeff${v}`];
+  type Row = { args: Record<string, unknown>; judged?: string[]; padded?: string[]; lists?: string[]; optional?: string[]; numbers?: string[] };
+  // judged: string fields the gate reads and the tool uses as written; a padded value is refused before any card.
+  // padded: string fields the gate itself trims as the tool does (recipients); padding must not change the gate's view.
+  // lists: array fields sent as a single string; optional: fields sent as null; numbers: integer fields sent as strings.
+  const ROWS: Record<string, Row> = {
+    write_file: { args: { path: "out.txt", content: "hi", append: false }, judged: ["path"], optional: ["append"] },
+    read_file: { args: { path: "out.txt", offset: 0, limit: 5 }, judged: ["path"], numbers: ["offset", "limit"], optional: ["offset", "limit"] },
+    grep: { args: { pattern: "x", path: "sub", maxResults: 5 }, judged: ["path"], numbers: ["maxResults"], optional: ["path", "maxResults"] },
+    glob: { args: { pattern: "*.md", path: "sub", maxResults: 5 }, judged: ["path"], numbers: ["maxResults"], optional: ["path", "maxResults"] },
+    bash: { args: { command: "echo hi", cwd: "sub", timeoutMs: 5_000 }, judged: ["command", "cwd"], numbers: ["timeoutMs"], optional: ["cwd", "timeoutMs"] },
+    run_privileged: { args: { command: "sudo true", purpose: "test", timeoutMs: 5_000 }, judged: ["command"], numbers: ["timeoutMs"], optional: ["timeoutMs"] },
+    web_fetch: { args: { url: "https://example.com/page", maxChars: 1_000 }, judged: ["url"], numbers: ["maxChars"], optional: ["maxChars"] },
+    link_save: { args: { url: "https://example.com/page", note: "n", tags: ["a"] }, judged: ["url"], lists: ["tags"], optional: ["note", "tags"] },
+    mail_send: { args: { account: "agent", to: ["a@example.com"], subject: "s", body: "b" }, padded: ["to"], lists: ["to"] },
+    calendar_create: { args: { summary: "t", start: "2026-11-18T09:00:00Z", end: "2026-11-18T10:00:00Z", attendees: ["a@example.com"] }, padded: ["attendees"], lists: ["attendees"], optional: ["attendees"] },
+    calendar_update: { args: { eventId: "e1", attendees: ["a@example.com"] }, padded: ["attendees"], lists: ["attendees"], optional: ["attendees"] },
+    share_thread: { args: { title: "notes" }, optional: ["title"] },
+    job_schedule: { args: { text: "check mail", dailyAt: "09:05", days: ["mon", "tue"], notify: false }, lists: ["days"], optional: ["notify", "days"] },
+    routine_create: { args: { name: "n", prompt: "p", cron: "0 9 * * *", timezone: "UTC", maxTokens: 1_000 }, numbers: ["maxTokens"], optional: ["maxTokens"] },
+    routine_pause: { args: { id: "rtn_1", enabled: true } },
+    links_search: { args: { query: "rust", limit: 5 }, numbers: ["limit"], optional: ["limit"] },
+  };
+
+  /** Every input to the gate that reads the arguments, for one value. */
+  function gateView(tool: ToolDefinition<never, unknown>, value: Record<string, unknown>, run: never): unknown {
+    const name = tool.name;
+    const policy = policyFor(name, tool.meta);
+    return {
+      validate: tool.validate?.(value) ?? null,
+      assess: assessCall(policy, value),
+      standing: policy?.standingKind?.(value, run) ?? null,
+      origin: policy?.originRefusal?.(value, run) ?? null,
+      when: policy?.taintedBy?.when?.(value, undefined) ?? null,
+      target: approvalTarget(name, value),
+    };
+  }
+
+  function variants(row: Row): Array<{ label: string; args: Record<string, unknown> }> {
+    const out: Array<{ label: string; args: Record<string, unknown> }> = [{ label: "as written", args: row.args }];
+    for (const field of row.lists ?? []) {
+      const list = row.args[field] as string[];
+      out.push({ label: `${field} as a string`, args: { ...row.args, [field]: list[0] } });
+    }
+    for (const field of row.optional ?? []) out.push({ label: `${field} null`, args: { ...row.args, [field]: null } });
+    for (const field of row.numbers ?? []) out.push({ label: `${field} as a string`, args: { ...row.args, [field]: String(row.args[field]) } });
+    for (const field of row.padded ?? []) {
+      PADS.forEach((pad, at) => {
+        const value = row.args[field];
+        out.push({ label: `${field} pad ${at}`, args: { ...row.args, [field]: Array.isArray(value) ? value.map((item) => pad(String(item))) : pad(String(value)) } });
+      });
+    }
+    return out;
+  }
+
+  test("every tool the gate judges by its arguments has a row, and every row is a registered tool", () => {
     const tools = everyTool();
-    const judged = tools.filter((tool) => { const row = metaOf(tool) as { assess?: unknown; resources?: unknown } | null; return Boolean(row?.assess || row?.resources); }).map((tool) => tool.name);
-    const unlisted = judged.filter((name) => !(name in JUDGED) && !(name in EQUIVALENT));
-    expect(unlisted, "a tool the gate judges by its arguments is in neither list").toEqual([]);
+    const judged = tools.filter((tool) => {
+      const row = metaOf(tool) as { assess?: unknown; resources?: unknown; standingKind?: unknown; originRefusal?: unknown; taintedBy?: { when?: unknown } } | null;
+      return Boolean(row?.assess || row?.resources || row?.standingKind || row?.originRefusal || row?.taintedBy?.when || tool.validate);
+    }).map((tool) => tool.name);
+    expect(judged.filter((name) => !(name in ROWS)), "a tool the gate judges by its arguments has no row").toEqual([]);
     const names = new Set(tools.map((tool) => tool.name));
-    expect([...Object.keys(JUDGED), ...Object.keys(EQUIVALENT)].filter((name) => !names.has(name))).toEqual([]);
-    expect(Object.keys(JUDGED).filter((name) => name in EQUIVALENT)).toEqual([]);
+    expect(Object.keys(ROWS).filter((name) => !names.has(name))).toEqual([]);
   });
 
-  test("a JUDGED tool's handler refuses a padded argument", async () => {
+  test("for every variant, the gate's view of the prepared value equals its view of what the handler received", async () => {
+    const received = new Map<string, unknown[]>();
+    const register = ToolRegistry.prototype.register;
+    const spy = spyOn(ToolRegistry.prototype, "register").mockImplementation(function (this: ToolRegistry, definition: ToolDefinition<unknown, unknown>) {
+      // The tool's own handler is replaced by a recorder: nothing is fetched, sent, written or run.
+      return register.call(this, { ...definition, handler: async (args: unknown) => { (received.get(definition.name) ?? received.set(definition.name, []).get(definition.name)!).push(args); return {}; } } as never);
+    } as never);
+    let tools: ToolDefinition<never, unknown>[];
+    try {
+      tools = everyTool();
+    } finally {
+      spy.mockRestore();
+    }
+    const byName = new Map(tools.map((tool) => [tool.name, tool]));
+    const rig = policyRig();
+    try {
+      const ctx = { threadID: "t", turnID: "u", signal: new AbortController().signal };
+      for (const [name, row] of Object.entries(ROWS)) {
+        const tool = byName.get(name)!;
+        for (const { label, args } of variants(row)) {
+          const prepared = prepareToolArguments(JSON.stringify(args), tool.schema);
+          expect(prepared.error, `${name}: ${label}`).toBeNull();
+          const value = prepared.value as Record<string, unknown>;
+          received.set(name, []);
+          await tool.handler(value as never, ctx as never);
+          const got = received.get(name)![0] as Record<string, unknown>;
+          expect(got, `${name}: ${label} reached the handler as another object`).toBe(value);
+          expect(gateView(tool, got, rig.run as never), `${name}: ${label}`).toEqual(gateView(tool, value, rig.run as never));
+          // For a field the gate itself trims, padding must not change what the gate decides.
+          if (label.includes(" pad ")) expect(assessCall(policyFor(name, tool.meta), value), `${name}: ${label}`).toEqual(assessCall(policyFor(name, tool.meta), prepareToolArguments(JSON.stringify(row.args), tool.schema).value as Record<string, unknown>));
+        }
+      }
+    } finally {
+      rig.close();
+    }
+  });
+
+  test("a padded judged field is refused by the validate hook, before any card", () => {
     const byName = new Map(everyTool().map((tool) => [tool.name, tool]));
-    const ctx = { threadID: "t", turnID: "u", signal: new AbortController().signal };
-    for (const [name, { args, fields }] of Object.entries(JUDGED)) {
-      const handler = byName.get(name)!.handler as (args: unknown, ctx: unknown) => Promise<unknown>;
-      for (const field of fields) {
+    for (const [name, row] of Object.entries(ROWS)) {
+      for (const field of row.judged ?? []) {
+        const tool = byName.get(name)!;
+        expect(tool.validate, `${name} has no validate hook`).toBeDefined();
         for (const pad of PADS) {
-          await expect(handler({ ...args, [field]: padded(args[field], pad) }, ctx), `${name}.${field}`).rejects.toThrow(/must not start or end with spaces or line breaks/);
+          expect(tool.validate!({ ...row.args, [field]: pad(String(row.args[field])) }) ?? "", `${name}.${field}`).toMatch(/must not start or end with spaces or line breaks/);
         }
       }
     }
   });
 
-  test("an EQUIVALENT tool is judged the same with and without padding", () => {
-    const byName = new Map(everyTool().map((tool) => [tool.name, tool]));
-    for (const [name, { args, fields }] of Object.entries(EQUIVALENT)) {
-      const policy = policyFor(name, byName.get(name)!.meta);
-      const plain = assessCall(policy, args);
-      for (const field of fields) {
-        for (const pad of PADS) {
-          expect(assessCall(policy, { ...args, [field]: padded(args[field], pad) }), `${name}.${field}`).toEqual(plain);
-        }
-      }
+  test("a routine's domain list is checked on the value the handler gets", () => {
+    const rig = policyRig({ allowedDomains: ["example.com"] } as never);
+    try {
+      const plain = prepareToolArguments(JSON.stringify({ url: "https://example.com/page" }), everyTool().find((tool) => tool.name === "web_fetch")!.schema).value as Record<string, unknown>;
+      expect(engine.decide(rig.run, { tool: "web_fetch", args: plain, callID: "c1" }, { record: false }).action).not.toBe("refuse");
+      const other = prepareToolArguments(JSON.stringify({ url: "https://evil.example/page" }), everyTool().find((tool) => tool.name === "web_fetch")!.schema).value as Record<string, unknown>;
+      const refused = engine.decide(rig.run, { tool: "web_fetch", args: other, callID: "c2" }, { record: false });
+      expect(refused.action).toBe("refuse");
+    } finally {
+      rig.close();
     }
   });
 });
