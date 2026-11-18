@@ -29,7 +29,26 @@ describe("prepareToolArguments", () => {
   });
 
   test("a value that is not an object is returned as it parsed", () => {
-    expect(prepareToolArguments("null")).toEqual({ value: null, error: null });
+    expect(prepareToolArguments("null")).toEqual({ value: null, error: null, notes: [] });
     expect(prepareToolArguments("[1,2]").value).toEqual([1, 2]);
+  });
+});
+
+describe("prepareToolArguments with the tool's schema (HF-3)", () => {
+  const schema = {
+    type: "object",
+    properties: { limit: { type: "integer", minimum: 1, maximum: 20 }, tags: { type: "array", items: { type: "string" } }, note: { type: "string" } },
+    additionalProperties: false,
+  };
+  test("repairs before it freezes, and says what it repaired", () => {
+    const { value, error, notes } = prepareToolArguments(JSON.stringify({ limit: "50", tags: "a", note: null }), schema);
+    expect(error).toBeNull();
+    expect(value).toEqual({ limit: 20, tags: ["a"] });
+    expect(notes.length).toBe(1);
+    expect(Object.isFrozen(value)).toBe(true);
+    expect(Object.isFrozen((value as { tags: string[] }).tags)).toBe(true);
+  });
+  test("keeps the parsed value when it breaks the schema, for the gate to refuse", () => {
+    expect(prepareToolArguments(JSON.stringify({ limit: "many" }), schema).value).toEqual({ limit: "many" });
   });
 });

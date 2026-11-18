@@ -49,6 +49,7 @@ import type { MailAccountResolver } from "../plugins/credentials";
 import { mcpApprovalNote } from "../plugins/mcp";
 import { domainAllowed } from "../routines/egress";
 import { log } from "../log";
+import { normalizeArgs } from "../tools/validate-args";
 import { TurnTimer } from "./turn-timer";
 import { holdForOwner, startClock, startJobClock } from "./run-clock";
 import { expireApprovalForCall, expirePendingForTurn, ownerWaitMsFor } from "./pending-cards";
@@ -1225,16 +1226,23 @@ interface ToolOutcome {
 }
 
 /**
- * A tool call's arguments, parsed once (C1, Sprint 5 hotfix). The gate judges this value and the handler is given this same
- * value, deep-frozen, so nothing between the two can change what was judged. A parse error is returned, not thrown: the gate
- * judges such a call with no arguments, and the handler step reports the error as before.
+ * A tool call's arguments, parsed and repaired once (C1; HF-3). The repair is the registry's own (`normalizeArgs`: numeric
+ * strings, clamped limits, a string for a one-item list, dropped nulls), so the gate judges exactly what the handler gets. The
+ * result is deep-frozen and handed to both; the registry refuses to change it. Arguments that break the schema are kept as
+ * they parsed, for the gate's schema step to refuse. A parse error is returned, not thrown. `notes` say what was repaired.
  */
-export function prepareToolArguments(raw: string): { value: unknown; error: Error | null } {
+export function prepareToolArguments(raw: string, schema?: unknown): { value: unknown; error: Error | null; notes: string[] } {
+  let parsed: unknown;
   try {
-    return { value: deepFreeze(JSON.parse(raw) as unknown), error: null };
+    parsed = JSON.parse(raw) as unknown;
   } catch (error) {
-    return { value: undefined, error: error instanceof Error ? error : new Error(String(error)) };
+    return { value: undefined, error: error instanceof Error ? error : new Error(String(error)), notes: [] };
   }
+  if (schema !== undefined) {
+    const checked = normalizeArgs(schema, parsed);
+    if (checked.ok) return { value: deepFreeze(checked.args), error: null, notes: checked.notes };
+  }
+  return { value: deepFreeze(parsed), error: null, notes: [] };
 }
 
 function deepFreeze<T>(value: T): T {
@@ -1254,7 +1262,7 @@ async function executeTool(
 ): Promise<ToolOutcome> {
   const tool = registry.get(call.function.name);
   // One parse for the gate and the handler (C1): what is judged is what runs.
-  const prepared = prepareToolArguments(call.function.arguments);
+  const prepared = prepareToolArguments(call.function.arguments, tool?.schema);
   const args: Record<string, unknown> = prepared.error ? {} : (prepared.value as Record<string, unknown>);
   const existing = db.query("SELECT result, ok, error FROM tool_calls WHERE turn_id = ? AND call_id = ? ORDER BY created_at DESC LIMIT 1").get(turnID, call.id) as { result: string | null; ok: number; error: string | null } | null;
   if (existing) {
@@ -1316,6 +1324,10 @@ async function executeTool(
       new Promise<never>((_, reject) => combined.addEventListener("abort", () => reject(new AbortedMidCall()), { once: true })),
     ]);
     let safeResult = result;
+    // What the repair changed is said, so the model is not misled about what ran (the registry said it before HF-3).
+    if (prepared.notes.length && typeof safeResult === "object" && safeResult !== null && !Array.isArray(safeResult)) {
+      safeResult = { ...(safeResult as Record<string, unknown>), argumentNotes: prepared.notes };
+    }
     if (hooks.unattended) safeResult = unattendedWording(result);
     if (allowedDomains && call.function.name === "web_search" && typeof result === "object" && result !== null && Array.isArray((result as { results?: unknown }).results)) {
       safeResult = { ...(result as Record<string, unknown>), results: (result as { results: unknown[] }).results.filter((item) => {
