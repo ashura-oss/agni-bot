@@ -10,7 +10,7 @@
  * Folding on a case-sensitive macOS volume only makes two names one, which refuses more, never less.
  */
 import { realpathSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve, win32 } from "node:path";
 
 const FOLDS_CASE: ReadonlySet<NodeJS.Platform> = new Set(["win32", "darwin"]);
 
@@ -19,8 +19,34 @@ export function foldKey(path: string, platform: NodeJS.Platform = process.platfo
   return FOLDS_CASE.has(platform) ? path.toLowerCase() : path;
 }
 
+/**
+ * On Windows, a path that resolves to two slashes at its start names another computer or a device namespace (`\\host\share`,
+ * `//host/share`, `\\?\UNC\host`, `\\.\pipe`, `\\?\GLOBALROOT`). Asking the file system about one makes Windows look the host
+ * up and open SMB to it with the owner's credentials, before any card (HF-1). Such a path is never touched: callers treat it as
+ * outside scratch, with no real path. Pure: no file-system call.
+ */
+export function namesRemoteOrDevice(path: string, platform: NodeJS.Platform = process.platform): boolean {
+  if (platform !== "win32") return false;
+  const resolved = win32.resolve(path);
+  return resolved.startsWith("\\\\") || resolved.startsWith("//");
+}
+
+/**
+ * The one key every network and device path has (HF-1 review). Each is refused at the gate, so a "no" to one spelling is a
+ * "no" to all of them: `\\host\x`, `\\?\UNC\host\x` and `//HOST./x` must not be three different refusals.
+ */
+export const REMOTE_PATH_KEY = "<remote>";
+
+/** `\\?\C:\x` (or `//?/C:/x`) as the plain local path `C:\x` it names, on Windows; anything else unchanged. Pure. */
+export function withoutLongPrefix(path: string, platform: NodeJS.Platform = process.platform): string {
+  if (platform !== "win32") return path;
+  const match = /^[\\/][\\/]\?[\\/]([A-Za-z]:(?:[\\/][\s\S]*)?)$/.exec(path);
+  return match ? (match[1] as string) : path;
+}
+
 /** The real path of an absolute `path`: its longest existing part followed through links, then the missing tail. */
 export function realPathOf(path: string): string {
+  if (namesRemoteOrDevice(path)) return path;
   let target = path;
   const tail: string[] = [];
   for (;;) {
@@ -37,5 +63,8 @@ export function realPathOf(path: string): string {
 
 /** The key for `raw`, a relative path being under `base`. The one function that records and matches a path refusal. */
 export function canonicalPathKey(raw: string, base: string, platform: NodeJS.Platform = process.platform): string {
-  return foldKey(realPathOf(resolve(base, raw)), platform);
+  const resolved = withoutLongPrefix(resolve(base, raw), platform);
+  // A network or device path is never touched (HF-1), and every one has the same key: fail closed across spellings.
+  if (namesRemoteOrDevice(resolved, platform)) return REMOTE_PATH_KEY;
+  return foldKey(realPathOf(resolved), platform);
 }

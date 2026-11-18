@@ -88,6 +88,12 @@ export class ToolRegistry {
       handler: async (args, ctx) => {
         const checked = normalizeArgs(definition.schema, args);
         if (!checked.ok) throw new Error(checked.error);
+        // Arguments the task loop prepared were repaired and judged already, and frozen (HF-3): the handler gets that very
+        // object. A repair now would make it run something the gate never judged, so the call is refused instead.
+        if (args !== null && typeof args === "object" && Object.isFrozen(args)) {
+          if (JSON.stringify(checked.args) !== JSON.stringify(args)) throw new Error("the arguments changed after they were judged; the call was not run");
+          return handle(args, ctx);
+        }
         const result = await handle(checked.args as Args, ctx);
         // A value that was clamped is said so, so the model is not misled about what ran.
         if (checked.notes.length && typeof result === "object" && result !== null && !Array.isArray(result)) {

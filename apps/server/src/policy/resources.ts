@@ -9,7 +9,7 @@ import { resolve, sep } from "node:path";
 import type { Operation } from "./types";
 import type { ToolResource } from "./tool-meta";
 import { scratchDir } from "../tools/write-file";
-import { canonicalPathKey } from "./path-key";
+import { REMOTE_PATH_KEY, canonicalPathKey } from "./path-key";
 import { proveShell } from "./shell-proof";
 
 /**
@@ -47,6 +47,18 @@ export function normaliseAddress(raw: string): string {
 
 export function recipientResources(args: Record<string, unknown>): ToolResource[] {
   return recipientsOf(args).map((value) => ({ kind: "recipient" as const, value }));
+}
+
+/** A URL as the egress check compares it: http(s) only, no fragment, WHATWG-normalised (host lower-cased, default port dropped). Null when it is not one. */
+export function normaliseURL(raw: string): string | null {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    url.hash = "";
+    return url.href;
+  } catch {
+    return null;
+  }
 }
 
 /** The host a URL points at, lower-cased and without a trailing dot, or null when it is not a URL. */
@@ -94,6 +106,8 @@ export function shellFacts(command: string, cwd: string, absoluteOnly = false): 
 
 /** True when `candidate` is `denied`, lies inside it, or contains it (a command on the folder reaches the file). */
 export function pathsOverlap(denied: string, candidate: string): boolean {
+  // Every network or device path has the one remote key: it overlaps itself and no local path.
+  if (denied === REMOTE_PATH_KEY || candidate === REMOTE_PATH_KEY) return denied === candidate;
   if (denied === candidate) return true;
   // A root key (`c:\`, `/`) already ends in its separator: it is a folder as it stands, not a name that needs one added.
   const folder = (path: string, separator: string): string => (path.endsWith(separator) ? path : path + separator);

@@ -10,6 +10,7 @@ import type { ServerFrameBody } from "@agni/protocol";
 import type { ToolRegistry } from "./registry";
 import { requestSecret } from "../agent/secret-broker";
 import { runBash } from "./bash";
+import { exactProblem, exactString } from "./exact-arg";
 import {
   runPrivilegedWithOSAuth,
   resolveAuthMode,
@@ -47,10 +48,11 @@ export function registerSecureExecTool(registry: ToolRegistry, deps: SecureExecD
         description: "auto (default): the OS dialog for machine-level commands, the one-time prompt for the rest. os: always the macOS authorization. password: always the one-time prompt.",
       },
     }, ["command", "purpose"]),
+    validate: (args) => exactProblem(args, ["command"]),
     timeoutMs: 180_000,
     handler: async (args, ctx) => {
       const input = (args ?? {}) as Record<string, unknown>;
-      const command = String(input.command ?? "").trim();
+      const command = exactString(input.command, "command");
       const purpose = String(input.purpose ?? "").trim();
       if (!command) throw new Error("command is required");
       if (!purpose) throw new Error("purpose is required");

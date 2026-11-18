@@ -13,7 +13,7 @@
 import type { Database } from "bun:sqlite";
 import type { RunContext } from "./types";
 import type { ToolResource } from "./tool-meta";
-import { normaliseAddress } from "./resources";
+import { normaliseAddress, normaliseURL } from "./resources";
 
 const APPROVED_KEY = "approved_destinations";
 
@@ -37,16 +37,70 @@ function textNamesAddress(texts: string[], address: string): boolean {
   return texts.some((text) => pattern.test(text));
 }
 
-/** Hosts the owner wrote: from URLs and from bare domains. Lower-cased. */
+/** A domain written without a scheme. Not after a letter, `@`, `.`, `/` or `:`, so it is never the host of a URL with a scheme or the tail of an address. */
+const BARE_DOMAIN = /(?<![\w@./:-])((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,})(?![\w-])/gi;
+/** The same, followed by a path: `docs.example.net/guide`. */
+const BARE_WITH_PATH = /(?<![\w@./:-])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}\/[^\s<>"')]*/gi;
+const SCHEME_URL = /https?:\/\/[^\s<>"')]+/gi;
+const TRAILING_PUNCTUATION = /[.,;:!?]+$/;
+
+/**
+ * Hosts the owner wrote: from URLs with a scheme, and from bare domains that look like one (`www.` in front or a path
+ * after). A bare word like `install.sh` or `readme.md` is a file name, not a host (F3). Lower-cased.
+ */
 export function hostsNamedIn(texts: string[]): Set<string> {
   const hosts = new Set<string>();
   for (const text of texts) {
-    for (const match of text.matchAll(/https?:\/\/([^\s/:?#<>"')]+)/gi)) hosts.add(match[1]!.toLowerCase().replace(/\.$/, ""));
-    for (const match of text.matchAll(/(?<![\w@.-])((?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,})(?![\w-])/gi)) hosts.add(match[1]!.toLowerCase());
+    for (const match of text.matchAll(SCHEME_URL)) {
+      const url = normaliseURL(match[0].replace(TRAILING_PUNCTUATION, ""));
+      if (url) hosts.add(new URL(url).hostname.replace(/\.$/, ""));
+    }
+    for (const match of text.matchAll(BARE_DOMAIN)) {
+      const host = match[1]!.toLowerCase();
+      const next = text.charAt((match.index ?? 0) + match[0].length);
+      if (host.startsWith("www.") || next === "/") hosts.add(host);
+    }
   }
   return hosts;
 }
 
+/** The whole URLs the owner wrote, normalised. A bare `host/path` counts in both schemes. */
+export function urlsNamedIn(texts: string[]): Set<string> {
+  const urls = new Set<string>();
+  for (const text of texts) {
+    for (const match of text.matchAll(SCHEME_URL)) {
+      const url = normaliseURL(match[0].replace(TRAILING_PUNCTUATION, ""));
+      if (url) urls.add(url);
+    }
+    for (const match of text.matchAll(BARE_WITH_PATH)) {
+      for (const scheme of ["https://", "http://"]) {
+        const url = normaliseURL(scheme + match[0].replace(TRAILING_PUNCTUATION, ""));
+        if (url) urls.add(url);
+      }
+    }
+  }
+  return urls;
+}
+
+/** The origins the owner wrote: a URL's own origin; a bare host on the default port, in both schemes. */
+export function originsNamedIn(texts: string[]): Set<string> {
+  const origins = new Set<string>();
+  for (const text of texts) {
+    for (const match of text.matchAll(SCHEME_URL)) {
+      const url = normaliseURL(match[0].replace(TRAILING_PUNCTUATION, ""));
+      if (url) origins.add(new URL(url).origin);
+    }
+  }
+  for (const host of hostsNamedIn(texts)) {
+    // A host from a URL with a scheme is already in as that URL's origin; this adds the bare ones.
+    if (texts.some((text) => text.toLowerCase().includes(`://${host}`))) continue;
+    origins.add(`https://${host}`);
+    origins.add(`http://${host}`);
+  }
+  return origins;
+}
+
+/** The host or any subdomain of an entry: only for the owner's approved list, which names whole hosts on purpose. */
 function hostCovered(host: string, named: Iterable<string>): boolean {
   for (const base of named) if (host === base || host.endsWith(`.${base}`)) return true;
   return false;
@@ -54,18 +108,27 @@ function hostCovered(host: string, named: Iterable<string>): boolean {
 
 /** Is this destination one the owner named, in this conversation or in the approved list? */
 export function ownerNamed(run: Pick<RunContext, "ownerText">, destination: ToolResource, approved: string[]): boolean {
-  const value = destination.value.toLowerCase();
   if (destination.kind === "recipient") {
-    const address = normaliseAddress(value);
+    const address = normaliseAddress(destination.value.toLowerCase());
     const domain = address.split("@")[1] ?? "";
     if (approved.some((entry) => entry === address || (entry.startsWith("*@") && entry.slice(2) === domain))) return true;
     return textNamesAddress(run.ownerText, address);
   }
   if (destination.kind === "host" || destination.kind === "url") {
-    const host = destination.kind === "url" ? value.replace(/^https?:\/\//, "").split(/[/?#]/)[0]! : value;
-    const named = hostsNamedIn(run.ownerText);
-    for (const entry of approved) if (!entry.includes("@")) named.add(entry.replace(/^\*\./, ""));
-    return hostCovered(host, named);
+    const url = destination.kind === "url" ? normaliseURL(destination.value) : null;
+    if (destination.kind === "url" && url === null) return false;
+    const host = url !== null ? new URL(url).hostname.replace(/\.$/, "") : destination.value.toLowerCase().replace(/\.$/, "");
+    // The approved list (Settings) names whole hosts, subdomains included.
+    const approvedHosts = approved.filter((entry) => !entry.includes("@")).map((entry) => entry.replace(/^\*\./, ""));
+    if (hostCovered(host, approvedHosts)) return true;
+    // The owner's words name places to read, not places to send (F3): the exact URL they wrote, or the front page of a host
+    // they wrote. Another path, a query or a subdomain of that host could carry what the run read, so it is not named.
+    const hosts = hostsNamedIn(run.ownerText);
+    if (url === null) return hosts.has(host);
+    if (urlsNamedIn(run.ownerText).has(url)) return true;
+    // The front page of an origin the owner wrote: same scheme, host and port, no userinfo, no path, no query.
+    const parsed = new URL(url);
+    return originsNamedIn(run.ownerText).has(parsed.origin) && parsed.username === "" && parsed.password === "" && parsed.pathname === "/" && parsed.search === "";
   }
   return false;
 }

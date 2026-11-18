@@ -161,6 +161,8 @@ export async function webFetch(args: WebFetchArgs, allowedHost?: (url: URL) => b
   const target = new URL(args.url);
   if (target.protocol !== "https:" && target.protocol !== "http:") throw new Error("unsupported URL scheme");
   if (target.username || target.password) throw new Error("URLs with credentials are blocked");
+  // A fragment never reaches a page's own server, but Firecrawl is given the whole URL: it goes without one (F3 review).
+  target.hash = "";
   if (allowedHost && !allowedHost(target)) throw new Error("host outside the allowlist");
   if (base) await assertPublicHost(target.hostname);
   if (base) {
@@ -172,7 +174,7 @@ export async function webFetch(args: WebFetchArgs, allowedHost?: (url: URL) => b
         signal: AbortSignal.timeout(20_000),
         headers,
         redirect: "error",
-        body: JSON.stringify({ url: args.url, formats: ["markdown"] }),
+        body: JSON.stringify({ url: target.href, formats: ["markdown"] }),
       });
       if (response.ok) {
         const payload = await response.json() as { data?: { markdown?: string; metadata?: { title?: string } } };

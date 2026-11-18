@@ -12,7 +12,7 @@
 import { appendFileSync, lstatSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, resolve, sep } from "node:path";
 import { homePath } from "../home";
-import { foldKey, realPathOf } from "../policy/path-key";
+import { foldKey, namesRemoteOrDevice, realPathOf } from "../policy/path-key";
 
 const MAX_BYTES = 1024 * 1024;
 
@@ -74,6 +74,7 @@ export function namesStream(path: string, platform: NodeJS.Platform = process.pl
  */
 function realTarget(path: string, base: string): string | null {
   const target = resolve(base, path);
+  if (namesRemoteOrDevice(target)) return null;
   if (namesStream(target)) return null;
   return hasDanglingLink(target) ? null : realPathOf(target);
 }
@@ -96,6 +97,7 @@ export function resolveWritePath(path: string): string | null {
  */
 export function isOutsideScratch(path: string, base: string = process.cwd()): boolean {
   if (path.trim().length === 0) return true;
+  if (namesRemoteOrDevice(resolve(base, path))) return true;
   const target = realTarget(path, base);
   const scratch = realTarget(scratchDir(), base);
   if (!target || !scratch) return true;
@@ -142,9 +144,13 @@ export function createExclusive(target: string, content: string, append: boolean
   }
 }
 
-export function writeFile(args: WriteFileArgs): WriteFileResult {
+export function writeFile(args: WriteFileArgs, options: { allowOutsideScratch?: boolean } = {}): WriteFileResult {
   if (args.content.length > MAX_BYTES) throw new Error("content exceeds 1 MB");
   if (namesStream(resolve(scratchDir(), args.path))) throw new Error(`${args.path} names a hidden stream of a file (a colon after the drive); write_file writes files only`);
+  // Defence in depth (C1): whatever the gate made of the call, a write leaves scratch only on the owner's yes to it.
+  if (!options.allowOutsideScratch && isOutsideScratch(args.path, scratchDir())) {
+    throw new Error(`${args.path} is outside the sandbox; writing there needs the owner's yes`);
+  }
   const target = resolveWritePath(args.path);
   if (!target) throw new Error(`${args.path} is a dangling link and cannot be written`);
   const created = !writeTargetExists(args.path);

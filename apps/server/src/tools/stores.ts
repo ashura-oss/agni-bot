@@ -117,9 +117,11 @@ export interface LinkSaveResult {
   summary: string | null;
 }
 
-export async function linkSave(db: Database, args: LinkSaveArgs): Promise<LinkSaveResult> {
+export async function linkSave(db: Database, args: LinkSaveArgs, allowedHost?: (url: URL) => boolean): Promise<LinkSaveResult> {
+  // A routine's host list holds here as it does for web_fetch: the first host, and every redirect (fetchPage).
+  if (allowedHost && !allowedHost(new URL(args.url))) throw new Error("host outside the allowlist");
   let page: { title: string | null; summary: string | null } = { title: null, summary: null };
-  try { page = await fetchPage(args.url); } catch { /* URL and note are still saved */ }
+  try { page = await fetchPage(args.url, allowedHost); } catch { /* URL and note are still saved */ }
   const row = saveLink(db, { url: args.url, ...page, note: args.note, tags: args.tags });
   return { id: row.id, url: row.url, title: row.title, summary: row.summary };
 }
