@@ -12,7 +12,14 @@
  * - The model key the server holds is a placeholder; the proxy adds the real
  *   one on the way out.
  * - `stop()` ends the server's whole process tree (only processes it started).
+ * - The harness owns the home, port, scratch, keystore, model endpoint and
+ *   test-run settings: a task may only adjust the limits in
+ *   `EVAL_SERVER_ENV`, and the harness's own values are applied last.
+ * - A start counts only when the server's own `serve.lock` names this child
+ *   and the chosen port; a port taken between choosing and binding is
+ *   retried on a new one.
  */
+import { existsSync, readFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, join, resolve, sep } from "node:path";
 import { cleanChildEnv } from "../../apps/server/test/test-child-env";
@@ -53,6 +60,8 @@ export interface StartServerOptions {
   env?: Record<string, string>;
   /** Folder for `server.out.log` and `server.err.log`. */
   logDir: string;
+  /** Chooses a port to try (default `freePort`). A seam for tests. */
+  pickPort?: () => Promise<number>;
   /** The fixture server's port; the preload sends fixtures.example there and nowhere else. Without it every fixture fetch is refused. */
   fixturePort?: number;
 }
@@ -88,8 +97,16 @@ export async function freePort(): Promise<number> {
   return port;
 }
 
+/** The server environment. A task's `env` may only adjust `EVAL_SERVER_ENV`; the harness's own settings go last. */
 export function serverEnv(o: StartServerOptions, port: number): Record<string, string> {
+  const taskEnv = o.env ?? {};
+  const refused = Object.keys(taskEnv).filter((key) => !Object.hasOwn(EVAL_SERVER_ENV, key));
+  if (refused.length > 0) {
+    throw new Error(`a task may only adjust the eval limits (${Object.keys(EVAL_SERVER_ENV).join(", ")}); refused: ${refused.join(", ")}`);
+  }
   return cleanChildEnv({
+    ...EVAL_SERVER_ENV,
+    ...taskEnv,
     AGNI_TEST_RUN: "1",
     AGNI_KEYSTORE: "passphrase",
     AGNI_HOME: o.home,
@@ -101,34 +118,81 @@ export function serverEnv(o: StartServerOptions, port: number): Record<string, s
     OPENROUTER_MODEL: o.model,
     AGNI_USER_FIRST_NAME: "Sam",
     ...(o.fixturePort !== undefined ? { [FIXTURE_PORT_ENV]: String(o.fixturePort) } : {}),
-    ...EVAL_SERVER_ENV,
-    ...(o.env ?? {}),
   });
 }
 
-async function waitHealth(port: number, ms: number, child: { exitCode: number | null }): Promise<void> {
+/** How many ports to try when the chosen one is taken between choosing it and binding it. */
+export const PORT_ATTEMPTS = 3;
+
+class PortTaken extends Error {}
+
+/**
+ * How a failed bind shows in the server's log. Bun 1.4.3 on Windows says "Failed to start server. Is port N in use?" with
+ * no EADDRINUSE code, and `serve` then stays alive without listening (its uncaught-exception handler logs the error), so
+ * the log is read while the child still runs.
+ */
+const PORT_TAKEN = /already in use|EADDRINUSE|address in use|Is port \d+ in use/i;
+
+/** The log files of one start attempt: `server.out.log` and `server.err.log` for the first, `server.2.out.log` ... after. */
+export function logNames(attempt: number): { out: string; err: string } {
+  return attempt === 1 ? { out: "server.out.log", err: "server.err.log" } : { out: `server.${attempt}.out.log`, err: `server.${attempt}.err.log` };
+}
+
+function logText(logDir: string, attempt: number): string {
+  const names = logNames(attempt);
+  return [names.out, names.err]
+    .map((name) => join(logDir, name))
+    .filter((path) => existsSync(path))
+    .map((path) => readFileSync(path, "utf8"))
+    .join("\n");
+}
+
+/**
+ * Wait until this child is listening on `port`: its `serve.lock` names the child's pid and the port (the server writes the
+ * port only after it has bound it), and `/health` answers. A service that already held the port cannot pass, because the
+ * lock would not name it.
+ */
+async function waitListening(home: string, logDir: string, attempt: number, port: number, child: { pid: number; exitCode: number | null }, ms: number): Promise<void> {
+  const lockPath = join(home, "serve.lock");
   const t0 = Date.now();
   while (Date.now() - t0 < ms) {
-    if (child.exitCode !== null) throw new Error(`the eval server exited (code ${child.exitCode}) before it was healthy`);
+    const taken = PORT_TAKEN.test(logText(logDir, attempt));
+    if (taken) throw new PortTaken(`port ${port} was taken`);
+    if (child.exitCode !== null) throw new Error(`the eval server exited (code ${child.exitCode}) before it was listening`);
     try {
-      if ((await fetch(`http://127.0.0.1:${port}/health`)).ok) return;
+      const lock = JSON.parse(readFileSync(lockPath, "utf8")) as { pid?: unknown; port?: unknown };
+      if (lock.pid === child.pid && lock.port === port && (await fetch(`http://127.0.0.1:${port}/health`)).ok) return;
     } catch {
       // not listening yet
     }
     await sleep(250);
   }
-  throw new Error("the eval server did not become healthy in time");
+  throw new Error("the eval server did not start listening in time");
 }
 
 export async function startEpisodeServer(o: StartServerOptions): Promise<EpisodeServer> {
   assertThrowawayHome(o.home, o.scratch);
-  const port = await freePort();
+  const pickPort = o.pickPort ?? freePort;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= PORT_ATTEMPTS; attempt++) {
+    try {
+      return await startOnPort(o, await pickPort(), attempt);
+    } catch (error) {
+      lastError = error;
+      if (!(error instanceof PortTaken)) throw error;
+    }
+  }
+  throw lastError instanceof Error ? new Error(`${lastError.message} on ${PORT_ATTEMPTS} tries`) : lastError;
+}
+
+async function startOnPort(o: StartServerOptions, port: number, attempt: number): Promise<EpisodeServer> {
   const env = serverEnv(o, port);
+  const logs = logNames(attempt);
   const child = Bun.spawn([process.execPath, "--preload", PRELOAD, SERVER_ENTRY, "serve"], {
     cwd: o.scratch,
     env,
-    stdout: Bun.file(join(o.logDir, "server.out.log")),
-    stderr: Bun.file(join(o.logDir, "server.err.log")),
+    stdout: Bun.file(join(o.logDir, logs.out)),
+    stderr: Bun.file(join(o.logDir, logs.err)),
     ...TREE_SPAWN_OPTIONS,
   });
   // trackTree takes Node's `kill(): boolean`; Bun's subprocess returns nothing.
@@ -148,7 +212,7 @@ export async function startEpisodeServer(o: StartServerOptions): Promise<Episode
     tree.release();
   };
   try {
-    await waitHealth(port, 30_000, child);
+    await waitListening(o.home, o.logDir, attempt, port, child, 30_000);
     const pair = Bun.spawnSync([process.execPath, SERVER_ENTRY, "pair", "--name", "eval"], { env, cwd: o.scratch });
     const token = /token:\s+(\S+)/.exec(pair.stdout.toString())?.[1];
     if (!token) throw new Error(`pairing the eval server failed: ${pair.stderr.toString().slice(0, 300)}`);

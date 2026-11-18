@@ -3,10 +3,10 @@
  * folder directly under the OS temp folder, never the owner's ~/.agni.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { assertThrowawayHome, PLACEHOLDER_KEY, serverEnv, startEpisodeServer } from "../server";
+import { assertThrowawayHome, freePort, PLACEHOLDER_KEY, serverEnv, startEpisodeServer } from "../server";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -46,6 +46,25 @@ describe("throwaway home guard", () => {
     expect(serverEnv(o, 9999).AGNI_EVAL_FIXTURE_PORT).toBeUndefined();
   });
 
+  test("a task may only adjust the eval limits; the harness's own settings cannot be overridden", () => {
+    const home = fresh();
+    const o = { home, scratch: join(home, "scratch"), baseUrl: "http://127.0.0.1:1/api/v1", model: "m", logDir: home };
+    for (const key of ["AGNI_HOME", "AGNI_SCRATCH_DIR", "AGNI_TEST_RUN", "AGNI_KEYSTORE", "OPENROUTER_BASE_URL", "OPENROUTER_API_KEY", "AGNI_DB_PATH", "AGNI_EVAL_FIXTURE_PORT", "PATH"]) {
+      expect(() => serverEnv({ ...o, env: { [key]: "" } }, 9999)).toThrow(`refused: ${key}`);
+    }
+    const tuned = serverEnv({ ...o, env: { AGNI_AUX_MAX_TOKENS: "" } }, 9999);
+    expect(tuned.AGNI_AUX_MAX_TOKENS).toBe("");
+    expect(tuned.AGNI_HOME).toBe(home);
+    expect(tuned.AGNI_TEST_RUN).toBe("1");
+  });
+
+  test("a task env with a harness key is refused before anything is spawned", async () => {
+    const home = fresh();
+    await expect(
+      startEpisodeServer({ home, scratch: join(home, "scratch"), baseUrl: "http://127.0.0.1:1/api/v1", model: "m", logDir: home, env: { AGNI_HOME: "" } }),
+    ).rejects.toThrow("refused: AGNI_HOME");
+  });
+
   test("scratch outside the home is refused", () => {
     const home = fresh();
     expect(() => assertThrowawayHome(home, join(tmpdir(), "scratch"))).toThrow("inside the throwaway home");
@@ -59,4 +78,34 @@ describe("throwaway home guard", () => {
       startEpisodeServer({ home: notThrowaway, scratch: join(notThrowaway, "scratch"), baseUrl: "http://127.0.0.1:1/api/v1", model: "m", logDir: fresh() }),
     ).rejects.toThrow("throwaway");
   });
+});
+
+describe("port race", () => {
+  test("a port taken by another service is not mistaken for the server; the next port is tried", async () => {
+    // Another service holds the first port and answers /health with 200, as a raced port might.
+    const squatter = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json({ ok: true }) });
+    const taken = squatter.port!;
+    const ports = [taken];
+    const home = fresh();
+    mkdirSync(join(home, "scratch"));
+    try {
+      const server = await startEpisodeServer({
+        home,
+        scratch: join(home, "scratch"),
+        baseUrl: "http://127.0.0.1:1/api/v1",
+        model: "m",
+        logDir: home,
+        pickPort: async () => ports.shift() ?? (await freePort()),
+      });
+      try {
+        expect(server.port).not.toBe(taken);
+        expect(server.token.length).toBeGreaterThan(0);
+        expect((await fetch(`http://127.0.0.1:${server.port}/health`)).ok).toBe(true);
+      } finally {
+        await server.stop();
+      }
+    } finally {
+      void squatter.stop(true);
+    }
+  }, 90_000);
 });
