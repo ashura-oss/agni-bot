@@ -50,6 +50,18 @@ export function recipientResources(args: Record<string, unknown>): ToolResource[
 }
 
 /** The host a URL points at, lower-cased and without a trailing dot, or null when it is not a URL. */
+/** A URL as the egress check compares it: http(s) only, no fragment, WHATWG-normalised (host lower-cased, default port dropped). Null when it is not one. */
+export function normaliseURL(raw: string): string | null {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    url.hash = "";
+    return url.href;
+  } catch {
+    return null;
+  }
+}
+
 export function hostOf(raw: string): string | null {
   try {
     const url = new URL(raw);

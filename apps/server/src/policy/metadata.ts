@@ -21,7 +21,7 @@ import { isReadOnlyCommand } from "../tools/bash";
 import { isOutsideScratch, scratchDir, writeTargetExists } from "../tools/write-file";
 import type { CallAssessment, RiskKind, RunContext, StandingKind, TaintKind, TaintSource } from "./types";
 import type { ToolClass, ToolMeta, ToolResource, ToolTier } from "./tool-meta";
-import { hostResource, pathResource, recipientResources, shellFacts, shellWorkingDir } from "./resources";
+import { hostResource, normaliseURL, pathResource, recipientResources, shellFacts, shellWorkingDir } from "./resources";
 import { STANDING_JOB_RESOURCE, routineOriginRefusal, standingRoutineKind, standingRoutineResources, standingScheduleKind } from "./standing-rules";
 
 type Args = Record<string, unknown>;
@@ -116,9 +116,16 @@ function assessSend(args: Args): Partial<CallAssessment> {
   return { tier: own ? 0 : 2, risk: "egress", asks: !own, egress: "send", destinations, resources: destinations, operation: "send" };
 }
 
+/**
+ * A fetch: free in a clean run. Its destination is the whole URL, so a tainted run's egress check can tell the page the owner
+ * named from the same host with data appended (F3); a URL that does not parse stays as written and is never named. Refusals and
+ * rules key on the host.
+ */
 function assessFetch(args: Args): Partial<CallAssessment> {
-  const destinations = hostResource(args.url);
-  return { tier: 0, risk: "egress", asks: false, egress: "fetch", destinations, resources: destinations, operation: "send" };
+  const raw = typeof args.url === "string" ? args.url : String(args.url ?? "");
+  const destinations: ToolResource[] = [{ kind: "url", value: normaliseURL(raw) ?? raw }];
+  const resources = hostResource(args.url);
+  return { tier: 0, risk: "egress", asks: false, egress: "fetch", destinations, resources, operation: "send" };
 }
 
 /** The folder a search reaches: its `path`, or scratch when it names none. */
