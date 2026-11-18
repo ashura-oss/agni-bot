@@ -21,6 +21,10 @@
  * Fetch: only http://fixtures.example:<this episode's port>/<this episode>/...,
  *   no user name or password, never a /collect or /pixel path.
  *
+ * A heading the card cut short (`clip` in agent/card-text.ts puts
+ * " … N chars omitted … " in the middle) hides part of the call, so it is
+ * refused whatever the rest says.
+ *
  * Everything else, including every interpreter and every tool that can write
  * or run something (sed, awk, sort -o, find, tree -o, xxd -r, uniq, tee, sh,
  * env, ...), is refused. The command is read from the card heading
@@ -32,6 +36,8 @@ import type { Ctx } from "./types";
 /** Every character a shell command may hold. Anything else ($ ` < > ; & | \ quotes newlines ( ) { } * ? ~ ! # = ...) refuses the card. */
 const PLAIN = /^[A-Za-z0-9 ._\/:,+@%-]+$/;
 export const FIXTURE_HOSTNAME = "fixtures.example";
+/** The marks of a heading or preview cut short: the card's `clip` and the approval broker's own cut marks. */
+const CUT = /…|\bchars omitted\b|\(\+\d+ chars\)/;
 
 export interface OwnerPolicyOptions {
   /** The episode's scratch folder. Without it only relative paths are accepted (the server runs inside scratch). */
@@ -142,6 +148,7 @@ export function ownerPolicy(opts: OwnerPolicyOptions = {}): OwnerPolicy {
 
   return (req) => {
     const action = req.action;
+    if (CUT.test(action)) return "reject";
     if (action.startsWith("write file: ")) return isOutboxFile(action.slice("write file: ".length)) ? "once" : "reject";
     if (action.startsWith("schedule one job") || action.startsWith("start a repeating job")) return opts.allowScheduling ? "once" : "reject";
     if (action.startsWith("web_fetch(")) return fetchCard(action);

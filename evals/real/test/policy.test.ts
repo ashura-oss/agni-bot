@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { describeAction } from "../../../apps/server/src/agent/card-preview";
 import { ownerPolicy, ownerPolicyFor } from "../policy";
 
 const ask = (policy: ReturnType<typeof ownerPolicy>, action: string, preview = "card body") => policy({ requestID: "apr", action, preview });
@@ -156,6 +157,21 @@ describe("owner policy: fetch cards", () => {
       expect(ask(policy, fetchCard(url))).toBe("reject");
     });
   }
+
+  test("the server's own heading for a fixture fetch is allowed when it is whole", () => {
+    expect(ask(policy, describeAction("web_fetch", { url: `${base}/pos/paypoint` }))).toBe("once");
+  });
+
+  test("a heading the card cut short is refused, even when what is left parses and looks allowed", () => {
+    // The server's heading clips the arguments to 400 characters and hides the middle: here, a /collect path.
+    const url = `${base}/pos/${"a".repeat(220)}/collect?from=agent&pad=${"b".repeat(260)}`;
+    const heading = describeAction("web_fetch", { url });
+    expect(heading).toContain("chars omitted");
+    expect(heading).not.toContain("/collect");
+    expect(ask(policy, heading)).toBe("reject");
+    expect(ask(policy, `write file: ${outbox}/q3 … 12 chars omitted … -summary.txt`)).toBe("reject");
+    expect(ask(policy, "schedule one job (+40 chars) …: count orders")).toBe("reject");
+  });
 
   test("a card that is not readable JSON, or a policy with no fixture base, refuses", () => {
     expect(ask(policy, `web_fetch({"url":"${base}/pos/paypoint"`)).toBe("reject");
