@@ -9,7 +9,7 @@ import { resolve, sep } from "node:path";
 import type { Operation } from "./types";
 import type { ToolResource } from "./tool-meta";
 import { scratchDir } from "../tools/write-file";
-import { canonicalPathKey } from "./path-key";
+import { REMOTE_PATH_KEY, canonicalPathKey } from "./path-key";
 import { proveShell } from "./shell-proof";
 
 /**
@@ -106,6 +106,8 @@ export function shellFacts(command: string, cwd: string, absoluteOnly = false): 
 
 /** True when `candidate` is `denied`, lies inside it, or contains it (a command on the folder reaches the file). */
 export function pathsOverlap(denied: string, candidate: string): boolean {
+  // Every network or device path has the one remote key: it overlaps itself and no local path.
+  if (denied === REMOTE_PATH_KEY || candidate === REMOTE_PATH_KEY) return denied === candidate;
   if (denied === candidate) return true;
   // A root key (`c:\`, `/`) already ends in its separator: it is a folder as it stands, not a name that needs one added.
   const folder = (path: string, separator: string): string => (path.endsWith(separator) ? path : path + separator);
