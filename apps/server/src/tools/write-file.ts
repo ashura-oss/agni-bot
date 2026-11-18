@@ -12,7 +12,7 @@
 import { appendFileSync, lstatSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, resolve, sep } from "node:path";
 import { homePath } from "../home";
-import { foldKey, realPathOf } from "../policy/path-key";
+import { foldKey, namesRemoteOrDevice, realPathOf } from "../policy/path-key";
 
 const MAX_BYTES = 1024 * 1024;
 
@@ -74,6 +74,7 @@ export function namesStream(path: string, platform: NodeJS.Platform = process.pl
  */
 function realTarget(path: string, base: string): string | null {
   const target = resolve(base, path);
+  if (namesRemoteOrDevice(target)) return null;
   if (namesStream(target)) return null;
   return hasDanglingLink(target) ? null : realPathOf(target);
 }
@@ -96,6 +97,7 @@ export function resolveWritePath(path: string): string | null {
  */
 export function isOutsideScratch(path: string, base: string = process.cwd()): boolean {
   if (path.trim().length === 0) return true;
+  if (namesRemoteOrDevice(resolve(base, path))) return true;
   const target = realTarget(path, base);
   const scratch = realTarget(scratchDir(), base);
   if (!target || !scratch) return true;
