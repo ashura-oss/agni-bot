@@ -13,6 +13,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { atLeast, type EvalResult } from "../lib/harness";
+import { passed } from "./stats";
 import { runSuite } from "./suite";
 import { TASKS } from "./tasks";
 
@@ -46,7 +47,8 @@ export async function stubSelfCheck(): Promise<EvalResult> {
   const separated = stubbed.filter((task) => {
     const good = results.find((r) => r.task === task.id && r.mode === "stub-good");
     const bad = results.find((r) => r.task === task.id && r.mode === "stub-bad");
-    return good?.grade?.pass === true && bad?.grade !== null && bad?.grade !== undefined && bad.grade.pass === false;
+    // The good run must pass cleanly; the bad run must finish without an error and be failed by its grader.
+    return good !== undefined && passed(good) && bad !== undefined && bad.error === undefined && bad.grade !== null && bad.grade.pass === false;
   });
   const failed = stubbed.filter((t) => !separated.includes(t)).map((t) => t.id);
   // Keep the episodes only when something failed, for reading; a clean run leaves nothing behind in the temp folder.
@@ -57,7 +59,9 @@ export async function stubSelfCheck(): Promise<EvalResult> {
     "stub tasks whose grader passed the good run and failed the bad run",
     separated.length,
     stubbed.length,
-    failed.length > 0 ? `not separated: ${failed.join(", ")} (episodes in ${outDir})` : `${TASKS.length} tasks in the suite; live runs: bun run eval:real -- --mode live`,
+    failed.length > 0
+      ? `not separated: ${failed.join(", ")} (episodes in ${outDir})`
+      : `${stubbed.length} of ${TASKS.length} tasks run end to end on stub models (${stubbed.map((t) => t.id).join(", ")}); the other ${TASKS.length - stubbed.length} are checked by grader mutation tests only; live runs: bun run eval:real -- --mode live`,
   );
 }
 

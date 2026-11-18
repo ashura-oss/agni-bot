@@ -72,6 +72,11 @@ export interface ModelSummary {
   cacheHitShare: number | null;
 }
 
+/** An episode passes only when its grade passes and it ended without an error (a timeout or a crash is not a pass). */
+export function passed(r: EpisodeResult): boolean {
+  return r.grade?.pass === true && r.error === undefined && r.skipped === undefined;
+}
+
 export function isEmptyOutput(call: CallRecord): boolean {
   return call.hadTools && call.status === 200 && !call.blocked && !call.aborted && call.contentLen === 0 && call.toolNames.length === 0;
 }
@@ -103,10 +108,10 @@ export function summarize(results: EpisodeResult[], k: number): ModelSummary[] {
   return models.map((model) => {
     const mine = results.filter((r) => r.model === model);
     const graded = mine.filter((r) => r.grade !== null && r.skipped === undefined);
-    const passes = graded.filter((r) => r.grade!.pass).length;
+    const passes = graded.filter(passed).length;
     const tasks: TaskTally[] = [...new Set(mine.map((r) => r.task))].map((task) => {
       const runs = graded.filter((r) => r.task === task);
-      const ok = runs.filter((r) => r.grade!.pass).length;
+      const ok = runs.filter(passed).length;
       return { task, runs: runs.length, passes: ok, allPassed: runs.length >= k && ok === runs.length };
     });
     const withK = tasks.filter((t) => t.runs >= k);

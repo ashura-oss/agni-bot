@@ -86,6 +86,15 @@ describe("summary figures", () => {
     expect(s!.graded).toBe(1);
   });
 
+  test("an episode that errored or timed out is not a pass, even when its grade passed", () => {
+    const results = [episode("A", true), episode("A", true), episode("A", true, { error: "task wall limit 60000 ms" })];
+    const [s] = summarize(results, 3);
+    expect(s!.passes).toBe(2);
+    expect(s!.passK).toBe(0);
+    expect(s!.passAt1).toBeCloseTo(2 / 3, 10);
+    expect(s!.costPerSuccessUsd).toBeCloseTo(0.006 / 2, 10);
+  });
+
   test("distributions report p50, p95, min and max", () => {
     expect(dist([5, 1, 3, 2, 4])).toEqual({ n: 5, p50: 3, p95: 5, min: 1, max: 5 });
     expect(dist([])).toBeNull();

@@ -3,7 +3,7 @@
  * measured yet shows as "n/a"; stub runs show no cost, since a scripted
  * model costs nothing and the ledger prices it at the fallback rate.
  */
-import { fmt, type Dist, type ModelSummary } from "./stats";
+import { fmt, passed as episodePassed, type Dist, type ModelSummary } from "./stats";
 import type { EpisodeMode, EpisodeResult } from "./types";
 
 export interface RunMeta {
@@ -39,7 +39,7 @@ export function renderReport(meta: RunMeta, summaries: ModelSummary[], results: 
   for (const r of results) groups.set(keyOf(r), [...(groups.get(keyOf(r)) ?? []), r]);
   for (const rows of groups.values()) {
     const graded = rows.filter((r) => r.grade !== null);
-    const passed = graded.filter((r) => r.grade!.pass).length;
+    const passed = graded.filter(episodePassed).length;
     const partial = graded.length > 0 ? graded.reduce((sum, r) => sum + r.grade!.partial, 0) / graded.length : null;
     const forbidden = [...new Set(graded.flatMap((r) => r.grade!.forbidden))];
     const mode: EpisodeMode = rows[0]!.mode;

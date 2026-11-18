@@ -111,19 +111,25 @@ export async function runEpisode(o: EpisodeOptions): Promise<EpisodeResult> {
       clearTimeout(timer);
     }
     await sleep(1500);
-    result.grade = await o.task.grade(ctx, exp);
   } catch (error) {
     result.error = error instanceof Error ? error.message : String(error);
     ctx.log(`EPISODE ERROR ${result.error}`);
-    if (setupDone && existsSync(dbPath)) {
-      try {
-        result.grade = await o.task.grade(ctx, exp);
-      } catch (gradeError) {
-        ctx.log(`grading after the error failed: ${String(gradeError)}`);
-      }
-    }
   }
   result.wallMs = Date.now() - startedMs;
+
+  // Stop the server before grading, so the end state cannot change while it is read. An episode that errored is
+  // still graded (its partial score is useful), but it never counts as a pass (`passed` in stats.ts).
+  ctx.client.close();
+  if (server) await server.stop();
+  if (setupDone && existsSync(dbPath)) {
+    try {
+      result.grade = await o.task.grade(ctx, exp);
+    } catch (gradeError) {
+      const message = `grading failed: ${gradeError instanceof Error ? gradeError.message : String(gradeError)}`;
+      result.error = result.error === undefined ? message : `${result.error}; ${message}`;
+      ctx.log(message);
+    }
+  }
 
   // Read the episode database before the server stops and the home goes.
   let turns: TurnRow[] = [];
@@ -143,8 +149,6 @@ export async function runEpisode(o: EpisodeOptions): Promise<EpisodeResult> {
     }
   }
   result.turnMs = turns.filter((t) => t.ended_at !== null).map((t) => Date.parse(t.ended_at!) - Date.parse(t.started_at));
-  ctx.client.close();
-  if (server) await server.stop();
   result.calls = proxy ? [...proxy.calls] : [];
   proxy?.stop();
   mock?.stop();

@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { renderReport } from "../report";
 import { parseArgs } from "../run";
 import { nightlyEval, nightlyGate, stubSelfCheck } from "../self-check";
 import { summarize } from "../stats";
+import { runSuite } from "../suite";
 import type { EpisodeResult } from "../types";
 
 function episode(over: Partial<EpisodeResult> = {}): EpisodeResult {
@@ -44,7 +47,8 @@ describe("run report", () => {
 describe("command line", () => {
   test("stub is the default and needs no cap", () => {
     const o = parseArgs([], Date.parse("2026-11-18T00:00:00.000Z"));
-    expect(o).toMatchObject({ mode: "stub", tasks: "all", k: 3, capUsd: 1000, keep: false, bad: false });
+    expect(o).toMatchObject({ mode: "stub", tasks: "all", k: 3, capUsd: 1000, keep: false, bad: false, allowUnpriced: false });
+    expect(parseArgs(["--allow-unpriced"]).allowUnpriced).toBe(true);
   });
   test("live needs --cap and --models", () => {
     expect(() => parseArgs(["--mode", "live", "--models", "deepseek/x"])).toThrow("--cap");
@@ -54,6 +58,15 @@ describe("command line", () => {
   });
   test("a flag without a value is an error", () => {
     expect(() => parseArgs(["--k"])).toThrow("--k needs a value");
+  });
+});
+
+describe("live runs need a known price", () => {
+  test("a model with no price-table entry is refused before anything starts", async () => {
+    const outDir = join(tmpdir(), `agni-eval-never-created-${process.pid}`);
+    await expect(
+      runSuite({ mode: "live", tasks: [], models: ["deepseek/deepseek-v4.1-flash-1017", "nobody/unpriced-model"], k: 1, capUsd: 0.01, outDir, apiKey: "not-a-real-key" }),
+    ).rejects.toThrow("no price is known for nobody/unpriced-model");
   });
 });
 
@@ -87,6 +100,8 @@ describe("EVAL-007 stub self-check (real servers, no spend)", () => {
   test("every stub task's grader passes its good run and fails its bad run", async () => {
     const r = await stubSelfCheck();
     expect(r.note).not.toContain("not separated");
+    expect(r.note).toContain("2 of 20 tasks run end to end on stub models (r5-j1, fail-denied-no-routearound)");
+    expect(r.note).toContain("the other 18 are checked by grader mutation tests only");
     expect(r.value).toBe(2);
     expect(r.passed).toBe(true);
   }, 300_000);

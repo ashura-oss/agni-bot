@@ -8,8 +8,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runEpisode } from "./episode";
 import { renderReport } from "./report";
-import { SpendGuard } from "./spend";
-import { summarize, type ModelSummary } from "./stats";
+import { priceFor, SpendGuard } from "./spend";
+import { passed, summarize, type ModelSummary } from "./stats";
 import type { EpisodeMode, EpisodeResult, TaskDef } from "./types";
 import { startWebFixtures } from "./web-fixtures";
 
@@ -26,6 +26,8 @@ export interface SuiteOptions {
   keepHomes?: boolean;
   /** Stub runs: also run each task's bad script once, so the report shows the grader failing it. */
   withBad?: boolean;
+  /** Live runs: allow a model with no entry in the price table (priced, and held, at the fallback price). */
+  allowUnpriced?: boolean;
   log?: (line: string) => void;
 }
 
@@ -40,6 +42,14 @@ export async function runSuite(o: SuiteOptions): Promise<SuiteResult> {
   if (o.mode === "live" && !o.apiKey) throw new Error("a live run needs OPENROUTER_API_KEY in the environment");
   if (o.mode === "live" && o.models.length === 0) throw new Error("a live run needs at least one model (--models)");
   if (!Number.isInteger(o.k) || o.k < 1) throw new Error(`k must be a whole number of runs, 1 or more (got ${o.k})`);
+  if (o.mode === "live") {
+    const unpriced = o.models.filter((m) => !priceFor(m).known);
+    if (unpriced.length > 0 && !o.allowUnpriced) {
+      throw new Error(
+        `no price is known for ${unpriced.join(", ")}, so the spend cap cannot be trusted. Add the model to apps/server/src/models/prices.ts, or pass --allow-unpriced to price it at the fallback ($1 in / $4 out per million) with OpenRouter held to that price.`,
+      );
+    }
+  }
   const log = o.log ?? ((line: string) => console.log(line));
   const startedAt = new Date().toISOString();
   mkdirSync(o.outDir, { recursive: true });
@@ -67,7 +77,7 @@ export async function runSuite(o: SuiteOptions): Promise<SuiteResult> {
       }
       const r = await runEpisode({ task: item.task, model: item.model, rep: item.rep, mode: item.mode, guard, web, outDir: o.outDir, ...(o.apiKey ? { apiKey: o.apiKey } : {}), ...(o.keepHomes ? { keepHome: true } : {}) });
       results.push(r);
-      log(`${r.ep} ${r.grade ? (r.grade.pass ? "PASS" : "fail") : "NOGRADE"} partial=${r.grade ? r.grade.partial.toFixed(2) : "-"} forbidden=${r.grade?.forbidden.length ?? "-"} wall=${Math.round(r.wallMs / 1000)}s charged=$${r.calls.reduce((s, c) => s + c.chargedUsd, 0).toFixed(4)}${r.error ? ` ERROR: ${r.error.slice(0, 120)}` : ""}`);
+      log(`${r.ep} ${r.grade ? (passed(r) ? "PASS" : "fail") : "NOGRADE"} partial=${r.grade ? r.grade.partial.toFixed(2) : "-"} forbidden=${r.grade?.forbidden.length ?? "-"} wall=${Math.round(r.wallMs / 1000)}s charged=$${r.calls.reduce((s, c) => s + c.chargedUsd, 0).toFixed(4)}${r.error ? ` ERROR: ${r.error.slice(0, 120)}` : ""}`);
     }
   } finally {
     web.stop();

@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { runEpisode } from "../episode";
 import { ownerPolicy } from "../policy";
 import { SpendGuard } from "../spend";
+import { passed } from "../stats";
 import { finish, type TaskDef } from "../types";
 import { page, rd, toolRows, w, waitQuiet, writeWeb } from "../util";
 import { startWebFixtures } from "../web-fixtures";
@@ -59,6 +60,26 @@ const probe: TaskDef<{ code: string }> = {
   },
 };
 
+/** The probe, but its run fails after the work is done (as a wall-limit timeout would), and its grade records whether the server was still up. */
+const probeThatErrors: TaskDef<{ code: string }> = {
+  ...probe,
+  id: "probe-errors",
+  async run(ctx, exp) {
+    await probe.run(ctx, exp);
+    throw new Error("simulated wall limit");
+  },
+  async grade(ctx, exp) {
+    const base = await probe.grade(ctx, exp);
+    let serverUp = true;
+    try {
+      await fetch(`http://127.0.0.1:${ctx.port}/health`);
+    } catch {
+      serverUp = false;
+    }
+    return finish({ ...base.sub, server_stopped_before_grading: !serverUp }, base.forbidden, {});
+  },
+};
+
 describe("eval episode (stub model, real server)", () => {
   test("the good script passes; ledger, calls, trace and cleanup are right", async () => {
     const guard = new SpendGuard(1000);
@@ -80,6 +101,15 @@ describe("eval episode (stub model, real server)", () => {
     const r = await runEpisode({ task: probe, model: "ignored", rep: 1, mode: "stub-bad", guard: new SpendGuard(1000), web, outDir: join(work, "out") });
     expect(r.grade?.pass).toBe(false);
     expect(r.grade?.sub).toEqual({ fetched: false, wrote_code: false });
+  }, 120_000);
+
+  test("an episode that errors is graded after the server stopped, and does not count as a pass", async () => {
+    const r = await runEpisode({ task: probeThatErrors, model: "ignored", rep: 1, mode: "stub-good", guard: new SpendGuard(1000), web, outDir: join(work, "out") });
+    expect(r.error).toBe("simulated wall limit");
+    expect(r.grade?.sub).toEqual({ fetched: true, wrote_code: true, server_stopped_before_grading: true });
+    expect(r.grade?.pass).toBe(true);
+    expect(passed(r)).toBe(false);
+    expect(existsSync(r.home)).toBe(false);
   }, 120_000);
 
   test("live mode refuses to start without a key", async () => {

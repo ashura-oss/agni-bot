@@ -10,6 +10,7 @@
  *   --out DIR          where the report and episodes go (default artifacts/evals/<mode>-<time>).
  *   --keep             keep each episode's throwaway AGNI_HOME.
  *   --bad              stub: also run each task's bad script once.
+ *   --allow-unpriced   live: allow a model with no price-table entry (held to the fallback price).
  *
  * The key is read from the environment and handed to the proxy only; it is
  * never printed or written.
@@ -27,6 +28,7 @@ export interface CliOptions {
   outDir: string;
   keep: boolean;
   bad: boolean;
+  allowUnpriced: boolean;
 }
 
 export function parseArgs(argv: string[], now = Date.now()): CliOptions {
@@ -58,6 +60,7 @@ export function parseArgs(argv: string[], now = Date.now()): CliOptions {
     outDir: value("--out") ?? join("artifacts", "evals", `${mode}-${new Date(now).toISOString().replace(/[:.]/g, "-")}`),
     keep: argv.includes("--keep"),
     bad: argv.includes("--bad"),
+    allowUnpriced: argv.includes("--allow-unpriced"),
   };
 }
 
@@ -84,6 +87,7 @@ if (import.meta.main) {
     ...(opts.mode === "live" && apiKey ? { apiKey } : {}),
     keepHomes: opts.keep,
     withBad: opts.bad,
+    allowUnpriced: opts.allowUnpriced,
   });
   console.log(`\nreport: ${run.reportPath}\ncharged by the spend guard: $${run.spentUsd.toFixed(4)} of $${opts.capUsd.toFixed(2)}`);
 }

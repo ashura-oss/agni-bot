@@ -13,10 +13,14 @@
  * path is answered 404 here and never reaches the provider.
  *
  * Imported from round 5's `proxy.ts`. The request body is passed on as the
- * server built it (model, temperature, limits) except for OpenRouter's
- * `usage: { include: true }`, which makes it report the call's cost.
+ * server built it (model, temperature, limits) with three additions, all on
+ * chat calls: OpenRouter's `usage: { include: true }`, so it reports the
+ * call's cost; `provider.max_price` at the price the spend guard reserved
+ * against, so OpenRouter cannot route the call to a dearer host; and
+ * `max_tokens` only when the server sent no output limit, so every call's
+ * cost is bounded before it is sent.
  */
-import { actualCostUsd, priceFor, worstCaseUsd, type SpendGuard, type Ticket } from "./spend";
+import { actualCostUsd, ASSUMED_MAX_OUTPUT_TOKENS, priceFor, worstCaseUsd, type SpendGuard, type Ticket } from "./spend";
 import type { CallRecord } from "./types";
 
 /** The one path the proxy forwards (as POST): the chat call the server makes. */
@@ -30,6 +34,8 @@ export interface ProxyOptions {
   guard: SpendGuard;
   /** Ask for the provider's cost on chat calls (default true). */
   requestUsage?: boolean;
+  /** Called once per recorded call, after it is in `calls`. */
+  onCall?: (rec: CallRecord) => void;
 }
 
 export interface ProxyHandle {
@@ -92,12 +98,17 @@ export function startProxy(opts: ProxyOptions): ProxyHandle {
         rec.model = typeof body.model === "string" ? body.model : "";
         rec.nMessages = Array.isArray(body.messages) ? body.messages.length : 0;
         rec.hadTools = Array.isArray(body.tools) && body.tools.length > 0;
-        if (Array.isArray(body.messages) && opts.requestUsage !== false) {
-          body.usage = { include: true };
-          bodyText = JSON.stringify(body);
-        }
       }
       const price = priceFor(rec.model);
+      if (body && Array.isArray(body.messages)) {
+        if (opts.requestUsage !== false) body.usage = { include: true };
+        // Bound the call before it is priced: an output limit when the server sent none, and a price ceiling at the
+        // price the guard reserves against, so the provider can never bill above the reservation.
+        if (body.max_tokens === undefined && body.max_completion_tokens === undefined) body.max_tokens = ASSUMED_MAX_OUTPUT_TOKENS;
+        const provider = body.provider && typeof body.provider === "object" && !Array.isArray(body.provider) ? (body.provider as Record<string, unknown>) : {};
+        body.provider = { ...provider, max_price: { prompt: price.inputPerM, completion: price.outputPerM } };
+        bodyText = JSON.stringify(body);
+      }
 
       // The cap is checked before anything is sent. A body that is not JSON is priced as a chat call of its size.
       const worst = worstCaseUsd(body ?? { messages: bodyText }, price);
@@ -120,6 +131,7 @@ export function startProxy(opts: ProxyOptions): ProxyHandle {
           ticket = null;
         }
         calls.push(rec);
+        opts.onCall?.(rec);
       };
 
       let upstream: Response;
