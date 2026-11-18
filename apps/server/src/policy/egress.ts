@@ -82,6 +82,24 @@ export function urlsNamedIn(texts: string[]): Set<string> {
   return urls;
 }
 
+/** The origins the owner wrote: a URL's own origin; a bare host on the default port, in both schemes. */
+export function originsNamedIn(texts: string[]): Set<string> {
+  const origins = new Set<string>();
+  for (const text of texts) {
+    for (const match of text.matchAll(SCHEME_URL)) {
+      const url = normaliseURL(match[0].replace(TRAILING_PUNCTUATION, ""));
+      if (url) origins.add(new URL(url).origin);
+    }
+  }
+  for (const host of hostsNamedIn(texts)) {
+    // A host from a URL with a scheme is already in as that URL's origin; this adds the bare ones.
+    if (texts.some((text) => text.toLowerCase().includes(`://${host}`))) continue;
+    origins.add(`https://${host}`);
+    origins.add(`http://${host}`);
+  }
+  return origins;
+}
+
 /** The host or any subdomain of an entry: only for the owner's approved list, which names whole hosts on purpose. */
 function hostCovered(host: string, named: Iterable<string>): boolean {
   for (const base of named) if (host === base || host.endsWith(`.${base}`)) return true;
@@ -108,8 +126,9 @@ export function ownerNamed(run: Pick<RunContext, "ownerText">, destination: Tool
     const hosts = hostsNamedIn(run.ownerText);
     if (url === null) return hosts.has(host);
     if (urlsNamedIn(run.ownerText).has(url)) return true;
+    // The front page of an origin the owner wrote: same scheme, host and port, no userinfo, no path, no query.
     const parsed = new URL(url);
-    return hosts.has(host) && parsed.pathname === "/" && parsed.search === "";
+    return originsNamedIn(run.ownerText).has(parsed.origin) && parsed.username === "" && parsed.password === "" && parsed.pathname === "/" && parsed.search === "";
   }
   return false;
 }

@@ -28,6 +28,7 @@ import { shareThread } from "../share/document";
 import { scheduleTaskReminder } from "../jobs/task-reminders";
 import { ctxTainted } from "../policy/context";
 import { carryNoteTaint } from "../policy/carry";
+import { normaliseURL } from "../policy/resources";
 
 const objectSchema = (properties: Record<string, unknown>, required: string[]): Record<string, unknown> => ({
   type: "object", properties, required, additionalProperties: false,
@@ -150,7 +151,7 @@ export function buildTaskToolRegistry(db: Database, mailAccounts?: MailAccountRe
   register({
     name: "link_save", description: "Save a link and optional user note.", kind: "static",
     schema: objectSchema({ url: { type: "string", format: "uri", maxLength: 2_048 }, note: { type: "string", maxLength: 2_000 }, tags: { type: "array", maxItems: 20, items: stringProp } }, ["url"]), timeoutMs: 7_000,
-    handler: (args, ctx) => linkSave(db, parseObject(args, (v) => ({ url: boundedString(v.url, 2_048), note: v.note === undefined ? undefined : boundedString(v.note, 2_000), tags: optionalStrings(v.tags) })), ctx.hostAllowed),
+    handler: (args, ctx) => linkSave(db, parseObject(args, (v) => ({ url: judgedURL(v.url), note: v.note === undefined ? undefined : boundedString(v.note, 2_000), tags: optionalStrings(v.tags) })), ctx.hostAllowed),
   });
   register({
     name: "tasks_list", description: "List tasks by status.", kind: "static",
@@ -208,7 +209,7 @@ export function buildTaskToolRegistry(db: Database, mailAccounts?: MailAccountRe
   register({
     name: "web_fetch", description: "Fetch a public web page and extract its title and summary. Uses Firecrawl for JS-rendered pages if configured.", kind: "static",
     schema: objectSchema({ url: { type: "string", format: "uri", maxLength: 2_048 }, maxChars: fetchCharsProp }, ["url"]), timeoutMs: 20_000,
-    handler: async (args, ctx) => webFetch(parseObject(args, (v) => ({ url: boundedString(v.url, 2_048), maxChars: v.maxChars === undefined ? undefined : boundedInteger(v.maxChars, 1, MAX_FETCH_CHARS) })), ctx.hostAllowed),
+    handler: async (args, ctx) => webFetch(parseObject(args, (v) => ({ url: judgedURL(v.url), maxChars: v.maxChars === undefined ? undefined : boundedInteger(v.maxChars, 1, MAX_FETCH_CHARS) })), ctx.hostAllowed),
   });
   register({
     name: "deep_research", description: "Deep research: search the web and fetch top results in parallel, returning compiled findings. Use for research questions needing multiple sources.", kind: "static",
@@ -345,6 +346,8 @@ function parseObject<T>(input: unknown, parse: (value: Record<string, unknown>) 
 }
 function string(value: unknown): string { if (typeof value !== "string" || !value.trim()) throw new Error("expected a non-empty string"); return value.trim(); }
 function boundedString(value: unknown, max: number): string { const result = string(value); if (result.length > max) throw new Error(`string exceeds ${max} characters`); return result; }
+/** A fetch URL as the gate judged it (`assessFetch`): normalised, no fragment. The tool sends this string and nothing else (F3 review). */
+function judgedURL(value: unknown): string { const url = normaliseURL(boundedString(value, 2_048)); if (url === null) throw new Error("url must be an http or https URL"); return url; }
 function number(value: unknown): number { if (typeof value !== "number" || !Number.isFinite(value)) throw new Error("expected a number"); return value; }
 function boolean(value: unknown): boolean { if (typeof value !== "boolean") throw new Error("expected a boolean"); return value; }
 function boundedInteger(value: unknown, min: number, max: number): number { if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) throw new Error(`expected an integer from ${min} to ${max}`); return value; }

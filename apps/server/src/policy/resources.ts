@@ -49,7 +49,6 @@ export function recipientResources(args: Record<string, unknown>): ToolResource[
   return recipientsOf(args).map((value) => ({ kind: "recipient" as const, value }));
 }
 
-/** The host a URL points at, lower-cased and without a trailing dot, or null when it is not a URL. */
 /** A URL as the egress check compares it: http(s) only, no fragment, WHATWG-normalised (host lower-cased, default port dropped). Null when it is not one. */
 export function normaliseURL(raw: string): string | null {
   try {
@@ -62,6 +61,7 @@ export function normaliseURL(raw: string): string | null {
   }
 }
 
+/** The host a URL points at, lower-cased and without a trailing dot, or null when it is not a URL. */
 export function hostOf(raw: string): string | null {
   try {
     const url = new URL(raw);
