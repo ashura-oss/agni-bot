@@ -396,11 +396,3 @@ export function confidenceFloorIsPublished(): EvalResult {
     "items below the floor are not promoted",
   );
 }
-
-/** Skip a provider-backed eval when there is no key. */
-export function providerBacked(id: string, name: string): EvalResult {
-  const hasKey = Boolean(process.env.GROQ_API_KEY || process.env.CEREBRAS_API_KEY || process.env.NVIDIA_API_KEY);
-  return hasKey
-    ? skipped(id, name, "the provider-backed path is not part of the deterministic suite")
-    : skipped(id, name, "no provider key — the provider-backed checks are skipped");
-}
